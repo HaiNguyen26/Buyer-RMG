@@ -1,0 +1,17 @@
+⚠️ QUAN TRỌNG: File .env hiện tại đang dùng format Prisma Accelerate
+
+Bạn cần thay đổi DATABASE_URL thành format PostgreSQL thông thường.
+
+Xóa tất cả nội dung trong file .env và thay bằng:
+
+PORT=5000
+NODE_ENV=development
+DATABASE_URL="postgresql://postgres:Hainguyen261097@localhost:5432/buyer_rmg_dev?schema=public"
+JWT_SECRET=dev_jwt_secret_key_change_in_production
+
+Lưu ý:
+- Xóa các comment và DATABASE_URL cũ (prisma+postgres://...)
+- Dùng format: postgresql://username:password@host:port/database?schema=public
+- Đổi buyer_rmg_dev thành database name bạn đã tạo trong pgAdmin
+
+

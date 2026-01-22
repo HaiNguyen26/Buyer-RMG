@@ -1,0 +1,11 @@
+Tạo file .env trong thư mục server/ với nội dung sau:
+
+PORT=5000
+NODE_ENV=development
+DATABASE_URL="postgresql://postgres:Hainguyen261097@localhost:5432/buyer_rmg_dev?schema=public"
+JWT_SECRET=dev_jwt_secret_key_change_in_production
+
+Lưu file với tên: .env (không có extension)
+
+Lưu ý: Đổi postgres:Hainguyen261097 nếu username/password PostgreSQL của bạn khác.
+

@@ -1,0 +1,780 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// BASE MODEL PATTERN
+// All models should include these fields:
+// - id (UUID)
+// - companyId (Multi-tenant support)
+// - createdAt, updatedAt (Timestamps)
+// - deletedAt (Soft delete)
+// ============================================
+
+// Audit Log Model - Tracks all changes in the system
+model AuditLog {
+  id        String   @id @default(uuid())
+  companyId String?  @map("company_id")
+  tableName String   @map("table_name") // Table that was modified
+  recordId  String   @map("record_id") // ID of the record that was modified
+  action    String // CREATE, UPDATE, DELETE
+  userId    String?  @map("user_id") // User who made the change
+  oldData   Json?    @map("old_data") // Previous state (for UPDATE/DELETE)
+  newData   Json?    @map("new_data") // New state (for CREATE/UPDATE)
+  ipAddress String?  @map("ip_address")
+  userAgent String?  @map("user_agent")
+  createdAt DateTime @default(now()) @map("created_at")
+  User      User?    @relation(fields: [userId], references: [id])
+
+  @@index([companyId])
+  @@index([tableName, recordId])
+  @@index([userId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+// User Model - Updated with BaseModel pattern
+model User {
+  id           String    @id @default(uuid())
+  companyId    String?   @map("company_id") // Multi-tenant support
+  username     String
+  fullName     String?   @map("full_name") // Full name from Excel import
+  email        String
+  passwordHash String    @map("password_hash")
+  role         Role      @default(REQUESTOR)
+  location     String?
+  department   String?   @map("department") // Department for Department Head filtering
+  jobTitle     String?   @map("job_title") // Job title from Excel import
+  directManagerCode String? @map("direct_manager_code") // Employee code of direct manager (for hierarchy)
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+  deletedAt    DateTime? @map("deleted_at") // Soft delete
+
+  // Relations
+  auditLogs           AuditLog[]
+  salesPOs            SalesPO[]           @relation("SalesPOs")
+  purchaseRequests    PurchaseRequest[]   @relation("PurchaseRequests")
+  prApprovals         PRApproval[]        @relation("PRApprovals")
+  prAssignmentsLeader PRAssignment[]      @relation("PRAssignmentsLeader")
+  prAssignmentsBuyer  PRAssignment[]      @relation("PRAssignmentsBuyer")
+  rfqs                RFQ[]               @relation("RFQs")
+  supplierSelections  SupplierSelection[] @relation("SupplierSelections")
+  budgetExceptions    BudgetException[]   @relation("BudgetExceptions")
+  notifications       Notification[]      @relation("Notifications")
+  branchDirector      Branch[]            @relation("BranchDirectors")
+  importHistories     ImportHistory[]     @relation("ImportHistories")
+
+  @@unique([username, companyId]) // Unique username per company
+  @@unique([email, companyId]) // Unique email per company
+  @@index([companyId])
+  @@index([deletedAt])
+  @@index([role])
+  @@map("users")
+}
+
+enum Role {
+  REQUESTOR           // Người yêu cầu PR
+  DEPARTMENT_HEAD     // Trưởng phòng và Trưởng nhóm (gộp DEPT_MANAGER)
+  BRANCH_MANAGER      // Giám đốc chi nhánh
+  BRANCH_DIRECTOR     // Giám đốc chi nhánh (alias, map từ Excel)
+  BUYER               // Nhân viên mua hàng
+  BUYER_LEADER        // Trưởng nhóm mua hàng
+  BUYER_MANAGER       // Trưởng phòng mua hàng
+  ACCOUNTANT          // Kế toán
+  WAREHOUSE           // Kho
+  BGD                 // Tổng giám đốc (BOD)
+  SYSTEM_ADMIN        // Quản trị viên hệ thống
+}
+
+// Permission Matrix - RBAC
+model Permission {
+  id          String   @id @default(uuid())
+  resource    String // e.g., "purchase_request", "purchase_order", "supplier"
+  action      String // e.g., "create", "read", "update", "delete", "approve"
+  description String?
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  rolePermissions RolePermission[]
+
+  @@unique([resource, action])
+  @@index([resource])
+  @@map("permissions")
+}
+
+model RolePermission {
+  id           String   @id @default(uuid())
+  role         Role
+  permissionId String   @map("permission_id")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  // Relations
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@unique([role, permissionId])
+  @@index([role])
+  @@index([permissionId])
+  @@map("role_permissions")
+}
+
+// Customer Model - Khách hàng
+model Customer {
+  id            String    @id @default(uuid())
+  companyId     String?   @map("company_id")
+  name          String
+  code          String? // Mã khách hàng
+  email         String?
+  phone         String?
+  address       String?
+  taxCode       String?   @map("tax_code")
+  contactPerson String?   @map("contact_person")
+  notes         String?
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+  deletedAt     DateTime? @map("deleted_at")
+
+  // Relations
+  salesPOs SalesPO[]
+
+  @@index([companyId])
+  @@index([deletedAt])
+  @@map("customers")
+}
+
+// Sales PO Model - PO từ khách hàng (nguồn ngân sách dự án)
+model SalesPO {
+  id            String        @id @default(uuid())
+  companyId     String?       @map("company_id")
+  salesPONumber String        @unique @map("sales_po_number") // Số Sales PO
+  customerId    String        @map("customer_id")
+  projectName   String?       @map("project_name") // Tên dự án
+  projectCode   String?       @map("project_code") // Mã dự án
+  amount        Decimal       @db.Decimal(15, 2) // Giá trị PO
+  currency      String        @default("VND")
+  effectiveDate DateTime      @map("effective_date") // Ngày hiệu lực
+  status        SalesPOStatus @default(ACTIVE)
+  salesUserId   String?       @map("sales_user_id") // Sales tạo PO này
+  notes         String?
+  createdAt     DateTime      @default(now()) @map("created_at")
+  updatedAt     DateTime      @updatedAt @map("updated_at")
+  deletedAt     DateTime?     @map("deleted_at")
+
+  // Relations
+  customer  Customer @relation(fields: [customerId], references: [id])
+  salesUser User?    @relation("SalesPOs", fields: [salesUserId], references: [id])
+
+  @@index([companyId])
+  @@index([customerId])
+  @@index([status])
+  @@index([deletedAt])
+  @@index([salesUserId])
+  @@map("sales_pos")
+}
+
+enum SalesPOStatus {
+  DRAFT
+  ACTIVE
+  CLOSED
+}
+
+// Purchase Request Model - Yêu cầu mua hàng nội bộ
+model PurchaseRequest {
+  id             String    @id @default(uuid())
+  companyId      String?   @map("company_id")
+  prNumber       String    @unique @map("pr_number")
+  requestorId    String    @map("requestor_id")
+  department     String?   @map("department")
+  itemName       String    @map("item_name")
+  specifications String?
+  quantity       Decimal   @db.Decimal(10, 2)
+  unit           String?
+  requiredDate   DateTime? @map("required_date")
+  purpose        String?
+  location       String?
+  type           PRType    @default(PRODUCTION) // Loại PR: Thương mại / Sản xuất
+  status         PRStatus  @default(DRAFT)
+  currency       String    @default("VND") // Tiền tệ
+  tax            Decimal?  @db.Decimal(5, 2) // VAT %
+  totalAmount    Decimal?  @map("total_amount") @db.Decimal(15, 2) // Tổng giá PR (sau thuế)
+  supplierId     String?   @map("supplier_id") // NCC đã chọn cuối cùng
+  notes          String?
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+  deletedAt      DateTime? @map("deleted_at")
+
+  // Relations
+  requestor          User                  @relation("PurchaseRequests", fields: [requestorId], references: [id])
+  supplier           Supplier?             @relation(fields: [supplierId], references: [id])
+  payments           Payment[]
+  items              PurchaseRequestItem[]
+  approvals          PRApproval[]
+  assignments        PRAssignment[]
+  rfqs               RFQ[]
+  budgetExceptions   BudgetException[]
+  supplierSelections SupplierSelection[]   @relation("SupplierSelections")
+
+  @@index([companyId])
+  @@index([requestorId])
+  @@index([status])
+  @@index([type])
+  @@index([deletedAt])
+  @@map("purchase_requests")
+}
+
+enum PRType {
+  MATERIAL   // Vật tư
+  SERVICE    // Dịch vụ
+  COMMERCIAL // PR Thương mại
+  PRODUCTION // PR Sản xuất (Legacy - sẽ migrate sang MATERIAL/SERVICE/COMMERCIAL)
+}
+
+model PurchaseRequestItem {
+  id                String    @id @default(uuid())
+  companyId         String?   @map("company_id")
+  purchaseRequestId String    @map("purchase_request_id")
+  lineNo            Int       @map("line_no")
+  description       String
+  partNo            String?   @map("part_no")
+  spec              String?
+  manufacturer      String?
+  qty               Decimal   @db.Decimal(10, 2)
+  unit              String?
+  unitPrice         Decimal?  @map("unit_price") @db.Decimal(15, 2) // Giá đơn vị
+  amount            Decimal?  @db.Decimal(15, 2) // Tổng tiền = qty * unitPrice
+  purpose           String?
+  remark            String?
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+  deletedAt         DateTime? @map("deleted_at")
+
+  // Relations
+  purchaseRequest PurchaseRequest @relation(fields: [purchaseRequestId], references: [id])
+  quotationItems  QuotationItem[]
+
+  @@index([companyId])
+  @@index([purchaseRequestId])
+  @@index([deletedAt])
+  @@map("purchase_request_items")
+}
+
+enum PRStatus {
+  DRAFT
+  SUBMITTED // Requestor đã submit (legacy)
+  APPROVED_BY_BRANCH // Legacy - sẽ được migrate sang BRANCH_MANAGER_APPROVED
+  DEPARTMENT_HEAD_PENDING // Legacy - sẽ được migrate sang MANAGER_PENDING
+  DEPARTMENT_HEAD_APPROVED // Legacy - sẽ được migrate sang MANAGER_APPROVED
+  DEPARTMENT_HEAD_REJECTED // Legacy - sẽ được migrate sang MANAGER_REJECTED
+  DEPARTMENT_HEAD_RETURNED // Legacy - sẽ được migrate sang MANAGER_RETURNED
+  MANAGER_PENDING // Chờ quản lý trực tiếp duyệt
+  MANAGER_APPROVED // Quản lý trực tiếp đã duyệt
+  MANAGER_REJECTED // Quản lý trực tiếp từ chối
+  MANAGER_RETURNED // Quản lý trực tiếp trả về
+  BRANCH_MANAGER_PENDING // Chờ GĐ Chi nhánh duyệt
+  BRANCH_MANAGER_APPROVED // Legacy - sẽ được migrate sang BUYER_LEADER_PENDING
+  BRANCH_MANAGER_REJECTED // GĐ Chi nhánh từ chối
+  BRANCH_MANAGER_RETURNED // GĐ Chi nhánh trả về
+  BUYER_LEADER_PENDING // Đã duyệt, chờ Buyer Leader phân công
+  NEED_MORE_INFO
+  ASSIGNED_TO_BUYER // Buyer Leader đã phân công
+  RFQ_IN_PROGRESS // Buyer đang hỏi giá
+  QUOTATION_RECEIVED // Đã nhận đủ báo giá
+  SUPPLIER_SELECTED // Buyer Leader đã chọn NCC
+  BUDGET_EXCEPTION // Vượt ngân sách, chờ GĐ CN xử lý
+  BUDGET_APPROVED // GĐ CN chấp nhận vượt ngân sách
+  BUDGET_REJECTED // GĐ CN từ chối/từ chối vượt ngân sách
+  PAYMENT_DONE // Đã Payment DONE
+  CANCELLED
+}
+
+// Supplier Model - Nhà cung cấp
+model Supplier {
+  id            String    @id @default(uuid())
+  companyId     String?   @map("company_id")
+  name          String
+  code          String?
+  email         String?
+  phone         String?
+  address       String?
+  taxCode       String?   @map("tax_code")
+  contactPerson String?   @map("contact_person")
+  notes         String?
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+  deletedAt     DateTime? @map("deleted_at")
+
+  // Relations
+  purchaseRequests PurchaseRequest[]
+  quotations       Quotation[]
+
+  @@index([companyId])
+  @@index([deletedAt])
+  @@map("suppliers")
+}
+
+// Payment Model - Thanh toán
+model Payment {
+  id                String        @id @default(uuid())
+  companyId         String?       @map("company_id")
+  purchaseRequestId String        @map("purchase_request_id")
+  amount            Decimal       @db.Decimal(15, 2)
+  currency          String        @default("VND")
+  paymentDate       DateTime?     @map("payment_date")
+  status            PaymentStatus @default(PENDING)
+  paymentMethod     String?       @map("payment_method")
+  referenceNumber   String?       @map("reference_number")
+  notes             String?
+  createdAt         DateTime      @default(now()) @map("created_at")
+  updatedAt         DateTime      @updatedAt @map("updated_at")
+  deletedAt         DateTime?     @map("deleted_at")
+
+  // Relations
+  purchaseRequest PurchaseRequest @relation(fields: [purchaseRequestId], references: [id])
+
+  @@index([companyId])
+  @@index([purchaseRequestId])
+  @@index([status])
+  @@index([deletedAt])
+  @@map("payments")
+}
+
+enum PaymentStatus {
+  PENDING
+  DONE
+  CANCELLED
+}
+
+// PR Approval Model - Duyệt PR bởi Giám đốc Chi nhánh
+model PRApproval {
+  id                String         @id @default(uuid())
+  companyId         String?        @map("company_id")
+  purchaseRequestId String         @map("purchase_request_id")
+  approverId        String         @map("approver_id") // Giám đốc Chi nhánh
+  action            ApprovalAction // APPROVE, REJECT, RETURN
+  comment           String? // Ghi chú / lý do
+  createdAt         DateTime       @default(now()) @map("created_at")
+
+  // Relations
+  purchaseRequest PurchaseRequest @relation(fields: [purchaseRequestId], references: [id])
+  approver        User            @relation("PRApprovals", fields: [approverId], references: [id])
+
+  @@index([companyId])
+  @@index([purchaseRequestId])
+  @@index([approverId])
+  @@index([createdAt])
+  @@map("pr_approvals")
+}
+
+enum ApprovalAction {
+  APPROVE
+  REJECT
+  RETURN
+}
+
+// PR Assignment Model - Buyer Leader phân công PR cho Buyer
+model PRAssignment {
+  id                String          @id @default(uuid())
+  companyId         String?         @map("company_id")
+  purchaseRequestId String          @map("purchase_request_id")
+  buyerLeaderId     String          @map("buyer_leader_id")
+  buyerId           String          @map("buyer_id")
+  scope             AssignmentScope @default(FULL) // FULL hoặc PARTIAL
+  assignedItemIds   String?         @map("assigned_item_ids") // JSON array of item IDs nếu PARTIAL
+  note              String // Note phân công bắt buộc
+  createdAt         DateTime        @default(now()) @map("created_at")
+  updatedAt         DateTime        @updatedAt @map("updated_at")
+  deletedAt         DateTime?       @map("deleted_at")
+
+  // Relations
+  purchaseRequest PurchaseRequest @relation(fields: [purchaseRequestId], references: [id])
+  buyerLeader     User            @relation("PRAssignmentsLeader", fields: [buyerLeaderId], references: [id])
+  buyer           User            @relation("PRAssignmentsBuyer", fields: [buyerId], references: [id])
+
+  @@index([companyId])
+  @@index([purchaseRequestId])
+  @@index([buyerId])
+  @@index([buyerLeaderId])
+  @@index([deletedAt])
+  @@map("pr_assignments")
+}
+
+enum AssignmentScope {
+  FULL // Mua toàn bộ PR
+  PARTIAL // Mua các item cụ thể
+}
+
+// RFQ Model - Request for Quotation
+model RFQ {
+  id                String    @id @default(uuid())
+  companyId         String?   @map("company_id")
+  purchaseRequestId String    @map("purchase_request_id")
+  rfqNumber         String    @unique @map("rfq_number") // RFQ-YYYY-###
+  buyerId           String    @map("buyer_id")
+  status            RFQStatus @default(DRAFT)
+  sentDate          DateTime? @map("sent_date")
+  notes             String?
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+  deletedAt         DateTime? @map("deleted_at")
+
+  // Relations
+  purchaseRequest PurchaseRequest @relation(fields: [purchaseRequestId], references: [id])
+  buyer           User            @relation("RFQs", fields: [buyerId], references: [id])
+  quotations      Quotation[]
+
+  @@index([companyId])
+  @@index([purchaseRequestId])
+  @@index([buyerId])
+  @@index([status])
+  @@index([deletedAt])
+  @@map("rfqs")
+}
+
+enum RFQStatus {
+  DRAFT
+  SENT
+  QUOTATION_RECEIVED
+  CLOSED
+}
+
+// Quotation Model - Báo giá từ NCC
+model Quotation {
+  id                  String          @id @default(uuid())
+  companyId           String?         @map("company_id")
+  rfqId               String          @map("rfq_id")
+  supplierId          String          @map("supplier_id")
+  quotationNumber     String?         @map("quotation_number") // Số báo giá từ NCC
+  totalAmount         Decimal         @map("total_amount") @db.Decimal(15, 2)
+  currency            String          @default("VND")
+  leadTime            Int?            @map("lead_time") // Số ngày giao hàng
+  deliveryTerms       String?         @map("delivery_terms") // Điều kiện giao hàng
+  paymentTerms        String?         @map("payment_terms") // Điều kiện thanh toán
+  warranty            String? // Bảo hành / hậu mãi
+  riskNotes           String?         @map("risk_notes") // Ghi chú rủi ro
+  validUntil          DateTime?       @map("valid_until")
+  status              QuotationStatus @default(PENDING)
+  isRecommended       Boolean         @default(false) @map("is_recommended") // Hệ thống recommend
+  recommendationScore Decimal?        @map("recommendation_score") @db.Decimal(10, 2) // Điểm recommend
+  createdAt           DateTime        @default(now()) @map("created_at")
+  updatedAt           DateTime        @updatedAt @map("updated_at")
+  deletedAt           DateTime?       @map("deleted_at")
+
+  // Relations
+  rfq               RFQ                @relation(fields: [rfqId], references: [id])
+  supplier          Supplier           @relation(fields: [supplierId], references: [id])
+  items             QuotationItem[]
+  supplierSelection SupplierSelection?
+
+  @@index([companyId])
+  @@index([rfqId])
+  @@index([supplierId])
+  @@index([status])
+  @@index([deletedAt])
+  @@map("quotations")
+}
+
+enum QuotationStatus {
+  PENDING
+  VALID
+  INVALID
+  SELECTED
+}
+
+// Quotation Item Model - Chi tiết báo giá
+model QuotationItem {
+  id                    String    @id @default(uuid())
+  companyId             String?   @map("company_id")
+  quotationId           String    @map("quotation_id")
+  purchaseRequestItemId String?   @map("purchase_request_item_id") // Link với PR item
+  lineNo                Int       @map("line_no")
+  description           String
+  qty                   Decimal   @db.Decimal(10, 2)
+  unit                  String?
+  unitPrice             Decimal   @map("unit_price") @db.Decimal(15, 2)
+  totalPrice            Decimal   @map("total_price") @db.Decimal(15, 2)
+  notes                 String?
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
+  deletedAt             DateTime? @map("deleted_at")
+
+  // Relations
+  quotation           Quotation            @relation(fields: [quotationId], references: [id])
+  purchaseRequestItem PurchaseRequestItem? @relation(fields: [purchaseRequestItemId], references: [id])
+
+  @@index([companyId])
+  @@index([quotationId])
+  @@index([purchaseRequestItemId])
+  @@index([deletedAt])
+  @@map("quotation_items")
+}
+
+// Supplier Selection Model - Buyer Leader chọn NCC cuối
+model SupplierSelection {
+  id                String   @id @default(uuid())
+  companyId         String?  @map("company_id")
+  purchaseRequestId String   @map("purchase_request_id")
+  quotationId       String   @unique @map("quotation_id") // Quotation được chọn
+  buyerLeaderId     String   @map("buyer_leader_id")
+  selectionReason   String   @map("selection_reason") // Lý do chọn (bắt buộc)
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  // Relations
+  purchaseRequest PurchaseRequest @relation("SupplierSelections", fields: [purchaseRequestId], references: [id])
+  quotation       Quotation       @relation(fields: [quotationId], references: [id])
+  buyerLeader     User            @relation("SupplierSelections", fields: [buyerLeaderId], references: [id])
+
+  @@index([companyId])
+  @@index([purchaseRequestId])
+  @@index([quotationId])
+  @@index([buyerLeaderId])
+  @@map("supplier_selections")
+}
+
+// Budget Exception Model - Xử lý vượt ngân sách
+model BudgetException {
+  id                String                 @id @default(uuid())
+  companyId         String?                @map("company_id")
+  purchaseRequestId String                 @map("purchase_request_id")
+  prAmount          Decimal                @map("pr_amount") @db.Decimal(15, 2) // Giá PR
+  purchaseAmount    Decimal                @map("purchase_amount") @db.Decimal(15, 2) // Giá mua NCC
+  overPercent       Decimal                @map("over_percent") @db.Decimal(5, 2) // % vượt
+  status            BudgetExceptionStatus  @default(PENDING)
+  branchManagerId   String?                @map("branch_manager_id")
+  action            BudgetExceptionAction? // APPROVE, REJECT, REQUEST_NEGOTIATION
+  comment           String? // Comment từ GĐ CN
+  createdAt         DateTime               @default(now()) @map("created_at")
+  updatedAt         DateTime               @updatedAt @map("updated_at")
+
+  // Relations
+  purchaseRequest PurchaseRequest @relation(fields: [purchaseRequestId], references: [id])
+  branchManager   User?           @relation("BudgetExceptions", fields: [branchManagerId], references: [id])
+
+  @@index([companyId])
+  @@index([purchaseRequestId])
+  @@index([status])
+  @@index([branchManagerId])
+  @@map("budget_exceptions")
+}
+
+enum BudgetExceptionStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  NEGOTIATION_REQUESTED
+}
+
+enum BudgetExceptionAction {
+  APPROVE
+  REJECT
+  REQUEST_NEGOTIATION
+}
+
+// Notification Model - Thông báo real-time cho từng role
+model Notification {
+  id          String             @id @default(uuid())
+  companyId   String?            @map("company_id")
+  userId      String             @map("user_id") // Người nhận thông báo
+  role        String // Role của người nhận (REQUESTOR, BUYER, BUYER_LEADER, etc.)
+  type        NotificationType // Loại thông báo
+  title       String // Tiêu đề
+  message     String // Nội dung
+  status      NotificationStatus @default(UNREAD) // UNREAD, READ, RESOLVED
+  relatedId   String?            @map("related_id") // ID liên quan (PR ID, etc.)
+  relatedType String?            @map("related_type") // Loại liên quan (PR, PO, etc.)
+  metadata    Json? // Dữ liệu bổ sung (PR number, etc.)
+  readAt      DateTime?          @map("read_at")
+  resolvedAt  DateTime?          @map("resolved_at")
+  createdAt   DateTime           @default(now()) @map("created_at")
+  updatedAt   DateTime           @updatedAt @map("updated_at")
+  deletedAt   DateTime?          @map("deleted_at")
+
+  // Relations
+  user User @relation("Notifications", fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([role])
+  @@index([status])
+  @@index([relatedId, relatedType])
+  @@index([createdAt])
+  @@map("notifications")
+}
+
+enum NotificationType {
+  // REQUESTOR
+  PR_DEPARTMENT_HEAD_APPROVED
+  PR_BRANCH_MANAGER_APPROVED
+  PR_RETURNED
+  PR_OVER_BUDGET
+
+  // DEPARTMENT_HEAD
+  PR_PENDING_APPROVAL
+  PR_RETURNED_FROM_BRANCH
+  PR_OVER_BUDGET_INFO
+
+  // BUYER_LEADER
+  PR_READY_FOR_ASSIGNMENT
+  PR_QUOTATIONS_COMPLETE
+  PR_OVER_BUDGET_ACTION_REQUIRED
+  PR_RETURNED_FROM_BRANCH_MANAGER
+
+  // BUYER
+  PR_ASSIGNED
+  PR_RETURNED_FOR_REQUOTE
+  RFQ_REQUIRED
+
+  // BRANCH_MANAGER
+  PR_PENDING_APPROVAL_BRANCH
+  PR_OVER_BUDGET_DECISION_REQUIRED
+}
+
+enum NotificationStatus {
+  UNREAD
+  READ
+  RESOLVED
+}
+
+// Branch Model - Chi nhánh công ty
+model Branch {
+  id              String    @id @default(uuid())
+  companyId       String?   @map("company_id")
+  branchCode      String    @unique @map("branch_code") // HCM, HN, DN...
+  branchName      String    @map("branch_name")
+  branchDirectorId String?  @map("branch_director_id") // User ID của Branch Director
+  status          Boolean   @default(true)
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+  deletedAt       DateTime? @map("deleted_at")
+
+  // Relations
+  branchDirector User?           @relation("BranchDirectors", fields: [branchDirectorId], references: [id])
+  departments    Department[]
+  approvalRules  ApprovalRule[]  @relation
+  branchApprovalRule BranchApprovalRule?
+
+  @@index([companyId])
+  @@index([branchCode])
+  @@index([deletedAt])
+  @@index([branchDirectorId])
+  @@map("branches")
+}
+
+// Branch Approval Rule Model - Quy tắc duyệt cấp 2 theo Chi nhánh (rút gọn)
+// Approval Config chỉ quyết định CÓ / KHÔNG duyệt cấp 2 (BRANCH_MANAGER)
+model BranchApprovalRule {
+  id                        String    @id @default(uuid())
+  companyId                 String?   @map("company_id")
+  branchId                  String    @unique @map("branch_id")
+  branchCode                String    @map("branch_code") // Snapshot cho dễ đọc/log
+  needBranchManagerApproval Boolean   @default(true) @map("need_branch_manager_approval") // YES/NO
+  note                      String?   @map("note")
+  updatedBy                 String?   @map("updated_by") // User ID
+  updatedAt                 DateTime  @updatedAt @map("updated_at")
+  createdAt                 DateTime  @default(now()) @map("created_at")
+  deletedAt                 DateTime? @map("deleted_at")
+
+  // Relations
+  branch Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  @@index([companyId])
+  @@index([branchCode])
+  @@index([deletedAt])
+  @@map("branch_approval_rules")
+}
+
+// Department Model - Phòng ban
+model Department {
+  id              String          @id @default(uuid())
+  companyId       String?         @map("company_id")
+  departmentCode  String          @unique @map("department_code") // PROD, ENG, HR...
+  departmentName  String          @map("department_name")
+  branchId        String?         @map("branch_id")
+  status          Boolean         @default(true)
+  note            String?
+  createdAt       DateTime        @default(now()) @map("created_at")
+  updatedAt       DateTime        @updatedAt @map("updated_at")
+  deletedAt       DateTime?       @map("deleted_at")
+
+  // Relations
+  branch        Branch?          @relation(fields: [branchId], references: [id])
+  approvalRules ApprovalRule[]   @relation("ApprovalRules")
+
+  @@index([companyId])
+  @@index([departmentCode])
+  @@index([deletedAt])
+  @@index([branchId])
+  @@map("departments")
+}
+
+// Approval Rule Model - Quy tắc duyệt PR
+model ApprovalRule {
+  id                      String    @id @default(uuid())
+  companyId               String?   @map("company_id")
+  departmentCode          String    @map("department_code") // From Excel - department code
+  departmentId            String?   @map("department_id") // Reference to Department.id
+  branchId                String?   @map("branch_id")
+  prType                  PRType    @map("pr_type") // MATERIAL, SERVICE, COMMERCIAL - Business configuration
+  needBranchManager       Boolean   @default(false) @map("need_branch_manager") // YES/NO - Does this department need BRANCH_MANAGER approval?
+  status                  Boolean   @default(true)
+  updatedBy               String?   @map("updated_by") // User ID
+  updatedAt               DateTime  @updatedAt @map("updated_at")
+  createdAt               DateTime  @default(now()) @map("created_at")
+  deletedAt               DateTime? @map("deleted_at")
+  
+  // Note: KHÔNG lưu employee_code, KHÔNG gán tên người duyệt
+  // Người duyệt được xác định tự động dựa trên:
+  // - Cấp 1: direct_manager_code của Requestor
+  // - Cấp 2: BRANCH_MANAGER trong branch_code của Requestor (nếu needBranchManager = YES)
+
+  // Relations
+  department Department? @relation("ApprovalRules", fields: [departmentId], references: [id])
+  branch      Branch?    @relation(fields: [branchId], references: [id])
+
+  @@unique([departmentCode, prType, companyId])
+  @@index([companyId])
+  @@index([departmentCode])
+  @@index([departmentId])
+  @@index([branchId])
+  @@index([status])
+  @@index([deletedAt])
+  @@map("approval_rules")
+}
+
+// Import History Model - Lịch sử import Excel
+model ImportHistory {
+  id          String            @id @default(uuid())
+  companyId   String?           @map("company_id")
+  fileName    String            @map("file_name")
+  importType  ImportType        @map("import_type") // EMPLOYEE, DEPT, RULE
+  importedBy  String            @map("imported_by") // User ID
+  success     Int               @default(0)
+  failed      Int               @default(0)
+  errorFileUrl String?          @map("error_file_url") // URL file lỗi
+  errors      Json?             // Array of errors
+  importedAt  DateTime          @default(now()) @map("imported_at")
+
+  // Relations
+  importer User @relation("ImportHistories", fields: [importedBy], references: [id])
+
+  @@index([companyId])
+  @@index([importType])
+  @@index([importedBy])
+  @@index([importedAt])
+  @@map("import_histories")
+}
+
+enum ImportType {
+  EMPLOYEE
+  DEPT
+  RULE
+}
+
+// Update User model to add relations
+// Already exists, just need to add new relations
