@@ -50,6 +50,50 @@ npm install
   - Optional: S3/Sentry nếu dùng
 - Frontend: tạo `client/.env` (nếu cần cấu hình API)
 
+### .env mẫu
+**server/.env**
+```
+DATABASE_URL="postgresql://buyer_rmg:Hainguyen261097@localhost:5432/buyer_rmg?schema=public"
+JWT_SECRET="change_this_secret"
+SENTRY_DSN=""
+S3_ACCESS_KEY_ID=""
+S3_SECRET_ACCESS_KEY=""
+S3_REGION=""
+S3_BUCKET=""
+```
+
+**client/.env**
+```
+VITE_API_BASE_URL=http://127.0.0.1:5000
+```
+
+## Hướng dẫn DB chi tiết (PostgreSQL)
+1) Tạo user & database
+
+**PowerShell (Windows)**
+```
+psql -U postgres -c "CREATE USER buyer_rmg WITH PASSWORD 'Hainguyen261097';"
+psql -U postgres -c "CREATE DATABASE buyer_rmg OWNER buyer_rmg;"
+```
+
+**Git Bash**
+```
+psql -U postgres -c "CREATE USER buyer_rmg WITH PASSWORD 'Hainguyen261097';"
+psql -U postgres -c "CREATE DATABASE buyer_rmg OWNER buyer_rmg;"
+```
+
+2) Cập nhật `DATABASE_URL` trong `server/.env`
+```
+DATABASE_URL="postgresql://buyer_rmg:Hainguyen261097@localhost:5432/buyer_rmg?schema=public"
+```
+
+3) Chạy Prisma
+```
+cd server
+npx prisma generate
+npx prisma migrate deploy
+```
+
 5) Prisma
 ```
 cd ../server
