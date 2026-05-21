@@ -1,32 +1,33 @@
 import { useState, useRef } from 'react';
 import { useNavigate, useLocation, Outlet } from 'react-router-dom';
-import { useCurrentUser, useLogout } from '../hooks/useAuth';
+import { useCurrentUser } from '../hooks/useAuth';
 import {
-    Menu,
     LayoutDashboard,
     Users,
     Settings,
     Building2,
     Upload,
     Bell,
-    Search,
-    User,
-    LogOut,
-    X,
     FileText,
-    Shield,
 } from 'lucide-react';
-import LogoRMG from '../assets/LogoRMG.png';
 import DashboardHeader from '../components/DashboardHeader';
+import { StandardDashboardSidebar } from '../components/StandardDashboardSidebar';
+import { useMobileDashboardNav, mainMarginForSidebar240 } from '../hooks/useMobileDashboardNav';
+import {
+    dashboardMainHorizontalBleedClass,
+    dashboardMainOutletClass,
+    dashboardMainScrollableClass,
+} from '../constants/dashboardLayout';
 
 const SystemAdminDashboard = () => {
     const { data: user, isLoading } = useCurrentUser();
-    const logout = useLogout();
     const navigate = useNavigate();
     const location = useLocation();
     const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
     const [searchQuery, setSearchQuery] = useState('');
     const mainContentRef = useRef<HTMLElement>(null);
+    const contentScrollRef = useRef<HTMLDivElement>(null);
+    const { mobileNavOpen, toggleMobileNav, closeMobileNav } = useMobileDashboardNav();
 
     if (isLoading) {
         return (
@@ -43,56 +44,56 @@ const SystemAdminDashboard = () => {
         {
             title: 'Tổng quan',
             items: [
-                { icon: LayoutDashboard, label: 'System Overview', path: '/dashboard/system-admin', active: true },
+                { icon: LayoutDashboard, label: 'Tổng quan hệ thống', path: '/dashboard/system-admin' },
             ],
         },
         {
             title: 'Quản trị',
             items: [
-                { icon: Users, label: 'User Management', path: '/dashboard/system-admin/users', active: false },
-                { icon: FileText, label: 'Approval Config', path: '/dashboard/system-admin/approval-config', active: false },
-                { icon: Building2, label: 'Organization', path: '/dashboard/system-admin/organization', active: false },
+                { icon: Users, label: 'Quản lý người dùng', path: '/dashboard/system-admin/users' },
+                { icon: FileText, label: 'Cấu hình duyệt', path: '/dashboard/system-admin/approval-config' },
+                { icon: Building2, label: 'Tổ chức', path: '/dashboard/system-admin/organization' },
             ],
         },
         {
             title: 'Dữ liệu',
             items: [
-                { icon: Upload, label: 'Import Center', path: '/dashboard/system-admin/import', active: false },
+                { icon: Upload, label: 'Trung tâm import', path: '/dashboard/system-admin/import' },
             ],
         },
         {
             title: 'Hệ thống',
             items: [
-                { icon: Settings, label: 'System Settings', path: '/dashboard/system-admin/settings', active: false },
-                { icon: Bell, label: 'Notifications', path: '/dashboard/system-admin/notifications', active: false },
+                { icon: Settings, label: 'Cài đặt hệ thống', path: '/dashboard/system-admin/settings' },
+                { icon: Bell, label: 'Thông báo', path: '/dashboard/system-admin/notifications' },
             ],
         },
     ];
 
-    const getGreeting = () => {
-        const hour = new Date().getHours();
-        if (hour < 12) return 'Chào buổi sáng';
-        if (hour < 18) return 'Chào buổi chiều';
-        return 'Chào buổi tối';
+    const isActive = (path: string) => {
+        if (path === '/dashboard/system-admin') {
+            return location.pathname === '/dashboard/system-admin';
+        }
+        return location.pathname.startsWith(path);
     };
 
     const getPageTitle = () => {
         if (location.pathname === '/dashboard/system-admin') {
-            return 'System Overview';
+            return 'Tổng quan hệ thống';
         } else if (location.pathname.includes('/users')) {
-            return 'User Management';
+            return 'Quản lý người dùng';
         } else if (location.pathname.includes('/approval-config')) {
-            return 'Approval Configuration';
+            return 'Cấu hình duyệt';
         } else if (location.pathname.includes('/organization')) {
-            return 'Organization Management';
+            return 'Quản lý tổ chức';
         } else if (location.pathname.includes('/import')) {
-            return 'Import Center';
+            return 'Trung tâm import';
         } else if (location.pathname.includes('/settings')) {
-            return 'System Settings';
+            return 'Cài đặt hệ thống';
         } else if (location.pathname.includes('/notifications')) {
-            return 'Notifications';
+            return 'Thông báo';
         }
-        return 'System Overview';
+        return 'Tổng quan hệ thống';
     };
 
     const getPageSubtitle = () => {
@@ -111,134 +112,48 @@ const SystemAdminDashboard = () => {
     };
 
     return (
-        <div className="min-h-screen bg-[#F1F5F9] flex">
-            {/* Sidebar */}
-            <aside
-                className={`bg-[#0F172A] text-white transition-all duration-300 flex flex-col ${
-                    sidebarCollapsed ? 'w-16' : 'w-64'
-                }`}
-            >
-                {/* Logo & Collapse */}
-                <div className="p-4 border-b border-slate-700/50 flex items-center justify-between">
-                    {!sidebarCollapsed && (
-                        <div className="flex items-center gap-3">
-                            <img src={LogoRMG} alt="RMG Logo" className="h-8 w-auto" />
-                            <div>
-                                <h2 className="text-sm font-bold text-white">System Admin</h2>
-                                <p className="text-xs text-slate-400">Quản trị hệ thống</p>
-                            </div>
-                        </div>
-                    )}
-                    {sidebarCollapsed && (
-                        <div className="w-full flex justify-center">
-                            <Shield className="w-6 h-6 text-indigo-400" />
-                        </div>
-                    )}
-                    {!sidebarCollapsed && (
-                        <button
-                            onClick={() => setSidebarCollapsed(true)}
-                            className="p-1 hover:bg-white/10 rounded-lg transition-colors"
-                            title="Thu gọn"
-                        >
-                            <X className="w-4 h-4 text-slate-300" />
-                        </button>
-                    )}
-                    {sidebarCollapsed && (
-                        <button
-                            onClick={() => setSidebarCollapsed(false)}
-                            className="p-2 hover:bg-white/10 rounded-lg transition-colors"
-                            title="Mở rộng"
-                        >
-                            <Menu className="w-5 h-5 text-white" />
-                        </button>
-                    )}
-                </div>
+        <div
+            className="flex h-[100dvh] max-h-[100dvh] flex-col overflow-hidden bg-[#F1F5F9]"
+            style={{ minHeight: '100dvh' }}
+        >
+            {mobileNavOpen ? (
+                <button
+                    type="button"
+                    className="fixed inset-0 z-[55] bg-slate-900/50 backdrop-blur-[1px] md:hidden"
+                    onClick={closeMobileNav}
+                    aria-label="Đóng menu"
+                />
+            ) : null}
+            <StandardDashboardSidebar
+                menuGroups={menuGroups}
+                sidebarCollapsed={sidebarCollapsed}
+                setSidebarCollapsed={setSidebarCollapsed}
+                searchQuery={searchQuery}
+                setSearchQuery={setSearchQuery}
+                mobileNavOpen={mobileNavOpen}
+                user={user}
+                isActive={isActive}
+                navigate={navigate}
+                profileSecondaryText="System Admin"
+            />
 
-                {/* Navigation Menu */}
-                <nav className="flex-1 overflow-y-auto p-4 space-y-6">
-                    {menuGroups.map((group, groupIdx) => (
-                        <div key={groupIdx}>
-                            {!sidebarCollapsed && (
-                                <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2 px-2">
-                                    {group.title}
-                                </h3>
-                            )}
-                            <ul className="space-y-1">
-                                {group.items.map((item) => {
-                                    const Icon = item.icon;
-                                    const isActive = location.pathname === item.path || (item.path !== '/dashboard/system-admin' && location.pathname.startsWith(item.path));
-                                    return (
-                                        <li key={item.path}>
-                                            <button
-                                                onClick={() => navigate(item.path)}
-                                                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all ${
-                                                    isActive
-                                                        ? 'bg-indigo-600 text-white shadow-lg'
-                                                        : 'text-slate-300 hover:bg-white/10 hover:text-white'
-                                                }`}
-                                                title={sidebarCollapsed ? item.label : undefined}
-                                            >
-                                                <Icon className="w-5 h-5 flex-shrink-0" strokeWidth={2} />
-                                                {!sidebarCollapsed && (
-                                                    <span className="text-sm font-medium">{item.label}</span>
-                                                )}
-                                            </button>
-                                        </li>
-                                    );
-                                })}
-                            </ul>
-                        </div>
-                    ))}
-                </nav>
+            <main ref={mainContentRef} className={`flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden ${mainMarginForSidebar240(sidebarCollapsed)}`}>
+                <DashboardHeader
+                    title={getPageTitle()}
+                    subtitle={getPageSubtitle()}
+                    showSearch={true}
+                    showNotifications={true}
+                    showClock={true}
+                    roleLabel="System Admin"
+                    scrollContainerRef={contentScrollRef}
+                    onMobileNavToggle={toggleMobileNav}
+                />
 
-                {/* User Info & Logout */}
-                <div className="p-4 border-t border-slate-700/50">
-                    {!sidebarCollapsed && (
-                        <div className="flex items-center gap-3 mb-3">
-                            <div className="w-10 h-10 rounded-full bg-indigo-600 flex items-center justify-center">
-                                <User className="w-5 h-5 text-white" />
-                            </div>
-                            <div className="flex-1 min-w-0">
-                                <p className="text-sm font-medium text-white truncate">{user?.username || 'Admin'}</p>
-                                <p className="text-xs text-slate-400 truncate">System Admin</p>
-                            </div>
-                        </div>
-                    )}
-                    {sidebarCollapsed && (
-                        <div className="flex justify-center mb-3">
-                            <div className="w-10 h-10 rounded-full bg-indigo-600 flex items-center justify-center">
-                                <User className="w-5 h-5 text-white" />
-                            </div>
-                        </div>
-                    )}
-                    <button
-                        onClick={() => logout()}
-                        className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-slate-300 hover:bg-red-600 hover:text-white transition-all ${
-                            sidebarCollapsed ? 'justify-center' : ''
-                        }`}
-                        title={sidebarCollapsed ? 'Đăng xuất' : undefined}
+                <div ref={contentScrollRef} className={`${dashboardMainScrollableClass} bg-[#F1F5F9]`}>
+                    <div
+                        key={location.pathname}
+                        className={`dashboard-outlet flex min-h-0 min-w-0 flex-col ${dashboardMainOutletClass} ${dashboardMainHorizontalBleedClass}`}
                     >
-                        <LogOut className="w-5 h-5 flex-shrink-0" strokeWidth={2} />
-                        {!sidebarCollapsed && <span className="text-sm font-medium">Đăng xuất</span>}
-                    </button>
-                </div>
-            </aside>
-
-            {/* Main Content */}
-            <main ref={mainContentRef} className="flex-1 flex flex-col overflow-hidden">
-                {/* Header */}
-                <DashboardHeader />
-
-                {/* Page Content */}
-                <div className="flex-1 overflow-y-auto">
-                    <div className="p-6">
-                        {/* Page Title */}
-                        <div className="mb-6">
-                            <h1 className="text-2xl font-bold text-slate-900 mb-1">{getPageTitle()}</h1>
-                            <p className="text-slate-600">{getPageSubtitle()}</p>
-                        </div>
-
-                        {/* Outlet for nested routes */}
                         <Outlet />
                     </div>
                 </div>
@@ -248,10 +163,3 @@ const SystemAdminDashboard = () => {
 };
 
 export default SystemAdminDashboard;
-
-
-
-
-
-
-

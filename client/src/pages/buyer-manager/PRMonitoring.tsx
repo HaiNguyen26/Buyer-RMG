@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Search, Filter, FileText, Clock, DollarSign, User, Building2, AlertTriangle, CheckCircle, XCircle, Eye } from 'lucide-react';
+import CustomSelect from '../../components/CustomSelect';
+import { dashboardPageContentInsetXClass } from '../../constants/dashboardLayout';
 
 const PRMonitoring = () => {
   const [searchQuery, setSearchQuery] = useState('');
@@ -131,9 +133,9 @@ const PRMonitoring = () => {
   }
 
   return (
-    <div className="h-full overflow-hidden flex flex-col bg-slate-50">
+    <div className={`${dashboardPageContentInsetXClass} h-full overflow-hidden flex flex-col bg-slate-50`}>
       {/* Filters and Search Bar */}
-      <div className="shrink-0 bg-white border-b border-slate-200 p-4">
+      <div className="flex-shrink-0 bg-white border-b border-slate-200 p-4">
         <div className="flex flex-col lg:flex-row gap-4">
           {/* Search */}
           <div className="flex-1 relative">
@@ -143,17 +145,17 @@ const PRMonitoring = () => {
               placeholder="Tìm kiếm theo mã PR, người yêu cầu, phòng ban..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full pl-10 pr-4 py-2.5 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent"
+              className="w-full pl-10 pr-4 py-2.5 bg-white border border-slate-300 rounded-xl shadow-sm hover:shadow-md transition-shadow focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent focus:shadow-md"
             />
           </div>
 
           {/* Status Filter */}
           <div className="flex items-center gap-2">
             <Filter className="w-5 h-5 text-slate-400" />
-            <select
+            <CustomSelect
               value={statusFilter}
               onChange={(e) => setStatusFilter(e.target.value)}
-              className="px-4 py-2.5 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent"
+              className="px-4 py-2.5 bg-white border border-slate-300 rounded-xl shadow-sm hover:shadow-md transition-shadow focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent focus:shadow-md"
             >
               <option value="all">Tất cả trạng thái</option>
               <option value="DRAFT">Nháp</option>
@@ -166,7 +168,7 @@ const PRMonitoring = () => {
               <option value="BUDGET_EXCEPTION">Vượt ngân sách</option>
               <option value="PAYMENT_DONE">Đã thanh toán</option>
               <option value="CANCELLED">Đã hủy</option>
-            </select>
+            </CustomSelect>
           </div>
         </div>
 
@@ -177,7 +179,7 @@ const PRMonitoring = () => {
       </div>
 
       {/* PR Table */}
-      <div className="flex-1 min-h-0 overflow-auto p-4">
+      <div className="flex-1 min-h-0 overflow-y-auto p-4">
         <div className="bg-white rounded-2xl shadow-lg border border-slate-200 overflow-hidden">
           {filteredPRs.length === 0 ? (
             <div className="h-full min-h-[400px] flex items-center justify-center">
@@ -296,15 +298,15 @@ const PRMonitoring = () => {
       {/* PR Detail Modal */}
       {selectedPR && (
         <div
-          className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+          className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4 modal-popup-overlay"
           onClick={() => setSelectedPR(null)}
         >
           <div
-            className="bg-white rounded-2xl shadow-xl max-w-4xl w-full max-h-[90vh] overflow-auto"
+            className="modal-popup-panel bg-white rounded-2xl shadow-xl max-w-4xl w-full max-h-[90vh] flex flex-col overflow-hidden"
             onClick={(e) => e.stopPropagation()}
           >
             {/* Modal Header */}
-            <div className="sticky top-0 bg-white border-b border-slate-200 p-6 flex items-center justify-between">
+            <div className="flex-shrink-0 bg-white border-b border-slate-200 p-6 flex items-center justify-between">
               <div>
                 <h3 className="text-xl font-bold text-slate-900">Chi tiết PR</h3>
                 <p className="text-sm text-slate-500 mt-1">{selectedPR.prNumber || 'N/A'}</p>
@@ -318,7 +320,7 @@ const PRMonitoring = () => {
             </div>
 
             {/* Modal Body */}
-            <div className="p-6 space-y-6">
+            <div className="flex-1 min-h-0 overflow-y-auto p-6 space-y-6">
               {/* PR Info */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>

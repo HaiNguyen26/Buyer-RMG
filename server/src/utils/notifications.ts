@@ -232,6 +232,10 @@ export const NotificationTemplates = {
     title: 'Đã đủ báo giá',
     message: `PR ${prNumber} đã đủ báo giá – chờ review`,
   }),
+  RFQ_SUBMITTED: (rfqNumber: string, prNumber: string, quotationCount: number) => ({
+    title: 'RFQ đã được submit',
+    message: `RFQ ${rfqNumber} (PR ${prNumber}) đã được Buyer submit với ${quotationCount} báo giá – sẵn sàng so sánh`,
+  }),
   PR_OVER_BUDGET_ACTION_REQUIRED: (prNumber: string) => ({
     title: 'PR vượt ngân sách',
     message: `PR ${prNumber} vượt ngân sách – cần xử lý`,

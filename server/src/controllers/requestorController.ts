@@ -1,31 +1,91 @@
 import { FastifyReply } from 'fastify';
+import { Prisma } from '@prisma/client';
+import { randomUUID } from 'crypto';
+import fs from 'fs/promises';
+import path from 'path';
 import { prisma } from '../config/database';
 import { AuthenticatedRequest } from '../middleware/auth';
 import { auditCreate, auditUpdate } from '../utils/audit';
 import { z } from 'zod';
 import { createNotification, NotificationTemplates } from '../utils/notifications';
 import { getIO } from '../utils/getIO';
+import { prSalesPOSelect, serializePRSalesOrder } from '../utils/prSalesOrder';
+import {
+  buildBusinessTimeline,
+  buildBusinessTimelineFromPrStatus,
+  buildCurrentStepBadge,
+  buildDeliverySummary,
+  buildProcurementListSnapshot,
+  computeProcurementCostInsight,
+  enrichProcurementCostInsight,
+  computeTrackingSla,
+  isReadyForStockIssuePickup,
+  type PurchaseOrderCostInput,
+  type SupplierSelectionCostInput,
+  deriveItemProcurementRow,
+  getRequestorPrStatusLabel,
+} from '../utils/requestorProcurementTracking';
+import { generateFileKey, getFileUrl, uploadFile } from '../config/s3';
+import {
+  allocateNextCounter,
+  peekNextCounter,
+  prSequenceKey,
+  scanMaxPRSeq,
+  scanMaxSalesPOSuffix,
+  soSequenceKey,
+} from '../utils/documentSequence';
+
+/** JSON có thể gửi "", null hoặc string cho số — chuẩn hoá trước khi validate */
+const emptyToUndefined = (v: unknown) => (v === '' || v === null ? undefined : v);
+
+const optionalTrimmedString = z.preprocess(
+  emptyToUndefined,
+  z.string().trim().optional()
+);
 
 // Validation schemas
 const createPRSchema = z.object({
-  department: z.string().min(1),
-  type: z.enum(['COMMERCIAL', 'PRODUCTION']).default('PRODUCTION'),
-  requiredDate: z.string().optional(), // Estimated Date of Received (date input)
+  department: z.string().trim().min(1),
+  type: z.enum(['COMMERCIAL', 'PRODUCTION', 'PROJECT', 'OFFICE']).default('PRODUCTION'),
+  requiredDate: z.preprocess(emptyToUndefined, z.string().optional()),
   currency: z.string().default('VND'),
-  tax: z.number().min(0).optional(),
-  notes: z.string().optional(),
+  tax: z.preprocess(emptyToUndefined, z.coerce.number().min(0).optional()),
+  notes: optionalTrimmedString,
+  // Phần 1 — Liên kết Customer PO (chọn từ dropdown → thông tin dự án read-only)
+  salesPOId: z.preprocess(emptyToUndefined, z.string().uuid().optional()),
+  // Denormalized (dùng khi không chọn Sales PO / PR nội bộ)
+  customerPO: optionalTrimmedString,
+  projectCode: optionalTrimmedString,
+  projectName: optionalTrimmedString,
+  customerName: optionalTrimmedString,
+  salesPersonId: optionalTrimmedString,
+  purpose: optionalTrimmedString,
   items: z
     .array(
       z.object({
-        description: z.string().min(1),
-        partNo: z.string().optional(),
-        spec: z.string().optional(),
-        manufacturer: z.string().optional(),
-        qty: z.number().positive(),
-        unit: z.string().optional(),
-        unitPrice: z.number().min(0),
-        purpose: z.string().optional(),
-        remark: z.string().optional(),
+        description: z.preprocess(
+          (v) => (typeof v === 'string' ? v.trim() : v),
+          z.string().min(1)
+        ),
+        partNo: z.preprocess(
+          (v) => (typeof v === 'string' ? v.trim() : v),
+          z.string().min(1, 'Chọn mã vật tư từ danh mục hoặc tạo mới')
+        ),
+        spec: optionalTrimmedString,
+        manufacturer: optionalTrimmedString,
+        qty: z.coerce.number().positive(),
+        unit: z.preprocess(
+          (v) => (typeof v === 'string' ? v.trim() : v),
+          z.string().min(1, 'Thiếu đơn vị')
+        ),
+        /** Requestor không nhập giá — Buyer xác định sau */
+        unitPrice: z.preprocess(emptyToUndefined, z.coerce.number().min(0).optional()),
+        /** Giá dự kiến VND (requestor / tham chiếu dự toán) — tách khỏi unitPrice do buyer báo giá */
+        estimatedUnitPriceVnd: z.preprocess(emptyToUndefined, z.coerce.number().min(0).optional()),
+        /** Ngày mong muốn giao (YYYY-MM-DD) */
+        desiredDeliveryDate: z.preprocess(emptyToUndefined, z.string().trim().optional()),
+        purpose: optionalTrimmedString,
+        remark: optionalTrimmedString,
       })
     )
     .min(1),
@@ -39,12 +99,141 @@ const updatePRSchema = createPRSchema
     action: z.enum(['UPDATE', 'RESUBMIT']).default('UPDATE'),
   });
 
+/** Requestor chỉnh sửa dòng bị Trưởng phòng yêu cầu revision (không replace toàn bộ PR). */
+const resubmitDepartmentRevisionItemSchema = z.object({
+  description: z.preprocess((v) => (typeof v === 'string' ? v.trim() : v), z.string().min(1)),
+  partNo: z.preprocess((v) => (typeof v === 'string' ? v.trim() : v), z.string().min(1)),
+  spec: optionalTrimmedString,
+  manufacturer: optionalTrimmedString,
+  qty: z.coerce.number().positive(),
+  unit: z.preprocess((v) => (typeof v === 'string' ? v.trim() : v), z.string().min(1)),
+  estimatedUnitPriceVnd: z.preprocess(emptyToUndefined, z.coerce.number().min(0).optional()),
+  desiredDeliveryDate: z.preprocess(emptyToUndefined, z.string().trim().optional()),
+  purpose: optionalTrimmedString,
+  remark: optionalTrimmedString,
+});
+
+type UploadedAttachmentInput = {
+  lineNo?: number;
+  filename: string;
+  contentType: string;
+  buffer: Buffer;
+};
+
+const LOCAL_ATTACHMENT_ROOT = path.resolve(process.cwd(), 'uploads', 'attachments');
+
+const storeAttachmentLocal = async (
+  purchaseRequestId: string,
+  fileName: string,
+  fileBuffer: Buffer
+) => {
+  const safeName = fileName.replace(/[^\w.\-]+/g, '_');
+  const relativeKey = `local/${purchaseRequestId}/${Date.now()}-${randomUUID()}-${safeName}`;
+  const absolutePath = path.join(LOCAL_ATTACHMENT_ROOT, relativeKey.replace(/^local\//, ''));
+  await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+  await fs.writeFile(absolutePath, fileBuffer);
+  return relativeKey;
+};
+
+async function parseCreatePRRequest(
+  request: AuthenticatedRequest
+): Promise<{ body: z.infer<typeof createPRSchema>; attachments: UploadedAttachmentInput[] }> {
+  const req = request as AuthenticatedRequest & {
+    isMultipart?: (() => boolean) | boolean;
+    parts?: () => AsyncIterable<any>;
+  };
+  const canReadParts = typeof req.parts === 'function';
+  const contentType = String(request.headers['content-type'] ?? '').toLowerCase();
+  const isMultipartRequest = contentType.includes('multipart/form-data');
+  if (!canReadParts || !isMultipartRequest) {
+    return {
+      body: createPRSchema.parse(request.body),
+      attachments: [],
+    };
+  }
+
+  let payloadRaw: unknown = null;
+  const formFields: Record<string, unknown> = {};
+  const attachments: UploadedAttachmentInput[] = [];
+  const parts = req.parts!();
+  for await (const part of parts) {
+    if (part.type === 'field') {
+      formFields[part.fieldname] = part.value;
+      if (part.fieldname === 'payload') {
+        payloadRaw = part.value;
+      }
+      continue;
+    }
+    if (part.type !== 'file') continue;
+    const buffer = await part.toBuffer();
+    const filename = part.filename || 'attachment';
+    const contentType = part.mimetype || 'application/octet-stream';
+    const lineNoRaw = String(part.fieldname || '').match(/^itemAttachment:(\d+)$/);
+    attachments.push({
+      lineNo: lineNoRaw ? Number(lineNoRaw[1]) : undefined,
+      filename,
+      contentType,
+      buffer,
+    });
+  }
+
+  const unwrapPayloadLike = (v: unknown): unknown => {
+    if (v == null) return v;
+    if (typeof v === 'object' && 'value' in (v as Record<string, unknown>)) {
+      return (v as Record<string, unknown>).value;
+    }
+    return v;
+  };
+  const parseUnknownPayload = (v: unknown): unknown => {
+    const u = unwrapPayloadLike(v);
+    if (typeof u === 'string') {
+      const raw = u.trim();
+      if (!raw) return {};
+      try {
+        return JSON.parse(raw);
+      } catch {
+        return {};
+      }
+    }
+    return u;
+  };
+
+  let payloadObj: unknown = parseUnknownPayload(payloadRaw);
+  if (payloadObj == null || (typeof payloadObj === 'object' && Object.keys(payloadObj as object).length === 0)) {
+    const bodyAny = request.body as Record<string, unknown> | undefined;
+    payloadObj = parseUnknownPayload(bodyAny?.payload ?? bodyAny);
+  }
+  if (payloadObj == null || (typeof payloadObj === 'object' && Object.keys(payloadObj as object).length === 0)) {
+    // Fallback cuối: dựng từ field rời trong multipart form.
+    const candidate: Record<string, unknown> = { ...formFields };
+    if (typeof candidate.items === 'string') {
+      try {
+        candidate.items = JSON.parse(candidate.items);
+      } catch {
+        /* ignore */
+      }
+    }
+    payloadObj = candidate;
+  }
+  return {
+    body: createPRSchema.parse(payloadObj),
+    attachments,
+  };
+}
+
 const normalizeDepartmentCode = (raw: string) =>
   raw
     .trim()
     .toUpperCase()
     .replace(/\s+/g, '')
     .replace(/[^A-Z0-9_-]/g, '');
+
+const ALLOWED_SITE_CODES = new Set(['HCM', 'HN', 'QN']);
+const normalizeSiteCode = (raw?: string | null) => {
+  const value = String(raw ?? '').trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '');
+  if (ALLOWED_SITE_CODES.has(value)) return value;
+  return 'HCM';
+};
 
 const getYYYYMMDD = (d = new Date()) => {
   const y = d.getFullYear();
@@ -53,89 +242,14 @@ const getYYYYMMDD = (d = new Date()) => {
   return `${y}${m}${day}`;
 };
 
-const generatePRNumber = async (department: string, retryCount = 0): Promise<string> => {
+/** Xem trước / cấp số PR — luôn tăng dần theo ngày + phòng, không lấp lỗ (không trùng khi concurrent). */
+const generatePRNumberPreview = async (department: string, siteCode?: string | null): Promise<string> => {
   const dept = normalizeDepartmentCode(department);
+  const site = normalizeSiteCode(siteCode);
   const yyyymmdd = getYYYYMMDD();
-  const prefix = `${dept}-${yyyymmdd}-`;
-  
-  // Find ALL existing PR numbers with this prefix (no limit to find all gaps)
-  const existingPRs = await prisma.purchaseRequest.findMany({
-    where: { 
-      prNumber: { startsWith: prefix },
-      deletedAt: null, // Only count non-deleted PRs
-    },
-    select: { prNumber: true },
-    orderBy: { prNumber: 'asc' }, // Sort ascending to find gaps efficiently
-  });
-  
-  // Extract all sequence numbers and create a Set for O(1) lookup
-  const existingSequencesSet = new Set<number>();
-  const existingSequences: number[] = [];
-  
-  existingPRs.forEach(pr => {
-    const match = pr.prNumber.match(/-(\d{4})$/);
-    if (match) {
-      const seqNum = parseInt(match[1], 10);
-      if (seqNum > 0) {
-        existingSequencesSet.add(seqNum);
-        existingSequences.push(seqNum);
-      }
-    }
-  });
-  
-  // Find the first available sequence number
-  // Priority: Find the smallest gap first (1, 2, 3...), then use max + 1
-  let nextSeq = 1;
-  
-  if (existingSequences.length === 0) {
-    // No existing PRs for this prefix, start from 0001
-    nextSeq = 1;
-  } else {
-    // Find the first gap (smallest missing number)
-    const maxSeq = Math.max(...existingSequences);
-    let foundGap = false;
-    
-    // Check from 1 to maxSeq for gaps
-    for (let i = 1; i <= maxSeq; i++) {
-      if (!existingSequencesSet.has(i)) {
-        nextSeq = i;
-        foundGap = true;
-        break;
-      }
-    }
-    
-    // If no gap found, use max + 1
-    if (!foundGap) {
-      nextSeq = maxSeq + 1;
-    }
-  }
-  
-  const seq = String(nextSeq).padStart(4, '0');
-  const prNumber = `${prefix}${seq}`;
-  
-  // Double-check if this PR number already exists (race condition protection)
-  const existingPR = await prisma.purchaseRequest.findFirst({
-    where: {
-      prNumber: prNumber,
-      deletedAt: null,
-    },
-    select: { id: true },
-  });
-  
-  if (existingPR) {
-    if (retryCount < 10) {
-      // If exists, retry with next sequence
-      console.warn(`⚠️ PR number ${prNumber} already exists, retrying with next sequence... (attempt ${retryCount + 1}/10)`);
-      // Recursively try next sequence
-      return generatePRNumber(department, retryCount + 1);
-    } else {
-      // Too many retries, throw error
-      throw new Error(`Không thể tạo số PR duy nhất sau ${retryCount + 1} lần thử. Vui lòng thử lại sau.`);
-    }
-  }
-  
-  console.log(`✅ Generated PR number: ${prNumber} (sequence: ${nextSeq}, existing: ${existingSequences.length})`);
-  return prNumber;
+  const key = prSequenceKey(dept, yyyymmdd, site);
+  const next = await peekNextCounter(prisma, key, () => scanMaxPRSeq(prisma, dept, yyyymmdd, site));
+  return `${site}-${dept}-${yyyymmdd}-${String(next).padStart(4, '0')}`;
 };
 
 // Get Next PR Number (preview)
@@ -154,7 +268,11 @@ export const getNextPRNumber = async (
       return reply.code(400).send({ error: 'department is required' });
     }
 
-    const prNumber = await generatePRNumber(department);
+    const requestorUser = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { location: true },
+    });
+    const prNumber = await generatePRNumberPreview(department, requestorUser?.location);
     reply.send({ prNumber });
   } catch (error: any) {
     console.error('Get next PR number error:', error);
@@ -185,12 +303,19 @@ export const getRequestorDashboard = async (
       select: {
         id: true,
         prNumber: true,
+        type: true,
         status: true,
         notes: true,
         department: true,
         totalAmount: true,
         currency: true,
         createdAt: true,
+        salesPOId: true,
+        customerPO: true,
+        projectName: true,
+        projectCode: true,
+        customerName: true,
+        salesPO: { select: prSalesPOSelect },
         items: {
           where: { deletedAt: null },
           orderBy: { lineNo: 'asc' },
@@ -221,6 +346,39 @@ export const getRequestorDashboard = async (
       status,
       count: statusCounts[status],
     }));
+
+    const typeLabelMap: { [key: string]: string } = {
+      MATERIAL: 'Vật tư',
+      SERVICE: 'Dịch vụ',
+      COMMERCIAL: 'Thương mại',
+      PRODUCTION: 'Sản xuất',
+      PROJECT: 'Dự án',
+      OFFICE: 'Văn phòng',
+    };
+    const typeCounts: { [key: string]: number } = {};
+    const monthCounts: { [key: string]: number } = {};
+    prs.forEach((pr) => {
+      const tk = String(pr.type || 'PRODUCTION');
+      typeCounts[tk] = (typeCounts[tk] || 0) + 1;
+      const d = pr.createdAt;
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      monthCounts[key] = (monthCounts[key] || 0) + 1;
+    });
+    const prsByType = Object.keys(typeCounts).map((k) => ({
+      type: typeLabelMap[k] || k,
+      typeKey: k,
+      count: typeCounts[k],
+    }));
+    const prsByMonth = Object.keys(monthCounts)
+      .sort()
+      .map((k) => {
+        const [y, m] = k.split('-');
+        return {
+          monthKey: k,
+          label: `Tháng ${Number(m)}/${y}`,
+          count: monthCounts[k],
+        };
+      });
 
     // Get PRs that need more info
     const prsNeedMoreInfo = prs
@@ -303,6 +461,7 @@ export const getRequestorDashboard = async (
         totalAmount: finalTotal > 0 ? finalTotal : null,
         currency: pr.currency || 'VND',
         createdAt: pr.createdAt.toISOString(),
+        salesOrder: serializePRSalesOrder(pr),
       };
     });
 
@@ -310,6 +469,8 @@ export const getRequestorDashboard = async (
     const response = {
       totalPRs,
       prsByStatus: prsByStatus || [],
+      prsByType: prsByType || [],
+      prsByMonth: prsByMonth || [],
       prsNeedMoreInfo: prsNeedMoreInfo || [],
       recentPRs: recentPRs || [],
     };
@@ -334,10 +495,11 @@ export const getMyPRs = async (
     if (!userId) {
       return reply.code(401).send({ error: 'Unauthorized' });
     }
+    const requestorId = String(userId);
 
     const { status } = request.query as { status?: string };
     const where: any = {
-      requestorId: userId,
+      requestorId,
       deletedAt: null,
     };
     if (status && status !== 'all') {
@@ -358,6 +520,12 @@ export const getMyPRs = async (
         currency: true,
         createdAt: true,
         updatedAt: true,
+        salesPOId: true,
+        customerPO: true,
+        projectName: true,
+        projectCode: true,
+        customerName: true,
+        salesPO: { select: prSalesPOSelect },
         items: {
           where: { deletedAt: null },
           select: {
@@ -409,11 +577,16 @@ export const getMyPRs = async (
           unit: it.unit || undefined,
           unitPrice: it.unitPrice ? Number(it.unitPrice) : null,
           amount: it.amount ? Number(it.amount) : null,
+          estimatedUnitPriceVnd: (it as any).estimatedUnitPriceVnd != null ? Number((it as any).estimatedUnitPriceVnd) : null,
+          desiredDeliveryDate: (it as any).desiredDeliveryDate
+            ? new Date((it as any).desiredDeliveryDate).toISOString().slice(0, 10)
+            : undefined,
           purpose: it.purpose || undefined,
           remark: it.remark || undefined,
         })),
         createdAt: pr.createdAt.toISOString(),
         updatedAt: pr.updatedAt.toISOString(),
+        salesOrder: serializePRSalesOrder(pr),
       };
     }) : [];
 
@@ -452,6 +625,30 @@ export const getPRById = async (
           where: { deletedAt: null },
           orderBy: { lineNo: 'asc' },
         },
+        purchaseOrders: {
+          where: { deletedAt: null },
+          select: { totalAmount: true, status: true },
+        },
+        budgetExceptions: {
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+          select: { purchaseAmount: true, status: true, overPercent: true },
+        },
+        supplierSelections: {
+          select: {
+            purchaseRequestItemId: true,
+            quotation: {
+              select: {
+                totalAmount: true,
+                items: {
+                  where: { deletedAt: null },
+                  select: { purchaseRequestItemId: true, totalPrice: true },
+                },
+              },
+            },
+          },
+        },
+        salesPO: { select: prSalesPOSelect },
         requestor: {
           select: {
             id: true,
@@ -467,7 +664,64 @@ export const getPRById = async (
       return reply.code(404).send({ error: 'PR not found' });
     }
 
+    const prAttachments = await prisma.$queryRaw<Array<{
+      id: string;
+      file_name: string;
+      file_url: string;
+      file_size: number;
+      content_type: string;
+    }>>`SELECT id, file_name, file_url, file_size, content_type
+        FROM purchase_request_attachments
+        WHERE purchase_request_id = ${pr.id} AND deleted_at IS NULL
+        ORDER BY created_at ASC`;
+    const itemIds = pr.items.map((it: any) => it.id);
+    const itemAttachmentRows =
+      itemIds.length > 0
+        ? await prisma.$queryRaw<Array<{
+            id: string;
+            purchase_request_item_id: string;
+            file_name: string;
+            file_url: string;
+            file_size: number;
+            content_type: string;
+          }>>`SELECT id, purchase_request_item_id, file_name, file_url, file_size, content_type
+              FROM purchase_request_item_attachments
+              WHERE purchase_request_item_id IN (${Prisma.join(itemIds)}) AND deleted_at IS NULL
+              ORDER BY created_at ASC`
+        : [];
+    const itemAttachmentMap = new Map<
+      string,
+      Array<{ id: string; fileName: string; fileUrl: string; fileSize: number; contentType: string }>
+    >();
+    for (const row of itemAttachmentRows) {
+      const existing = itemAttachmentMap.get(row.purchase_request_item_id) ?? [];
+      existing.push({
+        id: row.id,
+        fileName: row.file_name,
+        fileUrl: `/api/requestor/prs/${pr.id}/attachments/${row.id}`,
+        fileSize: Number(row.file_size ?? 0),
+        contentType: row.content_type,
+      });
+      itemAttachmentMap.set(row.purchase_request_item_id, existing);
+    }
+
     const firstItem = pr.items[0];
+    const partNos = [
+      ...new Set(pr.items.map((it: any) => it.partNo?.trim()).filter(Boolean) as string[]),
+    ];
+    const stockByPart = new Map<string, number>();
+    if (partNos.length > 0) {
+      const stockRows = await prisma.inventoryBalance.groupBy({
+        by: ['partInternalCode'],
+        where: { partInternalCode: { in: partNos }, companyId: null },
+        _sum: { quantityAvailable: true, quantityReserved: true },
+      });
+      stockRows.forEach((r) => {
+        const available = Number(r._sum.quantityAvailable ?? 0);
+        const reserved = Number(r._sum.quantityReserved ?? 0);
+        stockByPart.set(r.partInternalCode, Math.max(0, available - reserved));
+      });
+    }
     reply.send({
       id: pr.id,
       prNumber: pr.prNumber,
@@ -479,13 +733,60 @@ export const getPRById = async (
       purpose: pr.purpose,
       status: pr.status,
       notes: pr.notes,
+      attachments: prAttachments.map((a) => ({
+        id: a.id,
+        fileName: a.file_name,
+        fileUrl: `/api/requestor/prs/${pr.id}/attachments/${a.id}`,
+        fileSize: Number(a.file_size ?? 0),
+        contentType: a.content_type,
+      })),
       location: pr.location || undefined,
+      salesOrder: serializePRSalesOrder(pr),
       requestor: pr.requestor ? {
         id: pr.requestor.id,
         username: pr.requestor.username,
         email: pr.requestor.email,
       } : undefined,
-      items: pr.items.map((it) => ({
+      items: pr.items.map((it: any) => ({
+        ...(function deriveSource() {
+          const qty = Number(it.qty || 0);
+          const fromStockQty = Number((it as any).fromStockQty || 0);
+          const purchaseQty = Number((it as any).purchaseQty || 0);
+          const rawStatus = String((it as any).status || 'NEW');
+          const partNo = it.partNo?.trim();
+          const liveStock = partNo ? Number(stockByPart.get(partNo) ?? 0) : 0;
+
+          // Ưu tiên dữ liệu đã split; fallback theo tồn kho hiện tại nếu item chưa split.
+          if (rawStatus === 'FROM_STOCK' || (fromStockQty > 0 && purchaseQty <= 0)) {
+            return {
+              sourceStatus: 'FROM_STOCK',
+              fromStockQty: fromStockQty > 0 ? fromStockQty : qty,
+              purchaseQty: purchaseQty > 0 ? purchaseQty : 0,
+            };
+          }
+          if (rawStatus === 'NEED_PURCHASE' || purchaseQty > 0) {
+            return {
+              sourceStatus: 'NEED_PURCHASE',
+              fromStockQty,
+              purchaseQty: purchaseQty > 0 ? purchaseQty : Math.max(0, qty - fromStockQty),
+            };
+          }
+          // NEW / chưa split: tự đo theo tồn kho
+          if (qty > 0 && partNo) {
+            const from = Math.min(qty, Math.max(0, liveStock));
+            const buy = Math.max(0, qty - from);
+            return {
+              sourceStatus: buy > 0 ? 'NEED_PURCHASE' : 'FROM_STOCK',
+              fromStockQty: from,
+              purchaseQty: buy,
+            };
+          }
+          return {
+            sourceStatus: 'UNKNOWN',
+            fromStockQty,
+            purchaseQty,
+          };
+        })(),
         id: it.id,
         lineNo: it.lineNo,
         description: it.description,
@@ -493,11 +794,23 @@ export const getPRById = async (
         spec: it.spec || undefined,
         manufacturer: it.manufacturer || undefined,
         qty: Number(it.qty),
+        status: (it as any).status || 'NEW',
         unit: it.unit || undefined,
         unitPrice: it.unitPrice ? Number(it.unitPrice) : null,
         amount: it.amount ? Number(it.amount) : null,
+        estimatedUnitPriceVnd: (it as any).estimatedUnitPriceVnd != null ? Number((it as any).estimatedUnitPriceVnd) : null,
+        desiredDeliveryDate: (it as any).desiredDeliveryDate
+          ? new Date((it as any).desiredDeliveryDate).toISOString().slice(0, 10)
+          : undefined,
+        attachments: itemAttachmentMap.get(it.id) ?? [],
         purpose: it.purpose || undefined,
         remark: it.remark || undefined,
+        departmentItemOutcome: (it as { departmentItemOutcome?: string | null }).departmentItemOutcome ?? null,
+        departmentDecisionNote: (it as { departmentDecisionNote?: string | null }).departmentDecisionNote ?? null,
+        departmentRevisionSubmittedAt: (it as { departmentRevisionSubmittedAt?: Date | null })
+          .departmentRevisionSubmittedAt
+          ? new Date((it as { departmentRevisionSubmittedAt?: Date | null }).departmentRevisionSubmittedAt!).toISOString()
+          : null,
       })),
       createdAt: pr.createdAt.toISOString(),
       updatedAt: pr.updatedAt.toISOString(),
@@ -507,6 +820,399 @@ export const getPRById = async (
     reply.code(500).send({
       error: 'Internal server error',
       message: error.message,
+    });
+  }
+};
+
+/** Requestor cập nhật một dòng NEED_PURCHASE đang REVISION_REQUIRED và đánh dấu đã gửi lại cho Trưởng phòng. */
+export const resubmitPRItemDepartmentRevision = async (
+  request: AuthenticatedRequest,
+  reply: FastifyReply
+) => {
+  try {
+    const userId = request.user?.userId;
+    const { id: prId, itemId } = request.params as { id: string; itemId: string };
+    if (!userId) {
+      return reply.code(401).send({ error: 'Unauthorized' });
+    }
+
+    const body = resubmitDepartmentRevisionItemSchema.parse(request.body);
+
+    const pr = await prisma.purchaseRequest.findFirst({
+      where: { id: prId, requestorId: userId, deletedAt: null },
+      select: { id: true, tax: true },
+    });
+    if (!pr) {
+      return reply.code(404).send({ error: 'PR not found' });
+    }
+
+    const item = await prisma.purchaseRequestItem.findFirst({
+      where: { id: itemId, purchaseRequestId: prId, deletedAt: null },
+    });
+    if (!item) {
+      return reply.code(404).send({ error: 'Dòng PR không tồn tại' });
+    }
+    if (String(item.status) !== 'NEED_PURCHASE') {
+      return reply.code(400).send({ error: 'Chỉ dòng cần mua mới được resubmit theo luồng này' });
+    }
+    if (item.departmentItemOutcome !== 'REVISION_REQUIRED') {
+      return reply.code(400).send({ error: 'Dòng không đang ở trạng thái chờ chỉnh sửa' });
+    }
+
+    const desiredRaw = body.desiredDeliveryDate?.trim();
+    let desiredDeliveryDate: Date | null = null;
+    if (desiredRaw) {
+      const iso = desiredRaw.length >= 10 ? desiredRaw.slice(0, 10) : desiredRaw;
+      const d = new Date(`${iso}T00:00:00.000Z`);
+      if (!Number.isNaN(d.getTime())) desiredDeliveryDate = d;
+    }
+
+    const qtyDec = new Prisma.Decimal(body.qty);
+    const est =
+      body.estimatedUnitPriceVnd != null && Number.isFinite(body.estimatedUnitPriceVnd)
+        ? new Prisma.Decimal(body.estimatedUnitPriceVnd)
+        : null;
+
+    const updated = await prisma.purchaseRequestItem.update({
+      where: { id: itemId },
+      data: {
+        description: body.description,
+        partNo: body.partNo,
+        spec: body.spec ?? null,
+        manufacturer: body.manufacturer ?? null,
+        qty: qtyDec,
+        fromStockQty: new Prisma.Decimal(0),
+        purchaseQty: qtyDec,
+        unit: body.unit,
+        estimatedUnitPriceVnd: est,
+        unitPrice: null,
+        amount: est != null ? qtyDec.mul(est) : null,
+        desiredDeliveryDate,
+        purpose: body.purpose ?? null,
+        remark: body.remark ?? null,
+        departmentRevisionSubmittedAt: new Date(),
+      },
+    });
+
+    const items = await prisma.purchaseRequestItem.findMany({
+      where: { purchaseRequestId: prId, deletedAt: null },
+    });
+    let total = 0;
+    for (const it of items) {
+      const q = Number(it.qty) || 0;
+      const e = Number((it as { estimatedUnitPriceVnd?: unknown }).estimatedUnitPriceVnd) || 0;
+      const u = Number(it.unitPrice) || 0;
+      const unit = e > 0 ? e : u;
+      if (unit > 0 && q > 0) total += q * unit;
+    }
+    const taxRate = Number(pr.tax ?? 0);
+    const totalWithTax = total * (1 + taxRate / 100);
+    await prisma.purchaseRequest.update({
+      where: { id: prId },
+      data: { totalAmount: totalWithTax },
+    });
+
+    reply.send({
+      ok: true,
+      item: {
+        id: updated.id,
+        departmentRevisionSubmittedAt: updated.departmentRevisionSubmittedAt?.toISOString() ?? null,
+      },
+    });
+  } catch (e: any) {
+    if (e instanceof z.ZodError) {
+      return reply.code(400).send({ error: 'Validation error', details: e.errors });
+    }
+    console.error('resubmitPRItemDepartmentRevision', e);
+    reply.code(500).send({ error: e?.message || 'Internal server error' });
+  }
+};
+
+// Resolve attachment URL (legacy-safe): always return fresh signed URL from file_key
+export const getPRAttachmentDownload = async (
+  request: AuthenticatedRequest,
+  reply: FastifyReply
+) => {
+  try {
+    const userId = request.user?.userId;
+    const { id: prId, attachmentId } = request.params as { id: string; attachmentId: string };
+    if (!userId) return reply.code(401).send({ error: 'Unauthorized' });
+
+    const pr = await prisma.purchaseRequest.findFirst({
+      where: { id: prId, requestorId: userId, deletedAt: null },
+      select: { id: true },
+    });
+    if (!pr) return reply.code(404).send({ error: 'PR not found' });
+
+    const globalRows = await prisma.$queryRaw<Array<{ file_key: string | null }>>`
+      SELECT file_key
+      FROM purchase_request_attachments
+      WHERE id = ${attachmentId}
+        AND purchase_request_id = ${prId}
+        AND deleted_at IS NULL
+      LIMIT 1
+    `;
+    let fileKey = globalRows[0]?.file_key ?? null;
+
+    if (!fileKey) {
+      const itemRows = await prisma.$queryRaw<Array<{ file_key: string | null }>>`
+        SELECT pia.file_key
+        FROM purchase_request_item_attachments pia
+        JOIN purchase_request_items pri ON pri.id = pia.purchase_request_item_id
+        WHERE pia.id = ${attachmentId}
+          AND pri.purchase_request_id = ${prId}
+          AND pri.deleted_at IS NULL
+          AND pia.deleted_at IS NULL
+        LIMIT 1
+      `;
+      fileKey = itemRows[0]?.file_key ?? null;
+    }
+
+    if (!fileKey) return reply.code(404).send({ error: 'Attachment not found' });
+
+    if (fileKey.startsWith('local/')) {
+      const absolutePath = path.join(LOCAL_ATTACHMENT_ROOT, fileKey.replace(/^local\//, ''));
+      const file = await fs.readFile(absolutePath);
+      const ext = path.extname(absolutePath).toLowerCase();
+      const mime =
+        ext === '.pdf'
+          ? 'application/pdf'
+          : ext === '.png'
+            ? 'image/png'
+            : ext === '.jpg' || ext === '.jpeg'
+              ? 'image/jpeg'
+              : ext === '.webp'
+                ? 'image/webp'
+                : 'application/octet-stream';
+      reply.header('Content-Type', mime);
+      reply.header('Cache-Control', 'private, max-age=300');
+      return reply.send(file);
+    }
+
+    const freshUrl = await getFileUrl(fileKey);
+    return reply.redirect(freshUrl);
+  } catch (error: any) {
+    console.error('getPRAttachmentDownload error:', error);
+    return reply.code(500).send({ error: 'Internal server error', message: error?.message });
+  }
+};
+
+const PART_CATALOG_ROLES = ['REQUESTOR', 'DEPARTMENT_HEAD', 'SYSTEM_ADMIN', 'WAREHOUSE'];
+
+/** Danh mục vật tư (PartMaster) — chọn khi tạo PR */
+export const listPartCatalog = async (request: AuthenticatedRequest, reply: FastifyReply) => {
+  try {
+    const role = request.user?.role;
+    if (!role || !PART_CATALOG_ROLES.includes(role)) {
+      return reply.code(403).send({ error: 'Forbidden' });
+    }
+    const q = String((request.query as { q?: string })?.q ?? '').trim();
+    const parts = await prisma.partMaster.findMany({
+      where: {
+        ...(q
+          ? {
+              OR: [
+                { partInternalCode: { contains: q, mode: 'insensitive' } },
+                { partName: { contains: q, mode: 'insensitive' } },
+              ],
+            }
+          : {}),
+      },
+      orderBy: { partInternalCode: 'asc' },
+      take: 800,
+    });
+    const partCodes = [...new Set(parts.map((p) => p.partInternalCode).filter(Boolean))];
+    const stockByCode = new Map<string, number>();
+    if (partCodes.length > 0) {
+      try {
+        const stockRows = await prisma.inventoryBalance.groupBy({
+          by: ['partInternalCode'],
+          where: { partInternalCode: { in: partCodes }, companyId: null },
+          _sum: { quantityAvailable: true, quantityReserved: true },
+        });
+        stockRows.forEach((row) => {
+          const available = Number(row._sum.quantityAvailable ?? 0);
+          const reserved = Number(row._sum.quantityReserved ?? 0);
+          stockByCode.set(row.partInternalCode, Math.max(0, available - reserved));
+        });
+      } catch (stockErr) {
+        console.error('listPartCatalog: stock aggregation skipped', stockErr);
+        /* Vẫn trả danh mục vật tư; tồn kho = 0 nếu aggregate lỗi */
+      }
+    }
+
+    return reply.send({
+      parts: parts.map((p) => ({
+        id: p.id,
+        partInternalCode: p.partInternalCode,
+        partName: p.partName,
+        unit: p.unit,
+        manufacturer: p.manufacturer ?? null,
+        referenceUrl: p.referenceUrl ?? null,
+        stockAvailable: stockByCode.get(p.partInternalCode) ?? 0,
+      })),
+    });
+  } catch (error: unknown) {
+    console.error('listPartCatalog', error);
+    return reply.code(500).send({
+      error: 'Internal server error',
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+};
+
+const resolvePartCatalogBody = z.object({
+  codes: z.array(z.string()).max(500),
+});
+
+/** Tra cứu danh mục + tồn kho theo danh sách mã (import PR / batch) */
+export const resolvePartCatalogByCodes = async (request: AuthenticatedRequest, reply: FastifyReply) => {
+  try {
+    const role = request.user?.role;
+    if (!role || !PART_CATALOG_ROLES.includes(role)) {
+      return reply.code(403).send({ error: 'Forbidden' });
+    }
+    const body = resolvePartCatalogBody.parse(request.body);
+    const rawCodes = [...new Set(body.codes.map((c) => String(c ?? '').trim()).filter(Boolean))];
+    if (rawCodes.length === 0) {
+      return reply.send({ parts: [], notFound: [] as string[] });
+    }
+
+    const collected: Array<{
+      id: string;
+      partInternalCode: string;
+      partName: string;
+      unit: string | null;
+      manufacturer: string | null;
+      referenceUrl: string | null;
+    }> = [];
+    const seenIds = new Set<string>();
+    for (let i = 0; i < rawCodes.length; i += 30) {
+      const chunk = rawCodes.slice(i, i + 30);
+      const rows = await prisma.partMaster.findMany({
+        where: {
+          companyId: null,
+          OR: chunk.map((code) => ({
+            partInternalCode: { equals: code, mode: 'insensitive' as const },
+          })),
+        },
+      });
+      for (const r of rows) {
+        if (seenIds.has(r.id)) continue;
+        seenIds.add(r.id);
+        collected.push({
+          id: r.id,
+          partInternalCode: r.partInternalCode,
+          partName: r.partName,
+          unit: r.unit,
+          manufacturer: r.manufacturer ?? null,
+          referenceUrl: r.referenceUrl ?? null,
+        });
+      }
+    }
+
+    const byInsensitive = new Map<string, (typeof collected)[0]>();
+    for (const p of collected) {
+      byInsensitive.set(p.partInternalCode.toUpperCase(), p);
+    }
+
+    const notFoundUnique = [...new Set(rawCodes.filter((c) => !byInsensitive.has(c.toUpperCase())))];
+
+    const partCodes = collected.map((p) => p.partInternalCode);
+    const stockByCode = new Map<string, number>();
+    if (partCodes.length > 0) {
+      try {
+        const stockRows = await prisma.inventoryBalance.groupBy({
+          by: ['partInternalCode'],
+          where: { partInternalCode: { in: partCodes }, companyId: null },
+          _sum: { quantityAvailable: true, quantityReserved: true },
+        });
+        stockRows.forEach((row) => {
+          const available = Number(row._sum.quantityAvailable ?? 0);
+          const reserved = Number(row._sum.quantityReserved ?? 0);
+          stockByCode.set(row.partInternalCode, Math.max(0, available - reserved));
+        });
+      } catch (stockErr) {
+        console.error('resolvePartCatalogByCodes: stock aggregation skipped', stockErr);
+      }
+    }
+
+    return reply.send({
+      parts: collected.map((p) => ({
+        id: p.id,
+        partInternalCode: p.partInternalCode,
+        partName: p.partName,
+        unit: p.unit,
+        manufacturer: p.manufacturer ?? null,
+        referenceUrl: p.referenceUrl ?? null,
+        stockAvailable: stockByCode.get(p.partInternalCode) ?? 0,
+      })),
+      notFound: notFoundUnique,
+    });
+  } catch (error: unknown) {
+    if (error instanceof z.ZodError) {
+      return reply.code(400).send({ error: 'Validation failed', details: error.errors });
+    }
+    console.error('resolvePartCatalogByCodes', error);
+    return reply.code(500).send({
+      error: 'Internal server error',
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+};
+
+const createPartCatalogBody = z.object({
+  partInternalCode: z.string().min(1).max(80),
+  partName: z.string().min(1).max(500),
+  unit: z.string().min(1).max(40),
+  manufacturer: z.string().max(200).optional(),
+  /** Link datasheet / spec cho buyer tham khảo khi mua */
+  referenceUrl: z.string().max(2000).optional(),
+});
+
+export const createPartCatalogEntry = async (request: AuthenticatedRequest, reply: FastifyReply) => {
+  try {
+    const role = request.user?.role;
+    if (!role || !['REQUESTOR', 'DEPARTMENT_HEAD', 'SYSTEM_ADMIN'].includes(role)) {
+      return reply.code(403).send({ error: 'Forbidden' });
+    }
+    const body = createPartCatalogBody.parse(request.body);
+    const code = body.partInternalCode.trim();
+    const exists = await prisma.partMaster.findFirst({
+      where: { partInternalCode: code, companyId: null },
+    });
+    if (exists) {
+      return reply.code(409).send({ error: `Mã vật tư "${code}" đã tồn tại trong danh mục` });
+    }
+    const created = await prisma.partMaster.create({
+      data: {
+        partInternalCode: code,
+        partName: body.partName.trim(),
+        unit: body.unit.trim(),
+        manufacturer: body.manufacturer?.trim() || null,
+        referenceUrl: body.referenceUrl?.trim() || null,
+        companyId: null,
+      },
+    });
+    return reply.code(201).send({
+      part: {
+        id: created.id,
+        partInternalCode: created.partInternalCode,
+        partName: created.partName,
+        unit: created.unit,
+        manufacturer: created.manufacturer,
+        referenceUrl: created.referenceUrl,
+        stockAvailable: 0,
+      },
+    });
+  } catch (error: unknown) {
+    if (error instanceof z.ZodError) {
+      return reply.code(400).send({ error: 'Validation failed', details: error.errors });
+    }
+    console.error('createPartCatalogEntry', error);
+    return reply.code(500).send({
+      error: 'Internal server error',
+      message: error instanceof Error ? error.message : String(error),
     });
   }
 };
@@ -523,7 +1229,7 @@ export const createPR = async (
       return reply.code(401).send({ error: 'Unauthorized' });
     }
 
-    const body = createPRSchema.parse(request.body);
+    const { body, attachments } = await parseCreatePRRequest(request);
 
     console.log('📝 ========== CREATE PR REQUEST ==========');
     console.log('📝 User ID:', userId);
@@ -569,37 +1275,110 @@ export const createPR = async (
       }
     }
 
-    // Use department from form, or fallback to requestor's department, or use form department
+    // Use department from form, or fallback to requestor's department
     const prDepartment = body.department || requestorUser?.department || 'GENERAL';
     console.log('📝 Final PR Department:', prDepartment);
+
+    // Nếu chọn Customer PO (salesPOId): lấy thông tin dự án từ SalesPO để fill denormalized
+    let salesPOData: {
+      customerPO: string | null;
+      projectCode: string | null;
+      projectName: string | null;
+      customerName: string | null;
+      salesPersonId: string | null;
+    } = {
+      customerPO: body.customerPO || null,
+      projectCode: body.projectCode || null,
+      projectName: body.projectName || null,
+      customerName: body.customerName || null,
+      salesPersonId: body.salesPersonId || null,
+    };
+    if (body.salesPOId) {
+      const salesPO = await prisma.salesPO.findFirst({
+        where: { id: body.salesPOId, deletedAt: null },
+        include: { customer: true, salesUser: { select: { id: true, username: true } } },
+      });
+      if (salesPO) {
+        salesPOData = {
+          customerPO: salesPO.customerPONumber || salesPO.salesPONumber,
+          projectCode: salesPO.projectCode,
+          projectName: salesPO.projectName,
+          customerName: salesPO.customer?.name ?? null,
+          salesPersonId: salesPO.salesUserId || (salesPO.salesUser?.username ?? null),
+        };
+      }
+    }
     console.log('📝 =======================================');
 
-    // Generate PR number (by Department) and create PR with retry logic for race conditions
+    const totalAmount = body.items.reduce((sum, it) => {
+      const estimated =
+        it.estimatedUnitPriceVnd != null && Number.isFinite(it.estimatedUnitPriceVnd) && it.estimatedUnitPriceVnd > 0
+          ? it.estimatedUnitPriceVnd
+          : 0;
+      const unit =
+        it.unitPrice != null && Number.isFinite(it.unitPrice) && it.unitPrice > 0
+          ? it.unitPrice
+          : 0;
+      const baselineUnitPrice = estimated > 0 ? estimated : unit;
+      return sum + (it.qty || 0) * baselineUnitPrice;
+    }, 0);
+    const taxAmount = totalAmount * ((body.tax || 0) / 100);
+    const totalWithTax = totalAmount + taxAmount;
+
+    const firstItem = body.items[0];
+    const itemName = firstItem?.description || 'N/A';
+    const firstItemQty = firstItem?.qty || 0;
+    const firstItemUnit = firstItem?.unit || '';
+
+    // Số PR: cấp nguyên tử trong transaction (không trùng khi nhiều request song song)
     let pr;
-    let retryCount = 0;
-    const maxRetries = 5;
+    pr = await prisma.$transaction(
+      async (tx) => {
+        // Chỉ khi SUBMIT mới ghi part mới vào master data (tránh rác khi user mới nhập tạm trên UI).
+        if (body.action === 'SUBMIT') {
+          const partSeedMap = new Map<
+            string,
+            { partName: string; unit: string; manufacturer: string | null; referenceUrl: string | null }
+          >();
+          for (const it of body.items) {
+            const code = String(it.partNo ?? '').trim();
+            if (!code) continue;
+            if (!partSeedMap.has(code)) {
+              partSeedMap.set(code, {
+                partName: String(it.description ?? '').trim() || code,
+                unit: String(it.unit ?? '').trim() || 'pcs',
+                manufacturer: it.manufacturer?.trim() || null,
+                referenceUrl: it.spec?.trim() || null,
+              });
+            }
+          }
 
-    while (retryCount < maxRetries) {
-      try {
-        // Generate PR number (by Department)
-        const prNumber = await generatePRNumber(prDepartment);
+          for (const [code, seed] of partSeedMap.entries()) {
+            const exists = await tx.partMaster.findFirst({
+              where: { partInternalCode: code, companyId: null },
+            });
+            if (exists) continue;
+            await tx.partMaster.create({
+              data: {
+                companyId: null,
+                partInternalCode: code,
+                partName: seed.partName,
+                unit: seed.unit,
+                manufacturer: seed.manufacturer,
+                referenceUrl: seed.referenceUrl,
+              },
+            });
+          }
+        }
 
-        // Calculate total amount
-        const totalAmount = body.items.reduce((sum, it) => {
-          const itemAmount = (it.qty || 0) * (it.unitPrice || 0);
-          return sum + itemAmount;
-        }, 0);
-        const taxAmount = totalAmount * ((body.tax || 0) / 100);
-        const totalWithTax = totalAmount + taxAmount;
+        const dept = normalizeDepartmentCode(prDepartment);
+        const site = normalizeSiteCode(requestorUser?.location);
+        const yyyymmdd = getYYYYMMDD();
+        const key = prSequenceKey(dept, yyyymmdd, site);
+        const seq = await allocateNextCounter(tx, key, () => scanMaxPRSeq(tx, dept, yyyymmdd, site));
+        const prNumber = `${site}-${dept}-${yyyymmdd}-${String(seq).padStart(4, '0')}`;
 
-        // Get first item description for itemName (required field)
-        const firstItem = body.items[0];
-        const itemName = firstItem?.description || 'N/A';
-        const firstItemQty = firstItem?.qty || 0;
-        const firstItemUnit = firstItem?.unit || '';
-
-        // Create PR with items
-        pr = await prisma.purchaseRequest.create({
+        const created = await tx.purchaseRequest.create({
           data: {
             prNumber,
             requestorId: userId,
@@ -611,9 +1390,14 @@ export const createPR = async (
             unit: firstItemUnit,
             requiredDate: body.requiredDate ? new Date(body.requiredDate) : null,
             notes: body.notes,
-            // Submit: luôn đi theo luồng duyệt cấp 1 (direct_manager_code) => MANAGER_PENDING
+            purpose: body.purpose || null,
+            salesPOId: body.salesPOId || null,
+            customerPO: salesPOData.customerPO,
+            projectCode: salesPOData.projectCode,
+            projectName: salesPOData.projectName,
+            customerName: salesPOData.customerName,
+            salesPersonId: salesPOData.salesPersonId,
             status: body.action === 'SUBMIT' ? 'MANAGER_PENDING' : 'DRAFT',
-            // Lưu branch_code của Requestor vào PR để dùng cho flow duyệt/notify
             location: requestorUser?.location || null,
             totalAmount: totalWithTax,
             currency: body.currency || 'VND',
@@ -621,8 +1405,29 @@ export const createPR = async (
             items: {
               create: body.items.map((it, idx) => {
                 const itemQty = it.qty || 0;
-                const itemUnitPrice = it.unitPrice || 0;
-                const itemAmount = itemQty * itemUnitPrice;
+                const hasPrice = it.unitPrice != null && it.unitPrice > 0;
+                const itemUnitPrice = hasPrice ? it.unitPrice! : null;
+                const estimatedUnitPrice =
+                  it.estimatedUnitPriceVnd != null && Number.isFinite(it.estimatedUnitPriceVnd) && it.estimatedUnitPriceVnd > 0
+                    ? Number(it.estimatedUnitPriceVnd)
+                    : 0;
+                const itemAmount =
+                  estimatedUnitPrice > 0
+                    ? itemQty * estimatedUnitPrice
+                    : hasPrice
+                      ? itemQty * Number(it.unitPrice)
+                      : null;
+                const desiredRaw = it.desiredDeliveryDate?.trim();
+                let desiredDeliveryDate: Date | null = null;
+                if (desiredRaw) {
+                  const iso = desiredRaw.length >= 10 ? desiredRaw.slice(0, 10) : desiredRaw;
+                  const d = new Date(`${iso}T00:00:00.000Z`);
+                  if (!Number.isNaN(d.getTime())) desiredDeliveryDate = d;
+                }
+                const est =
+                  it.estimatedUnitPriceVnd != null && Number.isFinite(it.estimatedUnitPriceVnd)
+                    ? new Prisma.Decimal(it.estimatedUnitPriceVnd)
+                    : null;
                 return {
                   lineNo: idx + 1,
                   description: it.description,
@@ -630,9 +1435,14 @@ export const createPR = async (
                   spec: it.spec,
                   manufacturer: it.manufacturer,
                   qty: itemQty,
+                  fromStockQty: 0,
+                  purchaseQty: itemQty,
+                  status: 'NEED_PURCHASE',
                   unit: it.unit,
                   unitPrice: itemUnitPrice,
                   amount: itemAmount,
+                  estimatedUnitPriceVnd: est,
+                  desiredDeliveryDate,
                   purpose: it.purpose,
                   remark: it.remark,
                 };
@@ -644,36 +1454,80 @@ export const createPR = async (
               where: { deletedAt: null },
               orderBy: { lineNo: 'asc' },
             },
+            salesPO: { select: prSalesPOSelect },
           },
         });
 
-        // If successful, break out of retry loop
-        break;
-      } catch (error: any) {
-        // Check if it's a unique constraint error on pr_number
-        if (error.code === 'P2002' && error.meta?.target?.includes('pr_number')) {
-          retryCount++;
-          if (retryCount >= maxRetries) {
-            console.error('Failed to create PR with unique PR number after', maxRetries, 'retries');
-            return reply.code(500).send({
-              error: 'Không thể tạo số PR duy nhất. Vui lòng thử lại sau.',
+        if (body.action === 'SUBMIT') {
+          const activeItems = await tx.purchaseRequestItem.findMany({
+            where: { purchaseRequestId: created.id, deletedAt: null },
+            orderBy: { lineNo: 'asc' },
+          });
+          for (const item of activeItems) {
+            const qty = Number(item.qty || 0);
+            await tx.purchaseRequestItem.update({
+              where: { id: item.id },
+              data: {
+                fromStockQty: 0,
+                purchaseQty: qty,
+                status: 'NEED_PURCHASE',
+              } as any,
             });
           }
-          console.warn(`PR number conflict detected, retrying... (${retryCount}/${maxRetries})`);
-          // Wait a bit before retrying (exponential backoff)
-          await new Promise(resolve => setTimeout(resolve, 100 * retryCount));
-          continue;
-        } else {
-          // If it's a different error, throw it immediately
-          throw error;
         }
-      }
-    }
+
+        return tx.purchaseRequest.findUniqueOrThrow({
+          where: { id: created.id },
+          include: {
+            items: {
+              where: { deletedAt: null },
+              orderBy: { lineNo: 'asc' },
+            },
+            salesPO: { select: prSalesPOSelect },
+          },
+        });
+      },
+      { maxWait: 10000, timeout: 60000 }
+    );
 
     if (!pr) {
       return reply.code(500).send({
         error: 'Không thể tạo PR. Vui lòng thử lại sau.',
       });
+    }
+
+    if (attachments.length > 0) {
+      const itemByLineNo = new Map<number, string>();
+      pr.items.forEach((it) => itemByLineNo.set(it.lineNo, it.id));
+      for (const file of attachments) {
+        let key = generateFileKey('attachment', file.filename, pr.companyId || null, userId);
+        try {
+          await uploadFile(key, file.buffer, file.contentType);
+        } catch (uploadErr) {
+          console.error('createPR attachment upload S3 failed, using local fallback:', uploadErr);
+          key = await storeAttachmentLocal(pr.id, file.filename, file.buffer);
+        }
+
+        if (file.lineNo && itemByLineNo.has(file.lineNo)) {
+          const attachmentId = randomUUID();
+          const internalUrl = `/api/requestor/prs/${pr.id}/attachments/${attachmentId}`;
+          await prisma.$executeRaw`
+            INSERT INTO purchase_request_item_attachments
+              (id, company_id, purchase_request_item_id, file_key, file_url, file_name, file_size, content_type)
+            VALUES
+              (${attachmentId}, ${pr.companyId || null}, ${itemByLineNo.get(file.lineNo)!}, ${key}, ${internalUrl}, ${file.filename}, ${file.buffer.length}, ${file.contentType})
+          `;
+        } else {
+          const attachmentId = randomUUID();
+          const internalUrl = `/api/requestor/prs/${pr.id}/attachments/${attachmentId}`;
+          await prisma.$executeRaw`
+            INSERT INTO purchase_request_attachments
+              (id, company_id, purchase_request_id, file_key, file_url, file_name, file_size, content_type)
+            VALUES
+              (${attachmentId}, ${pr.companyId || null}, ${pr.id}, ${key}, ${internalUrl}, ${file.filename}, ${file.buffer.length}, ${file.contentType})
+          `;
+        }
+      }
     }
 
     // Audit log
@@ -757,7 +1611,8 @@ export const createPR = async (
       requiredDate: pr.requiredDate?.toISOString(),
       status: pr.status,
       notes: pr.notes,
-      items: pr.items.map((it) => ({
+      salesOrder: serializePRSalesOrder(pr as any),
+      items: (pr.items ?? []).map((it: any) => ({
         id: it.id,
         lineNo: it.lineNo,
         description: it.description,
@@ -765,7 +1620,14 @@ export const createPR = async (
         spec: it.spec || undefined,
         manufacturer: it.manufacturer || undefined,
         qty: Number(it.qty),
+        fromStockQty: Number((it as any).fromStockQty || 0),
+        purchaseQty: Number((it as any).purchaseQty || 0),
+        status: (it as any).status || 'NEW',
         unit: it.unit || undefined,
+        estimatedUnitPriceVnd: it.estimatedUnitPriceVnd != null ? Number(it.estimatedUnitPriceVnd) : null,
+        desiredDeliveryDate: it.desiredDeliveryDate
+          ? new Date(it.desiredDeliveryDate).toISOString().slice(0, 10)
+          : undefined,
         purpose: it.purpose || undefined,
         remark: it.remark || undefined,
       })),
@@ -781,6 +1643,86 @@ export const createPR = async (
       error: 'Internal server error',
       message: error.message,
     });
+  }
+};
+
+export const uploadPRAttachments = async (
+  request: AuthenticatedRequest,
+  reply: FastifyReply
+) => {
+  try {
+    const userId = request.user?.userId;
+    const { id } = request.params as { id: string };
+    if (!userId) return reply.code(401).send({ error: 'Unauthorized' });
+
+    const pr = await prisma.purchaseRequest.findFirst({
+      where: { id, requestorId: userId, deletedAt: null },
+      include: { items: { where: { deletedAt: null }, orderBy: { lineNo: 'asc' } } },
+    });
+    if (!pr) return reply.code(404).send({ error: 'PR not found' });
+
+    const req = request as AuthenticatedRequest & { parts?: () => AsyncIterable<any> };
+    if (!req.parts) {
+      return reply.code(200).send({ success: true, uploaded: 0, skipped: 'no_multipart_reader' });
+    }
+    const lineToItemId = new Map<number, string>();
+    pr.items.forEach((it: any) => lineToItemId.set(Number(it.lineNo), it.id));
+
+    let created = 0;
+    let parts: AsyncIterable<any>;
+    try {
+      parts = req.parts();
+    } catch {
+      return reply.code(200).send({ success: true, uploaded: 0, skipped: 'invalid_content_type' });
+    }
+    for await (const part of parts) {
+      if (part.type !== 'file') continue;
+      const fileBuffer = await part.toBuffer();
+      const filename = part.filename || 'attachment';
+      const contentType = part.mimetype || 'application/octet-stream';
+      let key = generateFileKey('attachment', filename, pr.companyId || null, userId);
+      try {
+        await uploadFile(key, fileBuffer, contentType);
+      } catch (uploadErr) {
+        console.error('uploadPRAttachments S3 failed, using local fallback:', uploadErr);
+        key = await storeAttachmentLocal(pr.id, filename, fileBuffer);
+      }
+
+      const lineNoMatch = String(part.fieldname || '').match(/^itemAttachment:(\d+)$/);
+      if (lineNoMatch) {
+        const itemId = lineToItemId.get(Number(lineNoMatch[1]));
+        if (itemId) {
+          const attachmentId = randomUUID();
+          const internalUrl = `/api/requestor/prs/${pr.id}/attachments/${attachmentId}`;
+          await prisma.$executeRaw`
+            INSERT INTO purchase_request_item_attachments
+              (id, company_id, purchase_request_item_id, file_key, file_url, file_name, file_size, content_type)
+            VALUES
+              (${attachmentId}, ${pr.companyId || null}, ${itemId}, ${key}, ${internalUrl}, ${filename}, ${fileBuffer.length}, ${contentType})
+          `;
+          created += 1;
+          continue;
+        }
+      }
+
+      const attachmentId = randomUUID();
+      const internalUrl = `/api/requestor/prs/${pr.id}/attachments/${attachmentId}`;
+      await prisma.$executeRaw`
+        INSERT INTO purchase_request_attachments
+          (id, company_id, purchase_request_id, file_key, file_url, file_name, file_size, content_type)
+        VALUES
+          (${attachmentId}, ${pr.companyId || null}, ${pr.id}, ${key}, ${internalUrl}, ${filename}, ${fileBuffer.length}, ${contentType})
+      `;
+      created += 1;
+    }
+
+    return reply.code(201).send({ success: true, uploaded: created });
+  } catch (error: any) {
+    if (error?.code === 'FST_INVALID_MULTIPART_CONTENT_TYPE') {
+      return reply.code(200).send({ success: true, uploaded: 0, skipped: 'invalid_content_type' });
+    }
+    console.error('uploadPRAttachments error:', error);
+    return reply.code(500).send({ error: 'Upload attachment thất bại', message: error?.message });
   }
 };
 
@@ -832,8 +1774,16 @@ export const updatePR = async (
     // Calculate total amount if items are updated
     if (body.items && body.items.length > 0) {
       const totalAmount = body.items.reduce((sum, it) => {
-        const itemAmount = (it.qty || 0) * (it.unitPrice || 0);
-        return sum + itemAmount;
+        const estimated =
+          it.estimatedUnitPriceVnd != null && Number.isFinite(it.estimatedUnitPriceVnd) && it.estimatedUnitPriceVnd > 0
+            ? it.estimatedUnitPriceVnd
+            : 0;
+        const unit =
+          it.unitPrice != null && Number.isFinite(it.unitPrice) && it.unitPrice > 0
+            ? it.unitPrice
+            : 0;
+        const baselineUnitPrice = estimated > 0 ? estimated : unit;
+        return sum + (it.qty || 0) * baselineUnitPrice;
       }, 0);
       const taxAmount = totalAmount * ((body.tax || existingPR.tax || 0) / 100);
       const totalWithTax = totalAmount + taxAmount;
@@ -865,8 +1815,29 @@ export const updatePR = async (
       await prisma.purchaseRequestItem.createMany({
         data: body.items.map((it, idx) => {
           const itemQty = it.qty || 0;
-          const itemUnitPrice = it.unitPrice || 0;
-          const itemAmount = itemQty * itemUnitPrice;
+          const hasPrice = it.unitPrice != null && it.unitPrice > 0;
+          const itemUnitPrice = hasPrice ? it.unitPrice! : null;
+          const estimatedUnitPrice =
+            it.estimatedUnitPriceVnd != null && Number.isFinite(it.estimatedUnitPriceVnd) && it.estimatedUnitPriceVnd > 0
+              ? Number(it.estimatedUnitPriceVnd)
+              : 0;
+          const itemAmount =
+            estimatedUnitPrice > 0
+              ? itemQty * estimatedUnitPrice
+              : hasPrice
+                ? itemQty * Number(it.unitPrice)
+                : null;
+          const desiredRaw = it.desiredDeliveryDate?.trim();
+          let desiredDeliveryDate: Date | null = null;
+          if (desiredRaw) {
+            const iso = desiredRaw.length >= 10 ? desiredRaw.slice(0, 10) : desiredRaw;
+            const d = new Date(`${iso}T00:00:00.000Z`);
+            if (!Number.isNaN(d.getTime())) desiredDeliveryDate = d;
+          }
+          const est =
+            it.estimatedUnitPriceVnd != null && Number.isFinite(it.estimatedUnitPriceVnd)
+              ? new Prisma.Decimal(it.estimatedUnitPriceVnd)
+              : null;
           return {
             purchaseRequestId: pr.id,
             lineNo: idx + 1,
@@ -875,9 +1846,14 @@ export const updatePR = async (
             spec: it.spec,
             manufacturer: it.manufacturer,
             qty: itemQty,
+            fromStockQty: 0,
+            purchaseQty: itemQty,
+            status: 'NEED_PURCHASE',
             unit: it.unit,
             unitPrice: itemUnitPrice,
             amount: itemAmount,
+            estimatedUnitPriceVnd: est,
+            desiredDeliveryDate,
             purpose: it.purpose,
             remark: it.remark,
           };
@@ -917,6 +1893,10 @@ export const updatePR = async (
         unit: it.unit || undefined,
         unitPrice: it.unitPrice ? Number(it.unitPrice) : null,
         amount: it.amount ? Number(it.amount) : null,
+        estimatedUnitPriceVnd: (it as any).estimatedUnitPriceVnd != null ? Number((it as any).estimatedUnitPriceVnd) : null,
+        desiredDeliveryDate: (it as any).desiredDeliveryDate
+          ? new Date((it as any).desiredDeliveryDate).toISOString().slice(0, 10)
+          : undefined,
         purpose: it.purpose || undefined,
         remark: it.remark || undefined,
       })),
@@ -1214,6 +2194,228 @@ export const getPRTracking = async (
   }
 };
 
+// Safe decimal/number conversion for Prisma Decimal fields
+const toNum = (v: unknown): number => {
+  if (v == null) return 0;
+  if (typeof v === 'number' && !Number.isNaN(v)) return v;
+  if (typeof v === 'object' && v !== null && typeof (v as { toNumber?: () => number }).toNumber === 'function') {
+    return (v as { toNumber: () => number }).toNumber();
+  }
+  const n = Number(v);
+  return Number.isNaN(n) ? 0 : n;
+};
+
+/** Full procurement tracking for requestor modal (items + PO + GRN + business timeline). */
+export const getPRProcurementTracking = async (
+  request: AuthenticatedRequest,
+  reply: FastifyReply
+) => {
+  try {
+    const userId = request.user?.userId;
+    const { id } = request.params as { id: string };
+    if (!userId) return reply.code(401).send({ error: 'Unauthorized' });
+    if (!id?.trim()) return reply.code(400).send({ error: 'Thiếu id PR' });
+
+    const pr = await prisma.purchaseRequest.findFirst({
+      where: { id: id.trim(), requestorId: userId, deletedAt: null },
+      include: {
+        items: { where: { deletedAt: null }, orderBy: { lineNo: 'asc' } },
+        salesPO: { select: prSalesPOSelect },
+        purchaseOrders: {
+          where: { deletedAt: null },
+          include: {
+            items: true,
+            supplier: { select: { name: true } },
+          },
+        },
+        supplierSelections: {
+          select: {
+            purchaseRequestItemId: true,
+            quotation: {
+              select: {
+                totalAmount: true,
+                items: {
+                  where: { deletedAt: null },
+                  select: { purchaseRequestItemId: true, totalPrice: true },
+                },
+              },
+            },
+          },
+        },
+        budgetExceptions: {
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+          select: { purchaseAmount: true },
+        },
+      },
+    });
+
+    if (!pr) return reply.code(404).send({ error: 'PR not found' });
+
+    const detailQuotationItemIds = [
+      ...new Set(
+        pr.purchaseOrders.flatMap((po) =>
+          po.items
+            .map((it) => it.quotationItemId)
+            .filter((id): id is string => Boolean(id))
+        )
+      ),
+    ];
+    const detailQuotationItems =
+      detailQuotationItemIds.length > 0
+        ? await prisma.quotationItem.findMany({
+            where: { id: { in: detailQuotationItemIds } },
+            select: { id: true, vatPercent: true },
+          })
+        : [];
+    const detailVatByQuotationItemId = new Map(
+      detailQuotationItems.map((qi) => [
+        qi.id,
+        qi.vatPercent != null ? toNum(qi.vatPercent) : null,
+      ])
+    );
+
+    const poLines = pr.purchaseOrders.flatMap((po) =>
+      po.items.map((it) => ({
+        id: it.id,
+        purchaseRequestItemId: it.purchaseRequestItemId,
+        qty: it.qty,
+        confirmedQty: it.confirmedQty,
+        expectedDeliveryDate: it.expectedDeliveryDate,
+        lineStatus: it.lineStatus,
+        purchaseOrder: { poNumber: po.poNumber, status: po.status as string },
+      }))
+    );
+
+    const poItemIds = poLines.map((l) => l.id);
+    const receivedRows =
+      poItemIds.length > 0
+        ? await prisma.goodsReceiptLine.groupBy({
+            by: ['poItemId'],
+            where: { poItemId: { in: poItemIds } },
+            _sum: { qtyReceived: true },
+          })
+        : [];
+    const receivedByPoItemId = new Map(
+      receivedRows.map((r) => [r.poItemId, toNum(r._sum.qtyReceived)])
+    );
+
+    const prStatus = String(pr.status ?? '');
+    const itemRows = pr.items.map((item) =>
+      deriveItemProcurementRow(
+        {
+          id: item.id,
+          lineNo: item.lineNo,
+          description: item.description,
+          partNo: item.partNo,
+          qty: item.qty,
+          status: String(item.status ?? 'NEW'),
+          departmentItemOutcome: item.departmentItemOutcome,
+          branchItemOutcome: item.branchItemOutcome,
+          desiredDeliveryDate: item.desiredDeliveryDate,
+        },
+        poLines,
+        receivedByPoItemId,
+        prStatus
+      )
+    );
+
+    const timeline = buildBusinessTimeline(prStatus, itemRows, poLines);
+    const deliverySummary = buildDeliverySummary(itemRows);
+    const currentStep = buildCurrentStepBadge(prStatus, itemRows, deliverySummary);
+    const sla = computeTrackingSla(prStatus, timeline.percentage, pr.createdAt);
+
+    const totalAmount = pr.totalAmount ? Number(pr.totalAmount) : null;
+    let proposedCalculatedTotal = 0;
+    for (const item of pr.items) {
+      const qty = toNum(item.qty);
+      const estimatedUnitPrice = toNum(item.estimatedUnitPriceVnd);
+      const unitPrice = toNum(item.unitPrice);
+      const proposedUnitPrice = estimatedUnitPrice > 0 ? estimatedUnitPrice : unitPrice;
+      proposedCalculatedTotal += qty * proposedUnitPrice;
+    }
+    const prTotal = toNum(pr.totalAmount);
+    let calculatedTotal = 0;
+    for (const item of pr.items) {
+      const qty = toNum(item.qty);
+      const unitPrice = toNum(item.unitPrice);
+      const estimatedUnitPrice = toNum(item.estimatedUnitPriceVnd);
+      const effectiveUnitPrice = unitPrice > 0 ? unitPrice : estimatedUnitPrice;
+      calculatedTotal += qty * effectiveUnitPrice;
+    }
+    const proposedAmount =
+      proposedCalculatedTotal > 0
+        ? proposedCalculatedTotal
+        : calculatedTotal > 0
+          ? calculatedTotal
+          : 0;
+
+    const costInsightBase = computeProcurementCostInsight(
+      proposedAmount,
+      (pr.supplierSelections || []) as SupplierSelectionCostInput[],
+      (pr.purchaseOrders || []).map((po) => ({
+        status: String(po.status ?? ''),
+        totalAmount: po.totalAmount,
+        items: po.items.map((it) => ({
+          qty: it.qty,
+          unitPrice: it.unitPrice,
+          amount: it.amount,
+          confirmedQty: it.confirmedQty,
+        })),
+      })) as PurchaseOrderCostInput[]
+    );
+    const poLinesForCost = poLines.map((l) => {
+      const src = pr.purchaseOrders
+        .flatMap((po) => po.items)
+        .find((it) => it.id === l.id);
+      const qid = src?.quotationItemId ?? null;
+      return {
+        id: l.id,
+        unitPrice: src?.unitPrice ?? 0,
+        qty: src?.qty ?? 0,
+        amount: src?.amount ?? null,
+        vatPercent:
+          qid != null ? (detailVatByQuotationItemId.get(qid) ?? null) : null,
+      };
+    });
+    const costInsight = enrichProcurementCostInsight(
+      costInsightBase,
+      deliverySummary,
+      poLinesForCost,
+      receivedByPoItemId
+    );
+
+    return reply.send({
+      pr: {
+        id: pr.id,
+        prNumber: pr.prNumber,
+        status: prStatus,
+        statusLabel: getRequestorPrStatusLabel(prStatus),
+        department: pr.department || null,
+        purpose: pr.purpose || null,
+        totalAmount,
+        currency: (pr.currency as string) || 'VND',
+        createdAt: pr.createdAt.toISOString(),
+        updatedAt: pr.updatedAt.toISOString(),
+        salesOrder: serializePRSalesOrder(pr),
+      },
+      timeline,
+      currentStep,
+      deliverySummary,
+      items: itemRows,
+      sla,
+      costInsight,
+    });
+  } catch (error: unknown) {
+    const err = error as Error;
+    console.error('getPRProcurementTracking error:', err?.message, err?.stack);
+    return reply.code(500).send({
+      error: 'Internal server error',
+      message: err.message,
+    });
+  }
+};
+
 // Get PR Tracking List (with SLA and progress) - NEW FUNCTION
 export const getPRTrackingList = async (
   request: AuthenticatedRequest,
@@ -1224,11 +2426,12 @@ export const getPRTrackingList = async (
     if (!userId) {
       return reply.code(401).send({ error: 'Unauthorized' });
     }
+    const requestorId = String(userId);
 
-    // Get all PRs of the requestor
+    // Same filter as getMyPRs: all PRs where current user is requestor
     const prs = await prisma.purchaseRequest.findMany({
       where: {
-        requestorId: userId,
+        requestorId,
         deletedAt: null,
       },
       include: {
@@ -1236,6 +2439,47 @@ export const getPRTrackingList = async (
           where: { deletedAt: null },
           orderBy: { lineNo: 'asc' },
         },
+        purchaseOrders: {
+          where: { deletedAt: null },
+          select: {
+            poNumber: true,
+            status: true,
+            totalAmount: true,
+            items: {
+              select: {
+                id: true,
+                purchaseRequestItemId: true,
+                quotationItemId: true,
+                qty: true,
+                unitPrice: true,
+                amount: true,
+                confirmedQty: true,
+                expectedDeliveryDate: true,
+                lineStatus: true,
+              },
+            },
+          },
+        },
+        budgetExceptions: {
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+          select: { purchaseAmount: true, status: true, overPercent: true },
+        },
+        supplierSelections: {
+          select: {
+            purchaseRequestItemId: true,
+            quotation: {
+              select: {
+                totalAmount: true,
+                items: {
+                  where: { deletedAt: null },
+                  select: { purchaseRequestItemId: true, totalPrice: true },
+                },
+              },
+            },
+          },
+        },
+        salesPO: { select: prSalesPOSelect },
         requestor: {
           select: {
             id: true,
@@ -1244,19 +2488,7 @@ export const getPRTrackingList = async (
             directManagerCode: true,
           },
         },
-        approvals: {
-          where: { deletedAt: null },
-          orderBy: { createdAt: 'asc' },
-          include: {
-            approver: {
-              select: {
-                username: true,
-              },
-            },
-          },
-        },
         assignments: {
-          where: { deletedAt: null },
           include: {
             buyer: {
               select: {
@@ -1269,192 +2501,364 @@ export const getPRTrackingList = async (
       orderBy: { createdAt: 'desc' },
     });
 
-    // Map PRs with tracking information (using Promise.all for async operations)
-    const prsWithTracking = await Promise.all(prs.map(async (pr) => {
-      const items = pr.items || [];
-      // Calculate total from items
-      let calculatedTotal = 0;
-      if (items.length > 0) {
-        calculatedTotal = items.reduce((sum, item) => {
-          const qty = Number(item.qty) || 0;
-          const unitPrice = Number(item.unitPrice) || 0;
-          return sum + (qty * unitPrice);
-        }, 0);
-      }
-      const finalTotal = (pr.totalAmount && Number(pr.totalAmount) > calculatedTotal) 
-        ? Number(pr.totalAmount) 
-        : calculatedTotal;
+    const trackingQuotationItemIds = [
+      ...new Set(
+        prs.flatMap((pr) =>
+          (pr.purchaseOrders || []).flatMap((po) =>
+            (po.items || [])
+              .map((it) => it.quotationItemId)
+              .filter((id): id is string => Boolean(id))
+          )
+        )
+      ),
+    ];
+    const trackingQuotationItems =
+      trackingQuotationItemIds.length > 0
+        ? await prisma.quotationItem.findMany({
+            where: { id: { in: trackingQuotationItemIds } },
+            select: { id: true, vatPercent: true },
+          })
+        : [];
+    const vatPercentByQuotationItemId = new Map(
+      trackingQuotationItems.map((qi) => [
+        qi.id,
+        qi.vatPercent != null ? toNum(qi.vatPercent) : null,
+      ])
+    );
 
-      // Get item name from first item
-      let itemName = null;
-      if (items.length > 0) {
-        const firstItemWithDesc = items.find(item => item.description && item.description.trim());
-        if (firstItemWithDesc) {
-          itemName = firstItemWithDesc.description.trim();
-        } else {
-          itemName = `${items.length} mặt hàng`;
+    // Batch-fetch handlers once (avoid N+1 queries and premature stream close)
+    const managerCodes = [...new Set(prs.map((p) => p.requestor?.directManagerCode?.trim()).filter(Boolean) as string[])];
+    const [managers, branchManager, buyerLeader] = await Promise.all([
+      managerCodes.length > 0
+        ? prisma.user.findMany({
+            where: { username: { in: managerCodes }, role: 'DEPARTMENT_HEAD', deletedAt: null },
+            select: { username: true },
+          })
+        : Promise.resolve([]),
+      prisma.user.findFirst({ where: { role: 'BRANCH_MANAGER', deletedAt: null }, select: { username: true } }),
+      prisma.user.findFirst({ where: { role: 'BUYER_LEADER', deletedAt: null }, select: { username: true } }),
+    ]);
+    const managerByCode = new Map((managers || []).map((m) => [m.username, m.username]));
+    const branchManagerUsername = branchManager?.username ?? null;
+    const buyerLeaderUsername = buyerLeader?.username ?? null;
+
+    const allPoItemIds: string[] = [];
+    for (const pr of prs) {
+      for (const po of pr.purchaseOrders || []) {
+        for (const it of po.items || []) {
+          allPoItemIds.push(it.id);
         }
       }
+    }
+    const receivedRowsGlobal =
+      allPoItemIds.length > 0
+        ? await prisma.goodsReceiptLine.groupBy({
+            by: ['poItemId'],
+            where: { poItemId: { in: allPoItemIds } },
+            _sum: { qtyReceived: true },
+          })
+        : [];
+    const receivedByPoItemIdGlobal = new Map(
+      receivedRowsGlobal.map((r) => [r.poItemId, toNum(r._sum.qtyReceived)])
+    );
 
-      // Calculate progress stages
-      const stages = [
-        { key: 'DRAFT', label: 'Nháp', completed: false, current: false },
-        { key: 'MANAGER_PENDING', label: 'QL trực tiếp duyệt', completed: false, current: false },
-        { key: 'BRANCH_MANAGER_PENDING', label: 'GĐ Chi nhánh duyệt', completed: false, current: false },
-        { key: 'BUYER_LEADER_PENDING', label: 'Chờ BL phân công', completed: false, current: false },
-        { key: 'ASSIGNED_TO_BUYER', label: 'Đã phân công Buyer', completed: false, current: false },
-        { key: 'RFQ_IN_PROGRESS', label: 'Hỏi giá', completed: false, current: false },
-        { key: 'QUOTATION_RECEIVED', label: 'Nhận báo giá', completed: false, current: false },
-        { key: 'SUPPLIER_SELECTED', label: 'Chọn NCC', completed: false, current: false },
-        { key: 'PAYMENT_DONE', label: 'Hoàn thành', completed: false, current: false },
-      ];
-
-      // Determine current stage and progress
-      let currentStageIndex = -1;
-      let progressPercentage = 0;
-
-      const statusToStageMap: { [key: string]: number } = {
-        'DRAFT': 0,
-        'SUBMITTED': 1,
-        'DEPARTMENT_HEAD_PENDING': 1,
-        'DEPARTMENT_HEAD_APPROVED': 1,
-        'DEPARTMENT_HEAD_REJECTED': -1,
-        'DEPARTMENT_HEAD_RETURNED': -1,
-        'MANAGER_PENDING': 1,
-        'MANAGER_APPROVED': 1,
-        'MANAGER_REJECTED': -1,
-        'MANAGER_RETURNED': -1,
-        'BRANCH_MANAGER_PENDING': 2,
-        'BRANCH_MANAGER_APPROVED': 3,
-        'BRANCH_MANAGER_REJECTED': -1,
-        'BRANCH_MANAGER_RETURNED': -1,
-        'BUYER_LEADER_PENDING': 3,
-        'ASSIGNED_TO_BUYER': 4,
-        'RFQ_IN_PROGRESS': 5,
-        'QUOTATION_RECEIVED': 6,
-        'SUPPLIER_SELECTED': 7,
-        'PAYMENT_DONE': 8,
-        'CANCELLED': -1,
-      };
-
-      currentStageIndex = statusToStageMap[pr.status] ?? -1;
-
-      // Mark completed stages
-      if (currentStageIndex >= 0) {
-        for (let i = 0; i < currentStageIndex; i++) {
-          stages[i].completed = true;
-        }
-        if (currentStageIndex < stages.length) {
-          stages[currentStageIndex].current = true;
-        }
-        progressPercentage = ((currentStageIndex + 1) / stages.length) * 100;
-      } else if (pr.status === 'PAYMENT_DONE') {
-        // All stages completed
-        stages.forEach(s => s.completed = true);
-        progressPercentage = 100;
-      }
-
-      // Get current handler
-      let currentHandler: string | null = null;
-      const assignments = pr.assignments || [];
-      if (['MANAGER_PENDING', 'MANAGER_APPROVED', 'DEPARTMENT_HEAD_PENDING', 'DEPARTMENT_HEAD_APPROVED'].includes(pr.status)) {
-        // Find direct manager
-        const managerCode = pr.requestor?.directManagerCode?.trim();
-        if (managerCode) {
-          const manager = await prisma.user.findFirst({
+    const prIds = prs.map((p) => p.id);
+    const stockIssuesForPrs =
+      prIds.length > 0
+        ? await prisma.stockIssue.findMany({
             where: {
-              username: managerCode,
-              role: 'DEPARTMENT_HEAD',
+              purchaseRequestId: { in: prIds },
+              requestorId,
               deletedAt: null,
             },
-            select: { username: true },
-          });
-          currentHandler = manager?.username || null;
+            select: {
+              id: true,
+              purchaseRequestId: true,
+              issueNumber: true,
+              status: true,
+              createdAt: true,
+            },
+            orderBy: { createdAt: 'desc' },
+          })
+        : [];
+    const latestStockIssueByPrId = new Map<
+      string,
+      { id: string; issueNumber: string; status: string }
+    >();
+    for (const si of stockIssuesForPrs) {
+      const prKey = si.purchaseRequestId;
+      if (!prKey || latestStockIssueByPrId.has(prKey)) continue;
+      latestStockIssueByPrId.set(prKey, {
+        id: si.id,
+        issueNumber: si.issueNumber,
+        status: String(si.status),
+      });
+    }
+
+    // Map PRs with tracking (sync, no per-PR DB calls; wrap in try/catch so one bad PR doesn't break stream)
+    const prsWithTracking = prs.map((pr) => {
+      try {
+        const items = pr.items || [];
+        let calculatedTotal = 0;
+        let proposedCalculatedTotal = 0;
+        if (items.length > 0) {
+          calculatedTotal = items.reduce((sum, item) => {
+            const qty = toNum(item.qty);
+            const unitPrice = toNum(item.unitPrice);
+            const estimatedUnitPrice = toNum(item.estimatedUnitPriceVnd);
+            const effectiveUnitPrice = unitPrice > 0 ? unitPrice : estimatedUnitPrice;
+            return sum + (qty * effectiveUnitPrice);
+          }, 0);
+          proposedCalculatedTotal = items.reduce((sum, item) => {
+            const qty = toNum(item.qty);
+            const estimatedUnitPrice = toNum(item.estimatedUnitPriceVnd);
+            const unitPrice = toNum(item.unitPrice);
+            const proposedUnitPrice = estimatedUnitPrice > 0 ? estimatedUnitPrice : unitPrice;
+            return sum + (qty * proposedUnitPrice);
+          }, 0);
         }
-      } else if (pr.status === 'BRANCH_MANAGER_PENDING') {
-        // Find branch manager
-        const branchManager = await prisma.user.findFirst({
-          where: {
-            role: 'BRANCH_MANAGER',
-            deletedAt: null,
-          },
-          select: { username: true },
-        });
-        currentHandler = branchManager?.username || null;
-      } else if (['BUYER_LEADER_PENDING', 'BRANCH_MANAGER_APPROVED'].includes(pr.status)) {
-        const buyerLeader = await prisma.user.findFirst({
-          where: {
-            role: 'BUYER_LEADER',
-            deletedAt: null,
-          },
-          select: { username: true },
-        });
-        currentHandler = buyerLeader?.username || null;
-      } else if (assignments.length > 0) {
-        // Get assigned buyer
-        currentHandler = assignments[0]?.buyer?.username || null;
-      }
+        const finalTotal =
+          pr.totalAmount && toNum(pr.totalAmount) > calculatedTotal
+            ? toNum(pr.totalAmount)
+            : calculatedTotal;
+        const proposedAmount =
+          proposedCalculatedTotal > 0
+            ? proposedCalculatedTotal
+            : calculatedTotal > 0
+              ? calculatedTotal
+              : 0;
+        const costInsightBase = computeProcurementCostInsight(
+          proposedAmount,
+          (pr.supplierSelections || []) as Parameters<typeof computeProcurementCostInsight>[1],
+          (pr.purchaseOrders || []).map((po) => ({
+            status: String(po.status ?? ''),
+            totalAmount: po.totalAmount,
+            items: (po.items || []).map((it) => ({
+              qty: it.qty,
+              unitPrice: it.unitPrice,
+              amount: it.amount,
+              confirmedQty: it.confirmedQty,
+            })),
+          }))
+        );
 
-      // Calculate SLA status (simplified - can be enhanced with actual SLA rules)
-      const now = new Date();
-      const createdAt = pr.createdAt ? new Date(pr.createdAt) : new Date();
-      const daysSinceCreated = Math.floor((now.getTime() - createdAt.getTime()) / (1000 * 60 * 60 * 24));
-      
-      let slaStatus: 'on_time' | 'warning' | 'overdue' | 'completed' = 'on_time';
-      let timeRemaining: string | null = null;
-      let timeOverdue: string | null = null;
-
-      if (pr.status === 'PAYMENT_DONE' || pr.status === 'CANCELLED') {
-        slaStatus = 'completed';
-      } else {
-        // Simple SLA logic (can be enhanced)
-        const estimatedDays = currentStageIndex * 2 + 3; // Rough estimate
-        if (daysSinceCreated > estimatedDays + 2) {
-          slaStatus = 'overdue';
-          timeOverdue = `${daysSinceCreated - estimatedDays} ngày`;
-        } else if (daysSinceCreated > estimatedDays - 1) {
-          slaStatus = 'warning';
-          timeRemaining = `${estimatedDays - daysSinceCreated} ngày`;
-        } else {
-          slaStatus = 'on_time';
-          timeRemaining = `${estimatedDays - daysSinceCreated} ngày`;
+        let itemName: string | null = null;
+        if (items.length > 0) {
+          const firstItemWithDesc = items.find(item => item.description && item.description.trim());
+          itemName = firstItemWithDesc ? firstItemWithDesc.description.trim() : `${items.length} mặt hàng`;
         }
+
+        const prStatus = String(pr.status ?? '');
+        const poLines = (pr.purchaseOrders || []).flatMap((po) =>
+          (po.items || []).map((it) => ({
+            id: it.id,
+            purchaseRequestItemId: it.purchaseRequestItemId,
+            qty: it.qty,
+            confirmedQty: it.confirmedQty,
+            expectedDeliveryDate: it.expectedDeliveryDate,
+            lineStatus: it.lineStatus,
+            purchaseOrder: { poNumber: po.poNumber, status: String(po.status ?? '') },
+          }))
+        );
+        const receivedByPoItemId = new Map(
+          poLines.map((l) => [l.id, receivedByPoItemIdGlobal.get(l.id) ?? 0])
+        );
+        const prItemInputs = items.map((item) => ({
+          id: item.id,
+          lineNo: item.lineNo,
+          description: item.description,
+          partNo: item.partNo,
+          qty: item.qty,
+          status: String(item.status ?? 'NEW'),
+          departmentItemOutcome: item.departmentItemOutcome,
+          branchItemOutcome: item.branchItemOutcome,
+          desiredDeliveryDate: item.desiredDeliveryDate,
+        }));
+        const itemRows = prItemInputs.map((item) =>
+          deriveItemProcurementRow(item, poLines, receivedByPoItemId, prStatus)
+        );
+        const { stages, percentage: progressPercentage } =
+          itemRows.length > 0 || poLines.length > 0
+            ? buildBusinessTimeline(prStatus, itemRows, poLines)
+            : buildBusinessTimelineFromPrStatus(prStatus);
+        const currentStage = stages.find((s) => s.current) ?? stages[stages.length - 1] ?? null;
+
+        let currentHandler: string | null = null;
+        const assignments = (pr.assignments || []).filter((a) => !(a as { deletedAt?: Date | null }).deletedAt);
+        if (['MANAGER_PENDING', 'MANAGER_APPROVED', 'DEPARTMENT_HEAD_PENDING', 'DEPARTMENT_HEAD_APPROVED'].includes(prStatus)) {
+          const managerCode = pr.requestor?.directManagerCode?.trim();
+          currentHandler = (managerCode && managerByCode.get(managerCode)) ?? null;
+        } else if (prStatus === 'BRANCH_MANAGER_PENDING') {
+          currentHandler = branchManagerUsername;
+        } else if (['BUYER_LEADER_PENDING', 'BRANCH_MANAGER_APPROVED'].includes(prStatus)) {
+          currentHandler = buyerLeaderUsername;
+        } else if (assignments.length > 0) {
+          currentHandler = assignments[0]?.buyer?.username || null;
+        }
+
+        const createdAt = pr.createdAt ? new Date(pr.createdAt) : new Date();
+        let slaStatus: 'on_time' | 'warning' | 'overdue' | 'completed' = 'on_time';
+        let timeRemaining: string | null = null;
+        let timeOverdue: string | null = null;
+
+        const slaComputed = computeTrackingSla(
+          prStatus,
+          progressPercentage,
+          createdAt
+        );
+        slaStatus = slaComputed.status;
+        timeRemaining = slaComputed.timeRemaining;
+        timeOverdue = slaComputed.timeOverdue;
+        const percentConsumed = slaComputed.percentConsumed;
+        const estimatedSlaDays = slaComputed.estimatedDays;
+
+        let procurementSnapshot = buildProcurementListSnapshot(
+          prStatus,
+          prItemInputs,
+          poLines,
+          receivedByPoItemId
+        );
+        const poLinesForCost = poLines.map((l) => {
+          const src = (pr.purchaseOrders || [])
+            .flatMap((po) => po.items || [])
+            .find((it) => it.id === l.id);
+          const qid = src?.quotationItemId ?? null;
+          return {
+            id: l.id,
+            unitPrice: src?.unitPrice ?? 0,
+            qty: src?.qty ?? 0,
+            amount: src?.amount ?? null,
+            vatPercent:
+              qid != null ? (vatPercentByQuotationItemId.get(qid) ?? null) : null,
+          };
+        });
+        const costInsightComputed = enrichProcurementCostInsight(
+          costInsightBase,
+          {
+            receivedCount: procurementSnapshot.receivedCount,
+            totalCount: procurementSnapshot.totalCount,
+            partialCount: procurementSnapshot.partialCount,
+          },
+          poLinesForCost,
+          receivedByPoItemId
+        );
+        if (items.length > 0 && procurementSnapshot.totalCount === 0 && procurementSnapshot.itemPreview.length === 0) {
+          procurementSnapshot = {
+            ...procurementSnapshot,
+            totalCount: items.length,
+            itemPreview: itemRows.slice(0, 3).map((r) => ({
+              label: r.label,
+              statusLabel: r.statusLabel,
+              statusKey: r.statusKey,
+              eta: r.eta,
+              qtyReceived: r.qtyReceived,
+              qtyCap: r.qtyCap,
+            })),
+          };
+        }
+
+        return {
+          id: pr.id,
+          prNumber: pr.prNumber,
+          itemName,
+          purpose: pr.purpose || null,
+          department: pr.department || null,
+          status: prStatus,
+          totalAmount: finalTotal > 0 ? finalTotal : null,
+          currency: (pr.currency as string) || 'VND',
+          createdAt: pr.createdAt ? (pr.createdAt as Date).toISOString() : null,
+          updatedAt: pr.updatedAt ? (pr.updatedAt as Date).toISOString() : null,
+          progress: {
+            percentage: progressPercentage,
+            stages,
+            currentStage,
+          },
+          currentHandler,
+          sla: {
+            status: slaStatus,
+            timeRemaining,
+            timeOverdue,
+            daysSinceCreated: slaComputed.daysSinceCreated,
+            percentConsumed,
+            estimatedDays: estimatedSlaDays,
+          },
+          costInsight: costInsightComputed,
+          procurementSnapshot,
+          salesOrder: serializePRSalesOrder(pr),
+          stockIssuePickup: {
+            ready: isReadyForStockIssuePickup({
+              receivedCount: procurementSnapshot.receivedCount,
+              totalCount: procurementSnapshot.totalCount,
+              partialCount: procurementSnapshot.partialCount,
+              nextEta: procurementSnapshot.nextEta,
+            }),
+            linkedStockIssue: latestStockIssueByPrId.get(pr.id) ?? null,
+          },
+        };
+      } catch (err) {
+        console.warn('getPRTrackingList: map PR failed', pr.id, (err as Error)?.message);
+        return {
+          id: pr.id,
+          prNumber: pr.prNumber,
+          itemName: null,
+          purpose: null,
+          department: pr.department || null,
+          status: String(pr.status ?? ''),
+          totalAmount: null,
+          currency: 'VND',
+          createdAt: pr.createdAt ? (pr.createdAt as Date).toISOString() : null,
+          updatedAt: pr.updatedAt ? (pr.updatedAt as Date).toISOString() : null,
+          progress: { percentage: 0, stages: [], currentStage: null },
+          currentHandler: null,
+          sla: {
+            status: 'on_time' as const,
+            timeRemaining: null,
+            timeOverdue: null,
+            daysSinceCreated: 0,
+            percentConsumed: 0,
+            estimatedDays: 3,
+          },
+          costInsight: {
+            proposedAmount: null,
+            procurementCostAmount: null,
+            buyerTargetAmount: null,
+            costSource: 'none' as const,
+            isFinalized: false,
+            awaitingVendorConfirm: false,
+            deltaAmount: 0,
+            deltaPercent: 0,
+            status: 'unknown' as const,
+          },
+          procurementSnapshot: {
+            nextEta: null,
+            receivedCount: 0,
+            totalCount: 0,
+            partialCount: 0,
+            hasDelay: false,
+            delayHint: null,
+            itemPreview: [],
+          },
+          salesOrder: serializePRSalesOrder(pr),
+          stockIssuePickup: {
+            ready: false,
+            linkedStockIssue: null,
+          },
+        };
       }
-
-      return {
-        id: pr.id,
-        prNumber: pr.prNumber,
-        itemName: itemName,
-        purpose: pr.purpose || null,
-        department: pr.department || null,
-        status: pr.status,
-        totalAmount: finalTotal > 0 ? finalTotal : null,
-        currency: pr.currency || 'VND',
-        createdAt: pr.createdAt ? pr.createdAt.toISOString() : null,
-        updatedAt: pr.updatedAt ? pr.updatedAt.toISOString() : null,
-        progress: {
-          percentage: progressPercentage,
-          stages: stages,
-          currentStage: currentStageIndex >= 0 ? stages[currentStageIndex] : null,
-        },
-        currentHandler: currentHandler,
-        sla: {
-          status: slaStatus,
-          timeRemaining: timeRemaining,
-          timeOverdue: timeOverdue,
-          daysSinceCreated: daysSinceCreated,
-        },
-      };
-    }));
-
-    reply.send({
-      prs: prsWithTracking,
     });
-  } catch (error: any) {
-    console.error('Get PR Tracking List error:', error);
+
+    const payload = { prs: Array.isArray(prsWithTracking) ? prsWithTracking : [] };
+    return reply
+      .code(200)
+      .header('Cache-Control', 'no-store')
+      .type('application/json')
+      .send(payload);
+  } catch (error: unknown) {
+    const err = error as Error;
+    console.error('Get PR Tracking List error:', err?.message, err?.stack);
     reply.code(500).send({
       error: 'Internal server error',
-      message: error.message,
+      message: err?.message ?? 'Unknown error',
     });
   }
 };
@@ -1572,16 +2976,30 @@ export const submitPR = async (
 
     const nextStatus = 'MANAGER_PENDING';
 
-    // ============================================
-    // UPDATE PR STATUS
-    // ============================================
-    const updatedPR = await prisma.purchaseRequest.update({
-      where: { id },
-      data: {
-        status: nextStatus as any,
-        // đảm bảo branch_code được lưu trên PR để flow duyệt dùng thống nhất
-        location: requestor.location || pr.location,
-      },
+    // PR chỉ mua hàng — toàn bộ dòng NEED_PURCHASE, không reserve kho.
+    const updatedPR = await prisma.$transaction(async (tx) => {
+      const activeItems = await tx.purchaseRequestItem.findMany({
+        where: { purchaseRequestId: id, deletedAt: null },
+        orderBy: { lineNo: 'asc' },
+      });
+      for (const item of activeItems) {
+        const qty = Number(item.qty || 0);
+        await tx.purchaseRequestItem.update({
+          where: { id: item.id },
+          data: {
+            fromStockQty: 0,
+            purchaseQty: qty,
+            status: 'NEED_PURCHASE',
+          } as any,
+        });
+      }
+      return tx.purchaseRequest.update({
+        where: { id },
+        data: {
+          status: nextStatus as any,
+          location: requestor.location || pr.location,
+        },
+      });
     });
 
     // Note: KHÔNG tạo PRApproval ở bước submit. PRApproval chỉ tạo khi người duyệt thực hiện APPROVE/REJECT/RETURN.
@@ -1629,6 +3047,91 @@ export const submitPR = async (
       error: 'Internal server error',
       message: error.message,
     });
+  }
+};
+
+// Requestor xóa/thu hồi PR đã lỡ gửi (soft delete)
+export const deletePR = async (
+  request: AuthenticatedRequest,
+  reply: FastifyReply
+) => {
+  try {
+    const userId = request.user?.userId;
+    const { id } = request.params as { id: string };
+    if (!userId) return reply.code(401).send({ error: 'Unauthorized' });
+
+    const pr = await prisma.purchaseRequest.findFirst({
+      where: { id, requestorId: userId, deletedAt: null },
+      include: { rfqs: { select: { id: true } }, purchaseOrders: { select: { id: true } } },
+    });
+    if (!pr) return reply.code(404).send({ error: 'PR not found' });
+
+    const cancellableStatuses = new Set([
+      'SUBMITTED',
+      'MANAGER_PENDING',
+      'DEPARTMENT_HEAD_PENDING',
+      'BRANCH_MANAGER_PENDING',
+    ]);
+    if (!cancellableStatuses.has(pr.status)) {
+      return reply.code(403).send({ error: 'Chỉ được xóa PR đã gửi nhưng chưa vào xử lý mua hàng.' });
+    }
+
+    if ((pr.rfqs?.length ?? 0) > 0 || (pr.purchaseOrders?.length ?? 0) > 0) {
+      return reply.code(409).send({ error: 'PR đã phát sinh RFQ/PO, không thể xóa.' });
+    }
+
+    const now = new Date();
+    const prItems = await prisma.purchaseRequestItem.findMany({
+      where: { purchaseRequestId: id, deletedAt: null },
+      select: { partNo: true },
+    });
+    const candidatePartCodes = Array.from(
+      new Set(
+        prItems
+          .map((it) => String(it.partNo ?? '').trim())
+          .filter(Boolean)
+      )
+    );
+    let cleanedPartCount = 0;
+    await prisma.$transaction(async (tx) => {
+      await tx.purchaseRequestItem.updateMany({
+        where: { purchaseRequestId: id, deletedAt: null },
+        data: { deletedAt: now },
+      });
+      await tx.purchaseRequest.update({
+        where: { id },
+        data: { deletedAt: now },
+      });
+      await tx.notification.deleteMany({
+        where: { relatedId: id, relatedType: { in: ['PR', 'PURCHASE_REQUEST'] } },
+      });
+
+      for (const partCode of candidatePartCodes) {
+        const stillUsedByActivePR = await tx.purchaseRequestItem.count({
+          where: { partNo: partCode, deletedAt: null },
+        });
+        if (stillUsedByActivePR > 0) continue;
+
+        const stock = await tx.inventoryBalance.aggregate({
+          where: { partInternalCode: partCode, companyId: null },
+          _sum: { quantityAvailable: true, quantityReserved: true },
+        });
+        const available = Number(stock._sum.quantityAvailable ?? 0);
+        const reserved = Number(stock._sum.quantityReserved ?? 0);
+        const stockAvailable = Math.max(0, available - reserved);
+        if (stockAvailable > 0) continue;
+
+        const removed = await tx.partMaster.deleteMany({
+          where: { partInternalCode: partCode, companyId: null },
+        });
+        if (removed.count > 0) cleanedPartCount += removed.count;
+      }
+    });
+
+    return reply.send({ success: true, cleanedPartCount });
+  } catch (error: any) {
+    console.error('Delete PR error:', error);
+    return reply.code(500).send({ error: 'Internal server error', message: error.message });
   }
 };
 
@@ -1691,5 +3194,177 @@ export const getNotifications = async (
       error: 'Internal server error',
       message: error.message,
     });
+  }
+};
+
+// --- Customer PO (Sales PO) for PR dropdown — cùng chuỗi SO với module Sales ---
+const generateSalesPONumberPreview = async (): Promise<string> => {
+  const year = new Date().getFullYear();
+  const key = soSequenceKey(year);
+  const next = await peekNextCounter(prisma, key, () => scanMaxSalesPOSuffix(prisma, year));
+  return `SO-${year}-${String(next).padStart(3, '0')}`;
+};
+
+const createCustomerPOSchema = z.object({
+  customerPONumber: z.string().min(1, 'Số PO khách hàng là bắt buộc'),
+  customerId: z.string().uuid('Vui lòng chọn khách hàng'),
+  projectName: z.string().min(1, 'Tên dự án là bắt buộc'),
+  projectCode: z.string().optional(),
+  salesUserId: z.string().uuid().optional().nullable(),
+  contractValue: z.number().positive('Giá trị hợp đồng phải lớn hơn 0'),
+  currency: z.string().default('VND'),
+});
+
+/** GET /requestor/customer-pos — Danh sách Customer PO cho dropdown (PO Number | Customer | Project) */
+export const listCustomerPOs = async (
+  request: AuthenticatedRequest,
+  reply: FastifyReply
+) => {
+  try {
+    const userId = request.user?.userId;
+    if (!userId) return reply.code(401).send({ error: 'Unauthorized' });
+
+    const list = await prisma.salesPO.findMany({
+      where: { status: 'ACTIVE', deletedAt: null },
+      include: {
+        customer: { select: { id: true, name: true } },
+        salesUser: { select: { id: true, username: true, fullName: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const customerPOs = list.map((po) => ({
+      id: po.id,
+      poNumber: po.customerPONumber || po.salesPONumber,
+      salesPONumber: po.salesPONumber,
+      customer: po.customer?.name ?? '',
+      projectName: po.projectName ?? '',
+      projectCode: po.projectCode ?? null,
+      contractValue: Number(po.amount),
+      currency: po.currency,
+      salesOwner: po.salesUser ? (po.salesUser.fullName || po.salesUser.username) : null,
+    }));
+
+    reply.send({ customerPOs });
+  } catch (error: any) {
+    console.error('List customer POs error:', error);
+    reply.code(500).send({ error: 'Internal server error', message: error.message });
+  }
+};
+
+/** GET /requestor/customer-pos/:id — Chi tiết 1 Customer PO (read-only khi chọn trong form PR) */
+export const getCustomerPOById = async (
+  request: AuthenticatedRequest,
+  reply: FastifyReply
+) => {
+  try {
+    const userId = request.user?.userId;
+    if (!userId) return reply.code(401).send({ error: 'Unauthorized' });
+
+    const { id } = request.params as { id: string };
+    const po = await prisma.salesPO.findFirst({
+      where: { id, deletedAt: null },
+      include: {
+        customer: { select: { id: true, name: true, code: true } },
+        salesUser: { select: { id: true, username: true, fullName: true } },
+        purchaseRequests: {
+          where: { deletedAt: null },
+          select: { id: true, prNumber: true, totalAmount: true, status: true },
+        },
+      },
+    });
+
+    if (!po) return reply.code(404).send({ error: 'Customer PO not found' });
+
+    const totalPRs = po.purchaseRequests.length;
+    const totalProcurementCost = po.purchaseRequests.reduce((sum, pr) => sum + Number(pr.totalAmount ?? 0), 0);
+    const contractValue = Number(po.amount);
+    const remainingBudget = contractValue - totalProcurementCost;
+
+    reply.send({
+      id: po.id,
+      poNumber: po.customerPONumber || po.salesPONumber,
+      salesPONumber: po.salesPONumber,
+      customer: po.customer ? { id: po.customer.id, name: po.customer.name, code: po.customer.code } : null,
+      projectName: po.projectName,
+      projectCode: po.projectCode,
+      contractValue,
+      currency: po.currency,
+      salesOwner: po.salesUser ? { id: po.salesUser.id, name: po.salesUser.fullName || po.salesUser.username } : null,
+      totalPRs,
+      totalProcurementCost,
+      remainingBudget,
+      purchaseRequests: po.purchaseRequests.map((pr) => ({
+        id: pr.id,
+        prNumber: pr.prNumber,
+        totalAmount: pr.totalAmount ? Number(pr.totalAmount) : null,
+        status: pr.status,
+      })),
+    });
+  } catch (error: any) {
+    console.error('Get customer PO error:', error);
+    reply.code(500).send({ error: 'Internal server error', message: error.message });
+  }
+};
+
+/** POST /requestor/customer-pos — Tạo PO khách hàng mới (từ form Tạo PR) */
+export const createCustomerPO = async (
+  request: AuthenticatedRequest,
+  reply: FastifyReply
+) => {
+  try {
+    const userId = request.user?.userId;
+    if (!userId) return reply.code(401).send({ error: 'Unauthorized' });
+
+    const body = createCustomerPOSchema.parse(request.body);
+
+    const year = new Date().getFullYear();
+    const salesPO = await prisma.$transaction(
+      async (tx) => {
+        const key = soSequenceKey(year);
+        const seq = await allocateNextCounter(tx, key, () => scanMaxSalesPOSuffix(tx, year));
+        const salesPONumber = `SO-${year}-${String(seq).padStart(3, '0')}`;
+        return tx.salesPO.create({
+          data: {
+            salesPONumber,
+            customerPONumber: body.customerPONumber,
+            customerId: body.customerId,
+            projectName: body.projectName,
+            projectCode: body.projectCode || null,
+            amount: body.contractValue,
+            currency: body.currency,
+            effectiveDate: new Date(),
+            status: 'ACTIVE',
+            salesUserId: body.salesUserId || null,
+            companyId: null,
+          },
+          include: {
+            customer: true,
+            salesUser: { select: { id: true, username: true, fullName: true } },
+          },
+        });
+      },
+      { maxWait: 10000, timeout: 30000 }
+    );
+
+    await auditCreate('sales_pos', salesPO.id, { ...body, salesPONumber }, { userId });
+
+    reply.code(201).send({
+      id: salesPO.id,
+      poNumber: salesPO.customerPONumber || salesPO.salesPONumber,
+      salesPONumber: salesPO.salesPONumber,
+      customer: salesPO.customer ? { id: salesPO.customer.id, name: salesPO.customer.name } : null,
+      projectName: salesPO.projectName,
+      projectCode: salesPO.projectCode,
+      contractValue: Number(salesPO.amount),
+      currency: salesPO.currency,
+      salesOwner: salesPO.salesUser ? (salesPO.salesUser.fullName || salesPO.salesUser.username) : null,
+    });
+  } catch (error: any) {
+    if (error instanceof z.ZodError) {
+      return reply.code(400).send({ error: 'Validation error', details: error.errors });
+    }
+    console.error('Create customer PO error:', error);
+    reply.code(500).send({ error: 'Internal server error', message: error.message });
   }
 };

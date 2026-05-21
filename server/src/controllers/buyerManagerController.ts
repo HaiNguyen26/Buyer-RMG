@@ -2,31 +2,140 @@ import { FastifyReply } from 'fastify';
 import { prisma } from '../config/database';
 import { AuthenticatedRequest } from '../middleware/auth';
 
+/** Định mức tối đa PR đang xử lý / buyer — vượt = quá tải (cấu hình doanh nghiệp). */
+const WORKLOAD_OVERLOAD_THRESHOLD = 15;
+/** Mức sàn PR đang xử lý — dưới = nhàn rỗi, có thể bổ sung việc. */
+const WORKLOAD_IDLE_THRESHOLD = 3;
+
+/** Ngưỡng capacity (PR đang xử lý) cho % tải team-management — đồng bộ UI heatmap (90% / 40%). */
+const BUYER_WORKLOAD_CAPACITY = 10;
+
+const TEAM_MANAGEMENT_ACTIVE_PR_STATUSES = new Set<string>([
+  'ASSIGNED_TO_BUYER',
+  'RFQ_IN_PROGRESS',
+  'QUOTATION_RECEIVED',
+  'SUPPLIER_SELECTED',
+]);
+
 // GET /api/buyer-manager/dashboard
 export const getBuyerManagerDashboard = async (
   request: AuthenticatedRequest,
   reply: FastifyReply
 ) => {
   try {
-    // Total PR Value - Sum of all PRs in progress
+    const now = new Date();
+
+    // Total PR Value — tổng giá trị PR đang trong pipeline mua hàng (đã vào luồng duyệt/chờ mua)
+    const PIPELINE_STATUSES = [
+      'BUYER_LEADER_PENDING',
+      'BRANCH_MANAGER_APPROVED',
+      'ASSIGNED_TO_BUYER',
+      'RFQ_IN_PROGRESS',
+      'QUOTATION_RECEIVED',
+      'SUPPLIER_SELECTED',
+      'RFQ_COMPLETED',
+      'PO_PENDING',
+      'PO_IN_PROGRESS',
+    ] as const;
+
+    const BRANCH_APPROVED_STATUSES = new Set<string>([
+      'BUYER_LEADER_PENDING',
+      'BRANCH_MANAGER_APPROVED',
+      'BRANCH_MANAGER_PENDING',
+    ]);
+
+    const BUYER_PROCESSING_STATUSES = new Set<string>([
+      'ASSIGNED_TO_BUYER',
+      'RFQ_IN_PROGRESS',
+      'QUOTATION_RECEIVED',
+      'SUPPLIER_SELECTED',
+      'RFQ_COMPLETED',
+      'PO_PENDING',
+      'PO_IN_PROGRESS',
+    ]);
+
+    const FUNNEL_APPROVAL_STATUSES = new Set<string>([
+      'BUYER_LEADER_PENDING',
+      'BRANCH_MANAGER_PENDING',
+      'BRANCH_MANAGER_APPROVED',
+    ]);
+    const FUNNEL_SOURCING_STATUSES = new Set<string>([
+      'ASSIGNED_TO_BUYER',
+      'RFQ_IN_PROGRESS',
+      'QUOTATION_RECEIVED',
+    ]);
+    const FUNNEL_PO_STATUSES = new Set<string>([
+      'SUPPLIER_SELECTED',
+      'RFQ_COMPLETED',
+      'PO_PENDING',
+      'PO_IN_PROGRESS',
+    ]);
+
     const prsInProgress = await prisma.purchaseRequest.findMany({
       where: {
         deletedAt: null,
-        status: {
-          in: ['BUYER_LEADER_PENDING', 'BRANCH_MANAGER_APPROVED', 'ASSIGNED_TO_BUYER', 'RFQ_IN_PROGRESS', 'QUOTATION_RECEIVED', 'SUPPLIER_SELECTED'],
-        },
+        status: { in: [...PIPELINE_STATUSES] },
       },
       select: {
         totalAmount: true,
+        status: true,
+        createdAt: true,
+        updatedAt: true,
       },
-      take: 1000,
+      take: 5000,
     });
 
     const totalPRValue = prsInProgress.reduce((sum, pr) => {
       return sum + (pr.totalAmount ? Number(pr.totalAmount) : 0);
     }, 0);
 
-    // Average Lead Time (from PR creation to supplier selection)
+    let prValueBranchApproved = 0;
+    let prValueBuyerProcessing = 0;
+    for (const pr of prsInProgress) {
+      const amt = pr.totalAmount ? Number(pr.totalAmount) : 0;
+      if (BRANCH_APPROVED_STATUSES.has(pr.status)) prValueBranchApproved += amt;
+      else if (BUYER_PROCESSING_STATUSES.has(pr.status)) prValueBuyerProcessing += amt;
+    }
+
+    const avgAgeDays = (subset: typeof prsInProgress) => {
+      if (subset.length === 0) return 0;
+      return Math.round(
+        subset.reduce((sum, pr) => {
+          const days = Math.floor((now.getTime() - pr.updatedAt.getTime()) / (1000 * 60 * 60 * 24));
+          return sum + Math.max(0, days);
+        }, 0) / subset.length
+      );
+    };
+
+    const funnelApprovalDays = avgAgeDays(prsInProgress.filter((p) => FUNNEL_APPROVAL_STATUSES.has(p.status)));
+    const funnelSourcingDays = avgAgeDays(prsInProgress.filter((p) => FUNNEL_SOURCING_STATUSES.has(p.status)));
+    const funnelPoDays = avgAgeDays(prsInProgress.filter((p) => FUNNEL_PO_STATUSES.has(p.status)));
+
+    const funnelStages = [
+      { key: 'approval', label: 'Duyệt PR', days: funnelApprovalDays },
+      { key: 'sourcing', label: 'Chọn NCC', days: funnelSourcingDays },
+      { key: 'po', label: 'Phát hành PO', days: funnelPoDays },
+    ];
+    const maxFunnelDays = Math.max(...funnelStages.map((s) => s.days), 0);
+    const leadTimeFunnel = funnelStages.map((s) => ({
+      ...s,
+      isBottleneck: maxFunnelDays > 0 && s.days === maxFunnelDays,
+    }));
+
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const monthlyReceived = await prisma.purchaseRequest.aggregate({
+      where: {
+        deletedAt: null,
+        createdAt: { gte: monthStart },
+        status: { notIn: ['DRAFT', 'CANCELLED'] },
+      },
+      _sum: { totalAmount: true },
+    });
+    const monthlyReceivedValue = Number(monthlyReceived._sum.totalAmount ?? 0);
+    const monthlyPipelineCap = Math.max(monthlyReceivedValue, totalPRValue * 1.1, 1);
+    const monthlySpendPct = Math.min(100, Math.round((totalPRValue / monthlyPipelineCap) * 100));
+
+    // Lead time TB (ngày): từ tạo PR → thời điểm cập nhật khi đã chọn NCC (proxy “hoàn tất sourcing”)
     const completedPRs = await prisma.purchaseRequest.findMany({
       where: {
         deletedAt: null,
@@ -36,27 +145,26 @@ export const getBuyerManagerDashboard = async (
         createdAt: true,
         updatedAt: true,
       },
-      take: 100,
+      take: 500,
     });
 
-    const avgLeadTime = completedPRs.length > 0
-      ? Math.round(
-          completedPRs.reduce((sum, pr) => {
-            const days = Math.floor(
-              (pr.updatedAt.getTime() - pr.createdAt.getTime()) / (1000 * 60 * 60 * 24)
-            );
-            return sum + days;
-          }, 0) / completedPRs.length
-        )
-      : 0;
+    const avgLeadTime =
+      completedPRs.length > 0
+        ? Math.round(
+            completedPRs.reduce((sum, pr) => {
+              const days = Math.floor(
+                (pr.updatedAt.getTime() - pr.createdAt.getTime()) / (1000 * 60 * 60 * 24)
+              );
+              return sum + days;
+            }, 0) / completedPRs.length
+          )
+        : 0;
 
-    // Over-Budget Rate - PRs with BUDGET_EXCEPTION status
-    const totalPRs = await prisma.purchaseRequest.count({
+    // Tỷ lệ PR ngân sách ngoại lệ / tổng PR (không nháp) — proxy “vượt ngân sách” khi chưa có cột budget/actual
+    const totalPRsNonDraft = await prisma.purchaseRequest.count({
       where: {
         deletedAt: null,
-        status: {
-          not: 'DRAFT',
-        },
+        status: { not: 'DRAFT' },
       },
     });
 
@@ -67,12 +175,83 @@ export const getBuyerManagerDashboard = async (
       },
     });
 
-    const overBudgetRate = totalPRs > 0 
-      ? Math.round((overBudgetPRs / totalPRs) * 100 * 10) / 10
-      : 0;
+    const overBudgetRate =
+      totalPRsNonDraft > 0
+        ? Math.round((overBudgetPRs / totalPRsNonDraft) * 100 * 10) / 10
+        : 0;
 
-    // PRs in progress count
+    const riskHeatLevel: 'low' | 'medium' | 'high' =
+      overBudgetRate >= 10 || overBudgetPRs >= 5
+        ? 'high'
+        : overBudgetRate >= 3 || overBudgetPRs >= 1
+          ? 'medium'
+          : 'low';
+
     const totalPRsInProgress = prsInProgress.length;
+
+    // PO “rủi ro”: đã quá ngày giao dự kiến nhưng chưa nhận đủ / đóng
+    /** PO đã quá `deliveryDate` nhưng chưa nhận đủ / đóng (không tính nháp). */
+    const riskyPOCount = await prisma.purchaseOrder.count({
+      where: {
+        deletedAt: null,
+        deliveryDate: { lt: now },
+        status: {
+          in: [
+            'SUBMITTED',
+            'APPROVED',
+            'ISSUED',
+            'CREATED',
+            'SENT',
+            'CONFIRMED',
+            'PARTIAL_RECEIVED',
+          ],
+        },
+      },
+    });
+
+    // Completion rate: PR đã có PO (không nháp) / PR đã tiếp nhận (không nháp, không hủy)
+    const prsReceived = await prisma.purchaseRequest.count({
+      where: {
+        deletedAt: null,
+        status: { notIn: ['DRAFT', 'CANCELLED'] },
+      },
+    });
+
+    const prsWithActivePo = await prisma.purchaseRequest.count({
+      where: {
+        deletedAt: null,
+        status: { notIn: ['DRAFT', 'CANCELLED'] },
+        purchaseOrders: {
+          some: {
+            deletedAt: null,
+            status: { notIn: ['DRAFT', 'REJECTED'] },
+          },
+        },
+      },
+    });
+
+    const completionRate =
+      prsReceived > 0 ? Math.round((prsWithActivePo / prsReceived) * 1000) / 10 : 0;
+
+    // NCC có PO đã nhận đủ / đóng (proxy “chiến lược” ổn định)
+    const strategicSupplierGroups = await prisma.purchaseOrder.groupBy({
+      by: ['supplierId'],
+      where: {
+        deletedAt: null,
+        status: { in: ['FULLY_RECEIVED', 'CLOSED'] },
+      },
+    });
+    const strategicSupplierCount = strategicSupplierGroups.length;
+
+    // NCC từng có PO bị từ chối
+    const problematicSupplierGroups = await prisma.purchaseOrder.groupBy({
+      by: ['supplierId'],
+      where: {
+        deletedAt: null,
+        status: 'REJECTED',
+      },
+    });
+    const problematicSupplierCount = problematicSupplierGroups.length;
 
     // Buyer Performance - Query through PRAssignment
     const buyers = await prisma.user.findMany({
@@ -102,17 +281,20 @@ export const getBuyerManagerDashboard = async (
           },
         },
       },
-      take: 10,
+      take: 200,
     });
 
     const buyerPerformance = buyers.map((buyer) => {
-      const activeAssignments = buyer.prAssignmentsBuyer.filter(
-        (assignment) => {
-          const pr = assignment.purchaseRequest;
-          return pr && ['ASSIGNED_TO_BUYER', 'RFQ_IN_PROGRESS', 'QUOTATION_RECEIVED', 'SUPPLIER_SELECTED'].includes(pr.status);
-        }
-      );
-      
+      const activeAssignments = buyer.prAssignmentsBuyer.filter((assignment) => {
+        const pr = assignment.purchaseRequest;
+        return (
+          pr &&
+          ['ASSIGNED_TO_BUYER', 'RFQ_IN_PROGRESS', 'QUOTATION_RECEIVED', 'SUPPLIER_SELECTED'].includes(
+            pr.status
+          )
+        );
+      });
+
       const prsHandled = activeAssignments.length;
       const avgTime =
         prsHandled > 0
@@ -135,12 +317,20 @@ export const getBuyerManagerDashboard = async (
       };
     });
 
-    // Price Trends (mock data - would need historical price data)
-    const priceTrends = [
-      { category: 'Vật tư xây dựng', period: 'Tháng này', change: -3.5 },
-      { category: 'Thiết bị điện', period: 'Tháng này', change: 2.1 },
-      { category: 'Vật liệu hoàn thiện', period: 'Tháng này', change: -1.2 },
-    ];
+    const overloadedBuyerCount = buyerPerformance.filter(
+      (b) => b.prsHandled > WORKLOAD_OVERLOAD_THRESHOLD
+    ).length;
+    const idleBuyerCount = buyerPerformance.filter((b) => b.prsHandled < WORKLOAD_IDLE_THRESHOLD).length;
+
+    const priceTrends: { category: string; period: string; change: number }[] = [];
+
+    const efficiencyScores = buyerPerformance.map((b) =>
+      Math.min(100, Math.max(0, 100 - (b.avgTime > 30 ? 30 : b.avgTime)))
+    );
+    const buyerEfficiency =
+      efficiencyScores.length > 0
+        ? Math.round(efficiencyScores.reduce((a, b) => a + b, 0) / efficiencyScores.length)
+        : 0;
 
     reply.send({
       metrics: {
@@ -148,8 +338,24 @@ export const getBuyerManagerDashboard = async (
         totalPRsInProgress,
         avgLeadTime,
         overBudgetRate,
-        avgPriceTrend: -0.9, // Mock
-        buyerEfficiency: 85, // Mock
+        avgPriceTrend: 0,
+        buyerEfficiency,
+        riskyPOCount,
+        completionRate,
+        prsReceived,
+        prsWithActivePo,
+        strategicSupplierCount,
+        problematicSupplierCount,
+        overloadedBuyerCount,
+        idleBuyerCount,
+        workloadOverloadThreshold: WORKLOAD_OVERLOAD_THRESHOLD,
+        workloadIdleThreshold: WORKLOAD_IDLE_THRESHOLD,
+        prValueBranchApproved,
+        prValueBuyerProcessing,
+        monthlySpendPct,
+        leadTimeFunnel,
+        riskHeatLevel,
+        overBudgetPRCount: overBudgetPRs,
       },
       buyerPerformance,
       priceTrends,
@@ -179,6 +385,7 @@ export const getTeamManagement = async (
       select: {
         id: true,
         username: true,
+        fullName: true,
         email: true,
         role: true,
         prAssignmentsBuyer: {
@@ -203,10 +410,10 @@ export const getTeamManagement = async (
       const activeAssignments = buyer.prAssignmentsBuyer.filter(
         (assignment) => {
           const pr = assignment.purchaseRequest;
-          return pr && ['ASSIGNED_TO_BUYER', 'RFQ_IN_PROGRESS', 'QUOTATION_RECEIVED'].includes(pr.status);
+          return pr && TEAM_MANAGEMENT_ACTIVE_PR_STATUSES.has(pr.status);
         }
       );
-      
+
       const activePRs = activeAssignments.length;
       const avgProcessingTime =
         activePRs > 0
@@ -222,17 +429,45 @@ export const getTeamManagement = async (
           : 0;
 
       const efficiency = Math.max(50, Math.min(100, 100 - avgProcessingTime * 2));
-      const workload =
-        activePRs > 15 ? 'Overload' : activePRs > 10 ? 'High' : 'Normal';
+
+      const workloadPercent = Math.min(
+        100,
+        Math.round((activePRs / BUYER_WORKLOAD_CAPACITY) * 1000) / 10
+      );
+
+      let workloadBand: 'overload' | 'normal' | 'idle';
+      if (workloadPercent > 90) workloadBand = 'overload';
+      else if (workloadPercent < 40) workloadBand = 'idle';
+      else workloadBand = 'normal';
+
+      const highThreshold = Math.ceil(BUYER_WORKLOAD_CAPACITY * 0.7);
+      let workload: 'OVERLOADED' | 'HIGH' | 'NORMAL' | 'LOW';
+      if (workloadBand === 'overload') workload = 'OVERLOADED';
+      else if (workloadBand === 'idle') workload = 'LOW';
+      else if (activePRs >= highThreshold) workload = 'HIGH';
+      else workload = 'NORMAL';
+
+      const displayName =
+        buyer.fullName && String(buyer.fullName).trim().length > 0
+          ? String(buyer.fullName).trim()
+          : buyer.username;
 
       return {
-        name: buyer.username,
+        id: buyer.id,
+        username: buyer.username,
+        name: displayName,
         email: buyer.email,
         role: buyer.role,
+        /** Schema chưa có loại mua theo user — mặc định để UI không lọc “ảo”. */
+        purchaseTypes: ['DOMESTIC'] as const,
         activePRs,
+        /** Số ngày TB từ lúc tạo PR đến nay (PR đang xử lý) — proxy lead time đang chạy. */
         avgProcessingTime,
+        avgLeadTimeDays: avgProcessingTime,
         efficiency,
         workload,
+        workloadPercent,
+        workloadBand,
       };
     });
 
@@ -250,6 +485,7 @@ export const getTeamManagement = async (
       buyers: buyersCount,
       avgEfficiency,
       totalWorkload,
+      workloadCapacityPerBuyer: BUYER_WORKLOAD_CAPACITY,
       members,
     });
   } catch (error: any) {
@@ -267,43 +503,13 @@ export const getCostAnalysis = async (
   reply: FastifyReply
 ) => {
   try {
-    // Mock data for cost analysis
-    // In production, this would analyze actual quotation data
     reply.send({
-      avgSaving: 12.5,
-      avgLeadTime: 14,
-      riskySuppliers: 3,
-      priceTrendData: [
-        { month: 'T1', marketPrice: 100, actualPrice: 92 },
-        { month: 'T2', marketPrice: 102, actualPrice: 90 },
-        { month: 'T3', marketPrice: 105, actualPrice: 93 },
-        { month: 'T4', marketPrice: 103, actualPrice: 91 },
-        { month: 'T5', marketPrice: 108, actualPrice: 95 },
-        { month: 'T6', marketPrice: 110, actualPrice: 96 },
-      ],
-      leadTimeByCategory: [
-        { category: 'Vật tư xây dựng', avgLeadTime: 12, targetLeadTime: 14 },
-        { category: 'Thiết bị điện', avgLeadTime: 18, targetLeadTime: 15 },
-        { category: 'Vật liệu hoàn thiện', avgLeadTime: 10, targetLeadTime: 12 },
-        { category: 'Thiết bị PCCC', avgLeadTime: 25, targetLeadTime: 20 },
-      ],
-      riskySuppliersList: [
-        {
-          name: 'NCC A',
-          reason: 'Giao hàng trễ 3 lần liên tiếp',
-          riskScore: 75,
-        },
-        {
-          name: 'NCC B',
-          reason: 'Tăng giá đột ngột 15%',
-          riskScore: 68,
-        },
-        {
-          name: 'NCC C',
-          reason: 'Chất lượng không ổn định',
-          riskScore: 62,
-        },
-      ],
+      avgSaving: 0,
+      avgLeadTime: 0,
+      riskySuppliers: 0,
+      priceTrendData: [] as { month: string; marketPrice: number; actualPrice: number }[],
+      leadTimeByCategory: [] as { category: string; avgLeadTime: number; targetLeadTime: number }[],
+      riskySuppliersList: [] as { name: string; reason: string; riskScore: number }[],
     });
   } catch (error) {
     console.error('Error fetching cost analysis:', error);
@@ -317,54 +523,25 @@ export const getSupplierPerformance = async (
   reply: FastifyReply
 ) => {
   try {
-    // Mock data for supplier performance
-    // In production, this would analyze actual supplier data
+    const totalSuppliers = await prisma.supplier.count({ where: { deletedAt: null } });
+
     reply.send({
-      totalSuppliers: 45,
-      onTimeDeliveryRate: 87,
-      priceStability: 92,
-      avgLeadTime: 14,
-      suppliers: [
-        {
-          name: 'Công ty TNHH Vật tư A',
-          category: 'Vật tư xây dựng',
-          priceStability: 95,
-          onTimeDelivery: 92,
-          avgLeadTime: 12,
-          qualityRating: 5,
-          totalPRs: 45,
-          ranking: 'A',
-        },
-        {
-          name: 'Công ty CP Thiết bị B',
-          category: 'Thiết bị điện',
-          priceStability: 88,
-          onTimeDelivery: 85,
-          avgLeadTime: 15,
-          qualityRating: 4,
-          totalPRs: 32,
-          ranking: 'B',
-        },
-        {
-          name: 'NCC Vật liệu C',
-          category: 'Vật liệu hoàn thiện',
-          priceStability: 78,
-          onTimeDelivery: 75,
-          avgLeadTime: 18,
-          qualityRating: 3,
-          totalPRs: 28,
-          ranking: 'C',
-        },
-      ],
-      topPerformers: [
-        { name: 'Công ty TNHH Vật tư A', category: 'Vật tư xây dựng', score: 95 },
-        { name: 'Công ty CP Thiết bị D', category: 'Thiết bị điện', score: 92 },
-        { name: 'NCC Vật liệu E', category: 'Vật liệu hoàn thiện', score: 90 },
-      ],
-      bottomPerformers: [
-        { name: 'NCC F', issue: 'Giao hàng trễ thường xuyên', score: 45 },
-        { name: 'NCC G', issue: 'Giá không ổn định', score: 52 },
-      ],
+      totalSuppliers,
+      onTimeDeliveryRate: 0,
+      priceStability: 0,
+      avgLeadTime: 0,
+      suppliers: [] as {
+        name: string;
+        category: string;
+        priceStability: number;
+        onTimeDelivery: number;
+        avgLeadTime: number;
+        qualityRating: number;
+        totalPRs: number;
+        ranking: string;
+      }[],
+      topPerformers: [] as { name: string; category: string; score: number }[],
+      bottomPerformers: [] as { name: string; issue: string; score: number }[],
     });
   } catch (error) {
     console.error('Error fetching supplier performance:', error);
@@ -379,68 +556,23 @@ export const getStrategicReports = async (
 ) => {
   try {
     reply.send({
-      totalSaving: 15.2,
-      savingAmount: 125000,
-      supplyChainRisks: 5,
-      procurementEfficiency: 87,
-      costSavingDetails: [
-        {
-          category: 'Vật tư xây dựng',
-          description: 'Đàm phán giá tốt với NCC mới',
-          savedAmount: 45000,
-          percentage: 12,
-        },
-        {
-          category: 'Thiết bị điện',
-          description: 'Mua số lượng lớn',
-          savedAmount: 38000,
-          percentage: 18,
-        },
-        {
-          category: 'Vật liệu hoàn thiện',
-          description: 'Chuyển đổi NCC',
-          savedAmount: 42000,
-          percentage: 15,
-        },
-      ],
-      supplyChainRiskDetails: [
-        {
-          title: 'NCC độc quyền cho thiết bị PCCC',
-          description: 'Chỉ có 1 NCC cung cấp, rủi ro cao nếu gián đoạn',
-          severity: 'High',
-        },
-        {
-          title: 'Tăng giá vật tư thép',
-          description: 'Giá thép tăng 8% trong 2 tháng qua',
-          severity: 'Medium',
-        },
-        {
-          title: 'Lead time kéo dài',
-          description: 'Thiết bị điện nhập khẩu bị chậm do logistics',
-          severity: 'Medium',
-        },
-      ],
-      strategicRecommendations: [
-        {
-          title: 'Đa dạng hóa NCC thiết bị PCCC',
-          description:
-            'Tìm thêm 2-3 NCC dự phòng để giảm rủi ro phụ thuộc vào 1 nguồn cung',
-          impact: 'Giảm 60% rủi ro gián đoạn',
-          priority: 'High',
-        },
-        {
-          title: 'Ký hợp đồng dài hạn với NCC vật tư thép',
-          description: 'Cố định giá trong 6-12 tháng để tránh biến động',
-          impact: 'Tiết kiệm 5-8% chi phí',
-          priority: 'High',
-        },
-        {
-          title: 'Xây dựng kho dự trữ vật tư quan trọng',
-          description: 'Dự trữ 2-3 tháng cho các vật tư có lead time dài',
-          impact: 'Giảm 40% rủi ro chậm tiến độ',
-          priority: 'Medium',
-        },
-      ],
+      totalSaving: 0,
+      savingAmount: 0,
+      supplyChainRisks: 0,
+      procurementEfficiency: 0,
+      costSavingDetails: [] as {
+        category: string;
+        description: string;
+        savedAmount: number;
+        percentage: number;
+      }[],
+      supplyChainRiskDetails: [] as { title: string; description: string; severity: string }[],
+      strategicRecommendations: [] as {
+        title: string;
+        description: string;
+        impact: string;
+        priority: string;
+      }[],
     });
   } catch (error) {
     console.error('Error fetching strategic reports:', error);
@@ -455,72 +587,16 @@ export const getPolicyGuidelines = async (
 ) => {
   try {
     reply.send({
-      supplierSelectionRules: [
-        {
-          title: 'Tối thiểu 3 báo giá',
-          description: 'Mỗi PR phải có ít nhất 3 báo giá từ các NCC khác nhau',
-        },
-        {
-          title: 'Đánh giá NCC định kỳ',
-          description: 'NCC được đánh giá mỗi quý dựa trên giá, chất lượng, giao hàng',
-        },
-        {
-          title: 'Blacklist NCC vi phạm',
-          description: 'NCC vi phạm hợp đồng 2 lần sẽ bị loại khỏi danh sách',
-        },
-      ],
-      priceThresholds: [
-        { category: 'Vật tư xây dựng', maxPrice: 50000, warningPrice: 45000 },
-        { category: 'Thiết bị điện', maxPrice: 100000, warningPrice: 90000 },
-        { category: 'Vật liệu hoàn thiện', maxPrice: 30000, warningPrice: 27000 },
-      ],
-      leadTimeThresholds: [
-        { category: 'Vật tư xây dựng', targetDays: 14, maxDays: 21 },
-        { category: 'Thiết bị điện', targetDays: 15, maxDays: 25 },
-        { category: 'Vật liệu hoàn thiện', targetDays: 12, maxDays: 18 },
-      ],
-      priorityCategories: [
-        {
-          name: 'Thiết bị PCCC',
-          priority: 'Critical',
-          description: 'Liên quan đến an toàn, ưu tiên cao nhất',
-          sla: 7,
-        },
-        {
-          name: 'Vật tư trên đường găng',
-          priority: 'High',
-          description: 'Ảnh hưởng trực tiếp đến tiến độ dự án',
-          sla: 10,
-        },
-        {
-          name: 'Vật tư thông thường',
-          priority: 'Normal',
-          description: 'Vật tư không ảnh hưởng đến tiến độ',
-          sla: 14,
-        },
-      ],
-      approvalWorkflow: [
-        {
-          role: 'Requestor',
-          action: 'Tạo PR',
-          condition: 'Bắt buộc gắn Sales PO/Project',
-        },
-        {
-          role: 'Branch Manager',
-          action: 'Duyệt PR',
-          condition: 'Kiểm tra tính hợp lý',
-        },
-        {
-          role: 'Buyer',
-          action: 'Xử lý RFQ',
-          condition: 'Tối thiểu 3 báo giá',
-        },
-        {
-          role: 'Buyer Leader',
-          action: 'Chọn NCC',
-          condition: 'So sánh và quyết định',
-        },
-      ],
+      supplierSelectionRules: [] as { title: string; description: string }[],
+      priceThresholds: [] as { category: string; maxPrice: number; warningPrice: number }[],
+      leadTimeThresholds: [] as { category: string; targetDays: number; maxDays: number }[],
+      priorityCategories: [] as {
+        name: string;
+        priority: string;
+        description: string;
+        sla: number;
+      }[],
+      approvalWorkflow: [] as { role: string; action: string; condition: string }[],
     });
   } catch (error) {
     console.error('Error fetching policy guidelines:', error);
@@ -535,46 +611,34 @@ export const getAlertsRisks = async (
 ) => {
   try {
     reply.send({
-      criticalAlerts: [
-        {
-          title: 'NCC chính thiết bị PCCC ngừng cung ứng',
-          description: 'NCC A thông báo ngừng cung ứng từ tháng sau',
-          category: 'supplier',
-          detectedAt: '2 giờ trước',
-          affectedItems: 12,
-        },
-      ],
-      highAlerts: [
-        {
-          title: 'Giá thép tăng 15% trong 1 tháng',
-          description: 'Xu hướng tăng giá tiếp tục, cần cố định giá sớm',
-          category: 'price',
-          detectedAt: '1 ngày trước',
-          affectedItems: 25,
-        },
-        {
-          title: 'Lead time thiết bị điện kéo dài',
-          description: 'Trung bình tăng từ 15 lên 22 ngày',
-          category: 'leadtime',
-          detectedAt: '3 ngày trước',
-          affectedItems: 18,
-        },
-      ],
-      mediumAlerts: [
-        {
-          title: 'NCC B giao hàng trễ 2 lần liên tiếp',
-          description: 'Cần đánh giá lại độ tin cậy của NCC này',
-          category: 'supplier',
-          detectedAt: '5 ngày trước',
-          affectedItems: 8,
-        },
-      ],
-      resolvedAlerts: 15,
-      riskTrends: [
-        { category: 'Giá cả', trend: 'increasing', change: 8, description: 'Xu hướng tăng' },
-        { category: 'Lead time', trend: 'increasing', change: 12, description: 'Kéo dài hơn' },
-        { category: 'Chất lượng NCC', trend: 'stable', change: 0, description: 'Ổn định' },
-      ],
+      criticalAlerts: [] as {
+        title: string;
+        description: string;
+        category: string;
+        detectedAt: string;
+        affectedItems: number;
+      }[],
+      highAlerts: [] as {
+        title: string;
+        description: string;
+        category: string;
+        detectedAt: string;
+        affectedItems: number;
+      }[],
+      mediumAlerts: [] as {
+        title: string;
+        description: string;
+        category: string;
+        detectedAt: string;
+        affectedItems: number;
+      }[],
+      resolvedAlerts: 0,
+      riskTrends: [] as {
+        category: string;
+        trend: string;
+        change: number;
+        description: string;
+      }[],
     });
   } catch (error) {
     console.error('Error fetching alerts and risks:', error);

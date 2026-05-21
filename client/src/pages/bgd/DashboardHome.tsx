@@ -77,9 +77,9 @@ const DashboardHome = () => {
   return (
     <div className="p-8 space-y-8 relative" style={{ backgroundColor: 'transparent' }}>
       {/* Header */}
-      <div className="slide-right-title">
-        <h1 className="text-3xl font-bold text-slate-800 mb-2">Executive Dashboard</h1>
-        <p className="text-slate-600">Cái nhìn tổng thể cấp cao</p>
+      <div className="page-banner page-banner-tint-slate slide-right-title">
+        <h1 className="page-banner-title text-slate-800">Executive Dashboard</h1>
+        <p className="page-banner-desc text-slate-600">Cái nhìn tổng thể cấp cao</p>
       </div>
 
       {/* Metrics Grid */}
@@ -210,12 +210,49 @@ const DashboardHome = () => {
                 {dashboardData?.budgetUsage?.usedPercent || 0}%
               </span>
             </div>
-            <div className="h-3 bg-slate-200 rounded-full overflow-hidden">
+            <div className="h-3 bg-slate-200 rounded-full overflow-hidden shadow-inner">
               <div
-                className="h-full bg-gradient-to-r from-blue-500 to-cyan-500 rounded-full"
+                className="relative h-full bg-gradient-to-r from-indigo-500 via-cyan-400 to-blue-600 rounded-full transition-all duration-700 ease-out"
                 style={{ width: `${dashboardData?.budgetUsage?.usedPercent || 0}%` }}
-              ></div>
+              >
+                {/* Liquid Flow Animation */}
+                <div
+                  className="absolute inset-0 animate-liquid-flow"
+                  style={{
+                    background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.4), transparent)',
+                    backgroundSize: '200% 100%',
+                  }}
+                />
+                
+                {/* Micro Bubbles */}
+                {(dashboardData?.budgetUsage?.usedPercent || 0) > 20 && (
+                  <>
+                    <div 
+                      className="absolute left-[15%] top-0.5 h-1 w-1 animate-pulse rounded-full bg-white/40" 
+                      style={{ animationDuration: '2.2s' }} 
+                    />
+                    <div 
+                      className="absolute left-[45%] top-1 h-0.5 w-0.5 animate-pulse rounded-full bg-white/30" 
+                      style={{ animationDuration: '2.8s' }} 
+                    />
+                    <div 
+                      className="absolute left-[75%] top-0.5 h-1 w-1 animate-pulse rounded-full bg-white/35" 
+                      style={{ animationDuration: '3.1s' }} 
+                    />
+                  </>
+                )}
+              </div>
             </div>
+            
+            <style>{`
+              @keyframes liquid-flow {
+                from { transform: translateX(-200%); }
+                to { transform: translateX(300%); }
+              }
+              .animate-liquid-flow {
+                animation: liquid-flow 3s linear infinite;
+              }
+            `}</style>
             <div className="flex items-center justify-between text-sm text-slate-600">
               <span>
                 {dashboardData?.budgetUsage?.used?.toLocaleString() || 0} /{' '}

@@ -4,6 +4,94 @@ import { AuthenticatedRequest } from '../middleware/auth';
 import { auditUpdate } from '../utils/audit';
 import { createNotification, NotificationTemplates, markNotificationAsResolved } from '../utils/notifications';
 import { getIO } from '../utils/getIO';
+import { randomUUID } from 'crypto';
+import { prSalesPOSelect, serializePRSalesOrder } from '../utils/prSalesOrder';
+import {
+  hasActivePurchasingAfterDecisions,
+  itemEligibleForDepartmentOutcome,
+  itemLineAmountForTotal,
+  purchaseRequestNeedsDepartmentHeadRevisionResubmitReview,
+  purchaseRequestStillPendingDepartmentHeadQueue,
+  sumAllLinesSnapshot,
+  sumPurchaseTotalAfterDepartmentDecisions,
+  type DepartmentItemOutcomeValue,
+} from '../utils/departmentPrItemReview';
+import {
+  DEPT_HEAD_REJECTED_STATUSES,
+  DEPT_HEAD_RETURNED_STATUSES,
+  departmentHeadApprovedByUserWhere,
+  departmentHeadRejectedByUserWhere,
+  departmentHeadReturnedByUserWhere,
+  isDepartmentHeadPartialApproval,
+  normalizeApprovalQueueFilter,
+  periodStartDaysAgo,
+} from '../utils/prApprovalQueue';
+
+const PR_TYPE_LABEL_MAP: Record<string, string> = {
+  COMMERCIAL: 'Thương mại',
+  PRODUCTION: 'Sản xuất',
+  PROJECT: 'Dự án',
+  OFFICE: 'Văn phòng',
+  MATERIAL: 'Vật tư',
+  SERVICE: 'Dịch vụ',
+};
+
+const PR_STATUS_BLOCKING_DEPT_REVISION_REVIEW = new Set([
+  'DRAFT',
+  'MANAGER_REJECTED',
+  'MANAGER_RETURNED',
+  'CANCELLED',
+]);
+
+/** Gộp PR chờ duyệt lần đầu + PR có dòng resubmit revision, tránh trùng id. */
+function mergeDepartmentHeadPendingPrs<T extends { id: string; createdAt: Date }>(
+  primary: T[],
+  revisionQueue: T[]
+): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const p of primary) {
+    if (seen.has(p.id)) continue;
+    seen.add(p.id);
+    out.push(p);
+  }
+  for (const p of revisionQueue) {
+    if (seen.has(p.id)) continue;
+    seen.add(p.id);
+    out.push(p);
+  }
+  out.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+  return out;
+}
+
+const prItemSafeSelect = {
+  id: true,
+  purchaseRequestId: true,
+  lineNo: true,
+  description: true,
+  partNo: true,
+  spec: true,
+  manufacturer: true,
+  qty: true,
+  fromStockQty: true,
+  purchaseQty: true,
+  unit: true,
+  unitPrice: true,
+  amount: true,
+  estimatedUnitPriceVnd: true,
+  desiredDeliveryDate: true,
+  purpose: true,
+  remark: true,
+  status: true,
+  departmentItemOutcome: true,
+  departmentDecisionNote: true,
+  departmentDecidedById: true,
+  departmentDecidedAt: true,
+  departmentRevisionSubmittedAt: true,
+  createdAt: true,
+  updatedAt: true,
+  deletedAt: true,
+} as const;
 
 // Get Department Head Dashboard
 export const getDepartmentHeadDashboard = async (
@@ -27,7 +115,7 @@ export const getDepartmentHeadDashboard = async (
 
     // CẤP 1: chỉ hiển thị PR mà Requestor có direct_manager_code = username của người đang đăng nhập
     const whereClause: any = {
-      status: 'MANAGER_PENDING',
+      status: { in: ['MANAGER_PENDING', 'DEPARTMENT_HEAD_PENDING'] },
       deletedAt: null,
       // Exclude PRs created by the department head themselves
       requestorId: { not: userId },
@@ -37,7 +125,7 @@ export const getDepartmentHeadDashboard = async (
     };
 
     // Get pending PRs (waiting for approval)
-    const pendingPRs = await prisma.purchaseRequest.findMany({
+    const pendingPRsRaw = await prisma.purchaseRequest.findMany({
       where: whereClause,
       include: {
         requestor: {
@@ -52,10 +140,63 @@ export const getDepartmentHeadDashboard = async (
         items: {
           where: { deletedAt: null },
           orderBy: { lineNo: 'asc' },
+          select: prItemSafeSelect,
         },
+        salesPO: { select: prSalesPOSelect },
       },
       orderBy: { createdAt: 'asc' },
     });
+
+    const pendingRevisionRaw = await prisma.purchaseRequest.findMany({
+      where: {
+        deletedAt: null,
+        requestorId: { not: userId },
+        requestor: {
+          directManagerCode: managerCode,
+        },
+        status: {
+          notIn: [
+            'DRAFT',
+            'MANAGER_PENDING',
+            'DEPARTMENT_HEAD_PENDING',
+            'MANAGER_REJECTED',
+            'MANAGER_RETURNED',
+            'CANCELLED',
+          ],
+        },
+        items: {
+          some: {
+            deletedAt: null,
+            status: 'NEED_PURCHASE',
+            departmentItemOutcome: 'REVISION_REQUIRED',
+            departmentRevisionSubmittedAt: { not: null },
+          },
+        },
+      },
+      include: {
+        requestor: {
+          select: {
+            id: true,
+            username: true,
+            email: true,
+            location: true,
+            directManagerCode: true,
+          },
+        },
+        items: {
+          where: { deletedAt: null },
+          orderBy: { lineNo: 'asc' },
+          select: prItemSafeSelect,
+        },
+        salesPO: { select: prSalesPOSelect },
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    const pendingPRs = mergeDepartmentHeadPendingPrs(
+      pendingPRsRaw.filter((pr) => purchaseRequestStillPendingDepartmentHeadQueue(pr)),
+      pendingRevisionRaw.filter((pr) => purchaseRequestNeedsDepartmentHeadRevisionResubmitReview(pr))
+    );
 
     // Note: bỏ log debug spam ở môi trường dev
 
@@ -171,6 +312,9 @@ export const getDepartmentHeadDashboard = async (
         return {
           id: pr.id,
           prNumber: pr.prNumber,
+          status: pr.status,
+          type: pr.type,
+          typeLabel: PR_TYPE_LABEL_MAP[String(pr.type || '').toUpperCase()] || String(pr.type || ''),
           department: pr.department,
           itemName: itemName,
           itemCount: pr.items.length,
@@ -179,6 +323,7 @@ export const getDepartmentHeadDashboard = async (
           requestor: pr.requestor,
           requiredDate: pr.requiredDate?.toISOString(),
           createdAt: pr.createdAt.toISOString(),
+          salesOrder: serializePRSalesOrder(pr),
         };
       }),
     });
@@ -211,52 +356,160 @@ export const getPendingPRs = async (
       return reply.code(400).send({ error: 'Không xác định được mã nhân viên (username) của người duyệt' });
     }
 
-    // CẤP 1: chỉ hiển thị PR mà Requestor có direct_manager_code = username của người đang đăng nhập
-    const whereClause: any = {
-      status: 'MANAGER_PENDING',
-      deletedAt: null,
-      // Exclude PRs created by the department head themselves
-      requestorId: { not: userId },
+    const queue = normalizeApprovalQueueFilter((request.query as { queue?: string })?.queue);
+
+    const deptHeadPrInclude = {
       requestor: {
-        directManagerCode: managerCode,
+        select: {
+          id: true,
+          username: true,
+          email: true,
+          location: true,
+          directManagerCode: true,
+        },
       },
+      items: {
+        where: { deletedAt: null },
+        orderBy: { lineNo: 'asc' as const },
+        select: prItemSafeSelect,
+      },
+      approvals: {
+        where: { approverId: userId },
+        orderBy: { createdAt: 'desc' as const },
+        take: 1,
+      },
+      salesPO: { select: prSalesPOSelect },
     };
 
-    const prs = await prisma.purchaseRequest.findMany({
-      where: whereClause,
-      include: {
-        requestor: {
-          select: {
-            id: true,
-            username: true,
-            email: true,
-            location: true,
-            directManagerCode: true,
+    const scopeBase = {
+      deletedAt: null,
+      requestorId: { not: userId },
+      requestor: { directManagerCode: managerCode },
+    };
+
+    let prs: Awaited<ReturnType<typeof prisma.purchaseRequest.findMany>>;
+
+    if (queue !== 'pending') {
+      const periodStart = periodStartDaysAgo(365);
+      const whereClause: Record<string, unknown> = {
+        ...scopeBase,
+      };
+
+      if (queue === 'approved') {
+        Object.assign(whereClause, departmentHeadApprovedByUserWhere(userId, periodStart));
+      } else if (queue === 'rejected') {
+        Object.assign(whereClause, departmentHeadRejectedByUserWhere(userId, periodStart));
+      } else if (queue === 'returned') {
+        Object.assign(whereClause, departmentHeadReturnedByUserWhere(userId, periodStart));
+      } else if (queue === 'partial') {
+        whereClause.updatedAt = { gte: periodStart };
+        whereClause.status = {
+          notIn: [
+            'DRAFT',
+            'CANCELLED',
+            ...DEPT_HEAD_REJECTED_STATUSES,
+            ...DEPT_HEAD_RETURNED_STATUSES,
+            'MANAGER_PENDING',
+            'DEPARTMENT_HEAD_PENDING',
+          ],
+        };
+      } else {
+        whereClause.status = { notIn: ['DRAFT', 'CANCELLED'] };
+        whereClause.updatedAt = { gte: periodStart };
+      }
+
+      const prsRaw = await prisma.purchaseRequest.findMany({
+        where: whereClause as any,
+        include: deptHeadPrInclude,
+        orderBy: { updatedAt: 'desc' },
+        take: 200,
+      });
+
+      prs =
+        queue === 'partial'
+          ? prsRaw.filter((pr) => isDepartmentHeadPartialApproval(pr))
+          : prsRaw;
+    } else {
+      const whereClause: any = {
+        status: { in: ['MANAGER_PENDING', 'DEPARTMENT_HEAD_PENDING'] },
+        ...scopeBase,
+      };
+
+      const prsRaw = await prisma.purchaseRequest.findMany({
+        where: whereClause,
+        include: deptHeadPrInclude,
+        orderBy: { createdAt: 'asc' },
+      });
+
+      const revisionRaw = await prisma.purchaseRequest.findMany({
+        where: {
+          ...scopeBase,
+          status: {
+            notIn: [
+              'DRAFT',
+              'MANAGER_PENDING',
+              'DEPARTMENT_HEAD_PENDING',
+              'MANAGER_REJECTED',
+              'MANAGER_RETURNED',
+              'CANCELLED',
+            ],
+          },
+          items: {
+            some: {
+              deletedAt: null,
+              status: 'NEED_PURCHASE',
+              departmentItemOutcome: 'REVISION_REQUIRED',
+              departmentRevisionSubmittedAt: { not: null },
+            },
           },
         },
-        items: {
-          where: { deletedAt: null },
-          orderBy: { lineNo: 'asc' },
+        include: deptHeadPrInclude,
+        orderBy: { createdAt: 'asc' },
+      });
+
+      prs = mergeDepartmentHeadPendingPrs(
+        prsRaw.filter((pr) => purchaseRequestStillPendingDepartmentHeadQueue(pr)),
+        revisionRaw.filter((pr) => purchaseRequestNeedsDepartmentHeadRevisionResubmitReview(pr)),
+      );
+    }
+
+    const partNos = [
+      ...new Set(
+        prs.flatMap((pr) => pr.items.map((item) => item.partNo?.trim()).filter(Boolean) as string[])
+      ),
+    ];
+    const stockByPart = new Map<string, number>();
+    if (partNos.length > 0) {
+      const stockRows = await prisma.inventoryBalance.groupBy({
+        by: ['partInternalCode'],
+        where: {
+          partInternalCode: { in: partNos },
+          companyId: null,
         },
-        approvals: {
-          where: {
-            approverId: userId,
-          },
-          orderBy: { createdAt: 'desc' },
-          take: 1,
+        _sum: {
+          quantityAvailable: true,
+          quantityReserved: true,
         },
-      },
-      orderBy: { createdAt: 'asc' },
-    });
+      });
+
+      stockRows.forEach((row) => {
+        const available = Number(row._sum.quantityAvailable ?? 0);
+        const reserved = Number(row._sum.quantityReserved ?? 0);
+        stockByPart.set(row.partInternalCode, Math.max(0, available - reserved));
+      });
+    }
 
     const mappedPRs = prs.map((pr) => {
+      const remainingStockByPart = new Map(stockByPart);
       // Calculate total from items
       let calculatedTotal = 0;
       if (pr.items.length > 0) {
         calculatedTotal = pr.items.reduce((sum, item) => {
           const qty = Number(item.qty) || 0;
+          const estimatedUnitPrice = Number((item as any).estimatedUnitPriceVnd) || 0;
           const unitPrice = Number(item.unitPrice) || 0;
-          return sum + (qty * unitPrice);
+          const effectiveUnitPrice = estimatedUnitPrice > 0 ? estimatedUnitPrice : unitPrice;
+          return sum + (qty * effectiveUnitPrice);
         }, 0);
       }
       const finalTotal = (pr.totalAmount && Number(pr.totalAmount) > calculatedTotal) 
@@ -277,6 +530,9 @@ export const getPendingPRs = async (
       return {
         id: pr.id,
         prNumber: pr.prNumber,
+        status: pr.status,
+        type: pr.type,
+        typeLabel: PR_TYPE_LABEL_MAP[String(pr.type || '').toUpperCase()] || String(pr.type || ''),
         department: pr.department,
         itemName: itemName,
         itemCount: pr.items.length,
@@ -286,8 +542,40 @@ export const getPendingPRs = async (
         requiredDate: pr.requiredDate?.toISOString(),
         purpose: pr.purpose,
         notes: pr.notes,
+        totalAmountSnapshot:
+          pr.totalAmountSnapshot != null && Number.isFinite(Number(pr.totalAmountSnapshot))
+            ? Number(pr.totalAmountSnapshot)
+            : null,
         createdAt: pr.createdAt.toISOString(),
+        salesOrder: serializePRSalesOrder(pr),
         items: pr.items.map((item) => ({
+          ...(function deriveSource() {
+            const qty = Number(item.qty || 0);
+            const fromStockQty = Number((item as any).fromStockQty || 0);
+            const purchaseQty = Number((item as any).purchaseQty || 0);
+            const rawStatus = String((item as any).status || 'NEW');
+            if (rawStatus === 'FROM_STOCK' || (fromStockQty > 0 && purchaseQty <= 0)) {
+              return { sourceStatus: 'FROM_STOCK', fromStockQty: fromStockQty > 0 ? fromStockQty : qty, purchaseQty: purchaseQty > 0 ? purchaseQty : 0 };
+            }
+            if (rawStatus === 'NEED_PURCHASE' || purchaseQty > 0) {
+              return { sourceStatus: 'NEED_PURCHASE', fromStockQty, purchaseQty: purchaseQty > 0 ? purchaseQty : Math.max(0, qty - fromStockQty) };
+            }
+            // Legacy item chưa được split: suy luận theo tồn khả dụng hiện tại để hiển thị.
+            const partNo = item.partNo?.trim();
+            // Không có mã vật tư => không thể đối chiếu tồn kho, mặc định cần mua toàn bộ.
+            if (!partNo) {
+              return {
+                sourceStatus: qty > 0 ? 'NEED_PURCHASE' : 'UNKNOWN',
+                fromStockQty: 0,
+                purchaseQty: qty > 0 ? qty : purchaseQty,
+              };
+            }
+            const liveStock = Number(remainingStockByPart.get(partNo) ?? 0);
+            const from = Math.min(qty, Math.max(0, liveStock));
+            const buy = Math.max(0, qty - from);
+            remainingStockByPart.set(partNo, Math.max(0, liveStock - from));
+            return { sourceStatus: buy > 0 ? 'NEED_PURCHASE' : 'FROM_STOCK', fromStockQty: from, purchaseQty: buy };
+          })(),
           id: item.id,
           lineNo: item.lineNo,
           description: item.description,
@@ -295,17 +583,44 @@ export const getPendingPRs = async (
           spec: item.spec,
           manufacturer: item.manufacturer,
           qty: Number(item.qty),
+          status: (item as any).status || 'NEW',
           unit: item.unit,
-          unitPrice: item.unitPrice ? Number(item.unitPrice) : null,
-          amount: item.amount ? Number(item.amount) : null,
+          unitPrice:
+            Number((item as any).estimatedUnitPriceVnd) > 0
+              ? Number((item as any).estimatedUnitPriceVnd)
+              : item.unitPrice
+                ? Number(item.unitPrice)
+                : null,
+          amount:
+            item.amount && Number(item.amount) > 0
+              ? Number(item.amount)
+              : (() => {
+                  const qty = Number(item.qty) || 0;
+                  const estimated = Number((item as any).estimatedUnitPriceVnd) || 0;
+                  const unit = Number(item.unitPrice) || 0;
+                  const effectiveUnitPrice = estimated > 0 ? estimated : unit;
+                  return effectiveUnitPrice > 0 ? qty * effectiveUnitPrice : null;
+                })(),
+          estimatedUnitPriceVnd:
+            Number((item as any).estimatedUnitPriceVnd) > 0
+              ? Number((item as any).estimatedUnitPriceVnd)
+              : null,
           purpose: item.purpose,
           remark: item.remark,
+          departmentItemOutcome: (item as { departmentItemOutcome?: string | null }).departmentItemOutcome ?? null,
+          departmentDecisionNote: (item as { departmentDecisionNote?: string | null }).departmentDecisionNote ?? null,
+          departmentRevisionSubmittedAt: (item as { departmentRevisionSubmittedAt?: Date | null })
+            .departmentRevisionSubmittedAt
+            ? new Date(
+                (item as { departmentRevisionSubmittedAt?: Date | null }).departmentRevisionSubmittedAt as Date
+              ).toISOString()
+            : null,
         })),
         hasPreviousApproval: pr.approvals.length > 0,
       };
     });
 
-    reply.send({ prs: mappedPRs });
+    reply.send({ prs: mappedPRs, queue });
   } catch (error: any) {
     console.error('Get pending PRs error:', error);
     reply.code(500).send({
@@ -315,7 +630,7 @@ export const getPendingPRs = async (
   }
 };
 
-// Approve PR
+// Approve PR (optional partial: itemDecisions per NEED_PURCHASE line)
 export const approvePR = async (
   request: AuthenticatedRequest,
   reply: FastifyReply
@@ -323,31 +638,36 @@ export const approvePR = async (
   try {
     const userId = request.user?.userId;
     const { id } = request.params as { id: string };
-    const { comment } = (request.body as { comment?: string }) || {};
+    const {
+      comment,
+      itemDecisions,
+    } = (request.body as {
+      comment?: string;
+      itemDecisions?: Array<{
+        itemId: string;
+        outcome: DepartmentItemOutcomeValue;
+        note?: string;
+      }>;
+    }) || {};
 
     if (!userId) {
       return reply.code(401).send({ error: 'Unauthorized' });
     }
 
-    // Check if PR exists and is pending
     const pr = await prisma.purchaseRequest.findFirst({
-      where: {
-        id,
-        status: 'MANAGER_PENDING',
-        deletedAt: null,
-      },
+      where: { id, deletedAt: null },
       include: {
         items: {
           where: { deletedAt: null },
+          select: prItemSafeSelect,
         },
       },
     });
 
     if (!pr) {
-      return reply.code(404).send({ error: 'PR not found or not pending approval' });
+      return reply.code(404).send({ error: 'PR not found' });
     }
 
-    // CẤP 1: bắt buộc đúng người quản lý trực tiếp (direct_manager_code)
     const approver = await prisma.user.findUnique({
       where: { id: userId },
       select: { username: true, role: true },
@@ -359,7 +679,6 @@ export const approvePR = async (
       return reply.code(403).send({ error: 'Forbidden - chỉ quản lý trực tiếp mới được duyệt cấp 1' });
     }
 
-    // Xác định branch_code để kiểm tra cấu hình duyệt cấp 2 theo chi nhánh
     const requestor = await prisma.user.findUnique({
       where: { id: pr.requestorId },
       select: { id: true, role: true, location: true, directManagerCode: true },
@@ -379,7 +698,230 @@ export const approvePR = async (
       return reply.code(400).send({ error: 'PR thiếu branch_code (location) - không thể xác định luồng duyệt' });
     }
 
-    // Mặc định: cần duyệt cấp 2 (an toàn)
+    const isInitialPending =
+      pr.status === 'MANAGER_PENDING' || pr.status === 'DEPARTMENT_HEAD_PENDING';
+    const isRevisionReReview =
+      !isInitialPending &&
+      !PR_STATUS_BLOCKING_DEPT_REVISION_REVIEW.has(pr.status) &&
+      purchaseRequestNeedsDepartmentHeadRevisionResubmitReview(pr);
+
+    if (!isInitialPending && !isRevisionReReview) {
+      return reply.code(404).send({ error: 'PR not found or not pending approval' });
+    }
+
+    if (isRevisionReReview) {
+      const allowedReReview = new Set<DepartmentItemOutcomeValue>([
+        'APPROVED',
+        'REJECTED',
+        'REVISION_REQUIRED',
+        'ON_HOLD',
+      ]);
+      const reDecisionInput = new Map<string, { outcome: DepartmentItemOutcomeValue; note?: string }>();
+      for (const row of itemDecisions || []) {
+        if (!row?.itemId || !row?.outcome) continue;
+        if (!allowedReReview.has(row.outcome)) {
+          return reply.code(400).send({ error: `Outcome không hợp lệ: ${row.outcome}` });
+        }
+        reDecisionInput.set(row.itemId, { outcome: row.outcome, note: row.note });
+      }
+      if (reDecisionInput.size === 0) {
+        return reply.code(400).send({ error: 'Cần gửi itemDecisions cho các dòng chờ duyệt lại' });
+      }
+
+      const eligibleIds = new Set(
+        pr.items
+          .filter(
+            (i) =>
+              String((i as { status?: string }).status || '') === 'NEED_PURCHASE' &&
+              String((i as { departmentItemOutcome?: string | null }).departmentItemOutcome || '') ===
+                'REVISION_REQUIRED' &&
+              (i as { departmentRevisionSubmittedAt?: Date | null }).departmentRevisionSubmittedAt != null
+          )
+          .map((i) => i.id)
+      );
+      for (const itemId of reDecisionInput.keys()) {
+        if (!eligibleIds.has(itemId)) {
+          return reply.code(400).send({
+            error: 'Chỉ được duyệt các dòng đã resubmit sau khi Trưởng phòng yêu cầu chỉnh sửa',
+          });
+        }
+      }
+
+      for (const [, d] of reDecisionInput) {
+        if ((d.outcome === 'REJECTED' || d.outcome === 'REVISION_REQUIRED') && !d.note?.trim()) {
+          return reply.code(400).send({
+            error: 'Cần ghi chú (note) khi từ chối hoặc yêu cầu chỉnh sửa lại',
+          });
+        }
+      }
+
+      const decidedAt = new Date();
+      let updatedPR: { id: string; prNumber: string; status: string; totalAmount: unknown; totalAmountSnapshot: unknown };
+
+      await prisma.$transaction(async (tx) => {
+        for (const [itemId, d] of reDecisionInput) {
+          const item = pr.items.find((x) => x.id === itemId)!;
+          await tx.purchaseRequestItem.update({
+            where: { id: itemId },
+            data: {
+              departmentItemOutcome: d.outcome as any,
+              departmentDecisionNote: d.note?.trim() ? d.note.trim() : null,
+              departmentDecidedById: userId,
+              departmentDecidedAt: decidedAt,
+              departmentRevisionSubmittedAt: null,
+            },
+          });
+          await tx.prItemDepartmentDecision.create({
+            data: {
+              id: randomUUID(),
+              companyId: pr.companyId,
+              purchaseRequestItemId: itemId,
+              purchaseRequestId: id,
+              actorId: userId,
+              outcome: d.outcome as any,
+              note: d.note?.trim() ? d.note.trim() : null,
+              lineAmountAtDecision: itemLineAmountForTotal(item as any),
+            },
+          });
+        }
+
+        const allItems = await tx.purchaseRequestItem.findMany({
+          where: { purchaseRequestId: id, deletedAt: null },
+          select: prItemSafeSelect,
+        });
+        const rowsWithOutcome = allItems.map((it) => {
+          const st = String(it.status || 'NEW');
+          const o = it.departmentItemOutcome;
+          const outcome = (
+            itemEligibleForDepartmentOutcome(st)
+              ? ((o || 'APPROVED') as DepartmentItemOutcomeValue)
+              : 'APPROVED'
+          ) as DepartmentItemOutcomeValue;
+          return {
+            id: it.id,
+            status: st,
+            departmentItemOutcome: outcome,
+            departmentDecisionNote: it.departmentDecisionNote ?? null,
+            amount: it.amount,
+            qty: it.qty,
+            unitPrice: it.unitPrice,
+            estimatedUnitPriceVnd: it.estimatedUnitPriceVnd,
+          };
+        });
+        const newTotal = sumPurchaseTotalAfterDepartmentDecisions(rowsWithOutcome);
+        updatedPR = await tx.purchaseRequest.update({
+          where: { id },
+          data: { totalAmount: newTotal },
+        });
+      });
+
+      await auditUpdate(
+        'purchase_requests',
+        id,
+        { status: pr.status, totalAmount: pr.totalAmount },
+        { status: updatedPR!.status, totalAmount: Number(updatedPR!.totalAmount ?? 0) },
+        { userId, companyId: pr.companyId || undefined }
+      );
+
+      if (requestor) {
+        await createNotification(getIO(), {
+          userId: requestor.id,
+          role: requestor.role,
+          type: 'PR_DEPARTMENT_HEAD_APPROVED',
+          title: 'Dòng PR đã được xem xét',
+          message: `Trưởng phòng đã cập nhật quyết định cho một hoặc nhiều dòng trên ${pr.prNumber}.`,
+          relatedId: id,
+          relatedType: 'PR',
+          metadata: { prNumber: pr.prNumber },
+          companyId: pr.companyId,
+        });
+      }
+
+      reply.send({
+        message: 'Đã cập nhật quyết định theo dòng',
+        pr: {
+          id: updatedPR!.id,
+          prNumber: updatedPR!.prNumber,
+          status: updatedPR!.status,
+          totalAmount: Number(updatedPR!.totalAmount ?? 0),
+          totalAmountSnapshot:
+            updatedPR!.totalAmountSnapshot != null ? Number(updatedPR!.totalAmountSnapshot) : null,
+        },
+      });
+      return;
+    }
+
+    const decisionInput = new Map<string, { outcome: DepartmentItemOutcomeValue; note?: string }>();
+    for (const row of itemDecisions || []) {
+      if (!row?.itemId || !row?.outcome) continue;
+      if (!['APPROVED', 'REJECTED', 'ON_HOLD', 'REVISION_REQUIRED'].includes(row.outcome)) {
+        return reply.code(400).send({ error: `Outcome không hợp lệ: ${row.outcome}` });
+      }
+      decisionInput.set(row.itemId, { outcome: row.outcome, note: row.note });
+    }
+
+    const itemIds = new Set(pr.items.map((i) => i.id));
+    for (const itemId of decisionInput.keys()) {
+      if (!itemIds.has(itemId)) {
+        return reply.code(400).send({ error: `Dòng không thuộc PR: ${itemId}` });
+      }
+    }
+
+    const decidedAt = new Date();
+    const rowsWithOutcome: Array<{
+      id: string;
+      status: string;
+      departmentItemOutcome: DepartmentItemOutcomeValue;
+      departmentDecisionNote: string | null;
+      amount?: unknown;
+      qty?: unknown;
+      unitPrice?: unknown;
+      estimatedUnitPriceVnd?: unknown;
+    }> = [];
+
+    for (const item of pr.items) {
+      const st = String((item as { status?: string }).status || 'NEW');
+      let outcome: DepartmentItemOutcomeValue;
+      let note: string | null = null;
+
+      if (!itemEligibleForDepartmentOutcome(st)) {
+        outcome = 'APPROVED';
+        note = null;
+      } else {
+        const d = decisionInput.get(item.id);
+        outcome = d?.outcome ?? 'APPROVED';
+        note = d?.note?.trim() ? d.note.trim() : null;
+        if (outcome === 'REJECTED' || outcome === 'REVISION_REQUIRED') {
+          if (!note) {
+            return reply.code(400).send({
+              error: `Dòng "${(item as { description?: string }).description ?? item.id}" cần lý do khi từ chối hoặc yêu cầu chỉnh sửa (note).`,
+            });
+          }
+        }
+      }
+
+      rowsWithOutcome.push({
+        id: item.id,
+        status: st,
+        departmentItemOutcome: outcome,
+        departmentDecisionNote: note,
+        amount: (item as { amount?: unknown }).amount,
+        qty: (item as { qty?: unknown }).qty,
+        unitPrice: (item as { unitPrice?: unknown }).unitPrice,
+        estimatedUnitPriceVnd: (item as { estimatedUnitPriceVnd?: unknown }).estimatedUnitPriceVnd,
+      });
+    }
+
+    const snapshotExisting =
+      pr.totalAmountSnapshot != null ? Number(pr.totalAmountSnapshot) : null;
+    const snapshotValue =
+      snapshotExisting != null && Number.isFinite(snapshotExisting)
+        ? snapshotExisting
+        : sumAllLinesSnapshot(pr.items as Parameters<typeof sumAllLinesSnapshot>[0]);
+
+    const newTotal = sumPurchaseTotalAfterDepartmentDecisions(rowsWithOutcome);
+    const hasActive = hasActivePurchasingAfterDecisions(rowsWithOutcome);
+
     let needBranchManagerApproval = true;
     try {
       const branch = await prisma.branch.findFirst({
@@ -399,47 +941,109 @@ export const approvePR = async (
 
     const nextStatus = needBranchManagerApproval ? 'BRANCH_MANAGER_PENDING' : 'BUYER_LEADER_PENDING';
 
-    // Update PR status (sau duyệt cấp 1)
-    const updatedPR = await prisma.purchaseRequest.update({
-      where: { id },
-      data: {
-        status: nextStatus as any,
-        location: branchCode, // ensure stored
-      },
-    });
+    const { updatedPR, finalPrStatus } = await prisma.$transaction(async (tx) => {
+      for (const row of rowsWithOutcome) {
+        await tx.purchaseRequestItem.update({
+          where: { id: row.id },
+          data: {
+            departmentItemOutcome: row.departmentItemOutcome as any,
+            departmentDecisionNote: row.departmentDecisionNote,
+            departmentDecidedById: userId,
+            departmentDecidedAt: decidedAt,
+            departmentRevisionSubmittedAt: null,
+          },
+        });
+        await tx.prItemDepartmentDecision.create({
+          data: {
+            id: randomUUID(),
+            companyId: pr.companyId,
+            purchaseRequestItemId: row.id,
+            purchaseRequestId: id,
+            actorId: userId,
+            outcome: row.departmentItemOutcome as any,
+            note: row.departmentDecisionNote,
+            lineAmountAtDecision: itemLineAmountForTotal(row),
+          },
+        });
+      }
 
-    // Create approval record
-    await prisma.pRApproval.create({
-      data: {
-        purchaseRequestId: id,
-        approverId: userId,
-        action: 'APPROVE',
-        comment: comment || null,
-      },
-    });
+      if (!hasActive) {
+        const rejected = await tx.purchaseRequest.update({
+          where: { id },
+          data: {
+            status: 'MANAGER_REJECTED',
+            notes: comment?.trim() || 'Tất cả dòng mua bị từ chối, tạm hoãn hoặc chờ chỉnh sửa',
+            totalAmount: newTotal,
+            ...(pr.totalAmountSnapshot == null ? { totalAmountSnapshot: snapshotValue } : {}),
+            location: branchCode,
+          },
+        });
+        await tx.pRApproval.create({
+          data: {
+            purchaseRequestId: id,
+            approverId: userId,
+            action: 'REJECT',
+            comment: comment?.trim() || 'Không còn dòng mua được duyệt',
+          },
+        });
+        return { updatedPR: rejected, finalPrStatus: 'MANAGER_REJECTED' as const };
+      }
 
-    // Get requestor info for notification
-    // Send notification to REQUESTOR: PR được Trưởng phòng duyệt
-    if (requestor) {
-      const template = NotificationTemplates.PR_DEPARTMENT_HEAD_APPROVED(pr.prNumber);
-      await createNotification(getIO(), {
-        userId: requestor.id,
-        role: requestor.role,
-        type: 'PR_DEPARTMENT_HEAD_APPROVED',
-        title: template.title,
-        message: template.message,
-        relatedId: id,
-        relatedType: 'PR',
-        metadata: { prNumber: pr.prNumber },
-        companyId: pr.companyId,
+      const updated = await tx.purchaseRequest.update({
+        where: { id },
+        data: {
+          status: nextStatus as any,
+          location: branchCode,
+          totalAmount: newTotal,
+          ...(pr.totalAmountSnapshot == null ? { totalAmountSnapshot: snapshotValue } : {}),
+        },
       });
+      await tx.pRApproval.create({
+        data: {
+          purchaseRequestId: id,
+          approverId: userId,
+          action: 'APPROVE',
+          comment: comment || null,
+        },
+      });
+      return { updatedPR: updated, finalPrStatus: nextStatus as string };
+    });
 
-      // Mark old notification as resolved if exists
+    if (requestor) {
+      if (finalPrStatus === 'MANAGER_REJECTED') {
+        const template = NotificationTemplates.PR_RETURNED(
+          pr.prNumber,
+          comment?.trim() || 'Tất cả dòng mua bị từ chối, tạm hoãn hoặc chờ chỉnh sửa'
+        );
+        await createNotification(getIO(), {
+          userId: requestor.id,
+          role: requestor.role,
+          type: 'PR_RETURNED',
+          title: template.title,
+          message: template.message,
+          relatedId: id,
+          relatedType: 'PR',
+          metadata: { prNumber: pr.prNumber, reason: comment },
+          companyId: pr.companyId,
+        });
+      } else {
+        const template = NotificationTemplates.PR_DEPARTMENT_HEAD_APPROVED(pr.prNumber);
+        await createNotification(getIO(), {
+          userId: requestor.id,
+          role: requestor.role,
+          type: 'PR_DEPARTMENT_HEAD_APPROVED',
+          title: template.title,
+          message: template.message,
+          relatedId: id,
+          relatedType: 'PR',
+          metadata: { prNumber: pr.prNumber },
+          companyId: pr.companyId,
+        });
+      }
       await markNotificationAsResolved(id, 'PR', 'PR_PENDING_APPROVAL');
     }
 
-    if (needBranchManagerApproval) {
-      // Send notification to BRANCH_MANAGER: PR chờ duyệt
+    if (hasActive && needBranchManagerApproval) {
       const branchManagers = await prisma.user.findMany({
         where: {
           role: 'BRANCH_MANAGER',
@@ -466,8 +1070,7 @@ export const approvePR = async (
           companyId: pr.companyId,
         });
       }
-    } else {
-      // Bỏ qua duyệt cấp 2 => chuyển thẳng sang Buyer Leader (sẵn sàng phân công)
+    } else if (hasActive && !needBranchManagerApproval) {
       const buyerLeaders = await prisma.user.findMany({
         where: {
           role: 'BUYER_LEADER',
@@ -492,21 +1095,25 @@ export const approvePR = async (
       }
     }
 
-    // Audit log
     await auditUpdate(
       'purchase_requests',
       id,
-      { status: pr.status },
-      { status: nextStatus },
+      { status: pr.status, totalAmount: pr.totalAmount },
+      { status: finalPrStatus, totalAmount: newTotal },
       { userId, companyId: pr.companyId || undefined }
     );
 
     reply.send({
-      message: 'PR approved successfully',
+      message:
+        finalPrStatus === 'MANAGER_REJECTED'
+          ? 'PR bị từ chối do không còn dòng mua được duyệt'
+          : 'PR approved successfully',
       pr: {
         id: updatedPR.id,
         prNumber: updatedPR.prNumber,
         status: updatedPR.status,
+        totalAmount: Number(updatedPR.totalAmount ?? 0),
+        totalAmountSnapshot: updatedPR.totalAmountSnapshot != null ? Number(updatedPR.totalAmountSnapshot) : null,
       },
     });
   } catch (error: any) {
@@ -543,6 +1150,12 @@ export const rejectPR = async (
         status: 'MANAGER_PENDING',
         deletedAt: null,
       },
+      include: {
+        items: {
+          where: { deletedAt: null },
+          select: prItemSafeSelect,
+        },
+      },
     });
 
     if (!pr) {
@@ -570,23 +1183,55 @@ export const rejectPR = async (
       });
     }
 
-    // Update PR status
-    const updatedPR = await prisma.purchaseRequest.update({
-      where: { id },
-      data: {
-        status: 'MANAGER_REJECTED',
-        notes: comment,
-      },
-    });
+    const decidedAt = new Date();
+    const snapshotValue =
+      pr.totalAmountSnapshot != null && Number.isFinite(Number(pr.totalAmountSnapshot))
+        ? Number(pr.totalAmountSnapshot)
+        : sumAllLinesSnapshot(pr.items as Parameters<typeof sumAllLinesSnapshot>[0]);
 
-    // Create approval record
-    await prisma.pRApproval.create({
-      data: {
-        purchaseRequestId: id,
-        approverId: userId,
-        action: 'REJECT',
-        comment: comment,
-      },
+    const updatedPR = await prisma.$transaction(async (tx) => {
+      for (const item of pr.items) {
+        await tx.purchaseRequestItem.update({
+          where: { id: item.id },
+          data: {
+            departmentItemOutcome: 'REJECTED' as any,
+            departmentDecisionNote: comment,
+            departmentDecidedById: userId,
+            departmentDecidedAt: decidedAt,
+          },
+        });
+        await tx.prItemDepartmentDecision.create({
+          data: {
+            id: randomUUID(),
+            companyId: pr.companyId,
+            purchaseRequestItemId: item.id,
+            purchaseRequestId: id,
+            actorId: userId,
+            outcome: 'REJECTED' as any,
+            note: comment,
+            lineAmountAtDecision: itemLineAmountForTotal(item as Parameters<typeof itemLineAmountForTotal>[0]),
+          },
+        });
+      }
+
+      await tx.pRApproval.create({
+        data: {
+          purchaseRequestId: id,
+          approverId: userId,
+          action: 'REJECT',
+          comment: comment,
+        },
+      });
+
+      return tx.purchaseRequest.update({
+        where: { id },
+        data: {
+          status: 'MANAGER_REJECTED',
+          notes: comment,
+          totalAmount: 0,
+          ...(pr.totalAmountSnapshot == null ? { totalAmountSnapshot: snapshotValue } : {}),
+        },
+      });
     });
 
     // Get requestor info for notification
@@ -853,17 +1498,26 @@ export const getDepartmentOverview = async (
     });
     const prsByEmployee = Array.from(prsByEmployeeMap.values()).sort((a, b) => b.count - a.count);
 
-    // PR theo loại (COMMERCIAL / PRODUCTION)
+    const typeLabelMap: { [key: string]: string } = {
+      MATERIAL: 'Vật tư',
+      SERVICE: 'Dịch vụ',
+      COMMERCIAL: 'Thương mại',
+      PRODUCTION: 'Sản xuất',
+      PROJECT: 'Dự án',
+      OFFICE: 'Văn phòng',
+    };
+
+    // PR theo loại
     const prsByTypeMap = new Map<string, { type: string; count: number; totalAmount: number }>();
     prsWithAmounts.forEach((pr) => {
-      const type = (pr as any).type || 'PRODUCTION';
-      const typeLabel = type === 'COMMERCIAL' ? 'Thương mại' : 'Sản xuất';
-      const existing = prsByTypeMap.get(type);
+      const typeKey = String(pr.type || 'PRODUCTION');
+      const typeLabel = typeLabelMap[typeKey] || typeKey;
+      const existing = prsByTypeMap.get(typeKey);
       if (existing) {
         existing.count += 1;
         existing.totalAmount += pr.calculatedTotal;
       } else {
-        prsByTypeMap.set(type, {
+        prsByTypeMap.set(typeKey, {
           type: typeLabel,
           count: 1,
           totalAmount: pr.calculatedTotal,
@@ -904,7 +1558,14 @@ export const getDepartmentOverview = async (
         });
       }
     });
-    const prsByStatus = Array.from(prsByStatusMap.values()).sort((a, b) => b.count - a.count);
+    const prsByStatus = Array.from(prsByStatusMap.entries())
+      .map(([statusCode, v]) => ({
+        statusCode,
+        status: v.status,
+        count: v.count,
+        totalAmount: v.totalAmount,
+      }))
+      .sort((a, b) => b.count - a.count);
 
     reply.send({
       prsByEmployee,

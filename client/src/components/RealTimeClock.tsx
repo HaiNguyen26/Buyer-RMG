@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Clock } from 'lucide-react';
+import { Calendar, Clock3 } from 'lucide-react';
 
 const RealTimeClock = () => {
   const [currentTime, setCurrentTime] = useState(new Date());
@@ -20,7 +20,7 @@ const RealTimeClock = () => {
   };
 
   const formatDate = (date: Date) => {
-    const days = ['Chủ Nhật', 'Thứ Hai', 'Thứ Ba', 'Thứ Tư', 'Thứ Năm', 'Thứ Sáu', 'Thứ Bảy'];
+    const days = ['Chủ Nhật', 'Thứ 2', 'Thứ 3', 'Thứ 4', 'Thứ 5', 'Thứ 6', 'Thứ 7'];
     const dayName = days[date.getDay()];
     const day = date.getDate().toString().padStart(2, '0');
     const month = (date.getMonth() + 1).toString().padStart(2, '0');
@@ -32,28 +32,34 @@ const RealTimeClock = () => {
   const { dayName, day, month, year } = formatDate(currentTime);
 
   return (
-    <div className="flex items-center gap-3 px-4 py-2.5 bg-gradient-to-br from-slate-900 to-slate-800 rounded-soft-lg shadow-soft-md border border-slate-700/50">
-      {/* Clock Icon */}
-      <div className="w-10 h-10 rounded-full bg-blue-500/20 flex items-center justify-center border border-blue-500/30">
-        <Clock className="w-5 h-5 text-blue-400" strokeWidth={2} />
-      </div>
-
-      {/* Time Display */}
-      <div className="flex flex-col">
-        {/* Time */}
-        <div className="flex items-baseline gap-1">
-          <span className="text-2xl font-bold text-white tabular-nums">{hours}</span>
-          <span className="text-xl font-bold text-blue-400 animate-pulse">:</span>
-          <span className="text-2xl font-bold text-white tabular-nums">{minutes}</span>
-          <span className="text-xl font-bold text-blue-400 animate-pulse">:</span>
-          <span className="text-lg font-semibold text-blue-300 tabular-nums">{seconds}</span>
+    <div className="relative group cursor-default">
+      {/* Glow background effect */}
+      <div className="absolute -inset-0.5 bg-gradient-to-r from-blue-500 to-indigo-500 rounded-2xl blur opacity-30 group-hover:opacity-60 transition duration-500"></div>
+      
+      <div className="relative flex items-center gap-4 bg-slate-900 px-5 py-2.5 rounded-2xl border border-slate-700 shadow-xl">
+        {/* Date */}
+        <div className="flex flex-col items-start">
+          <div className="flex items-center gap-1.5 text-blue-400 mb-0.5">
+            <Calendar className="w-3.5 h-3.5" strokeWidth={2.5} />
+            <span className="text-[10px] font-bold uppercase tracking-widest">{dayName}</span>
+          </div>
+          <div className="text-sm font-semibold text-slate-300 tracking-tight">
+            {day}/{month}/{year}
+          </div>
         </div>
         
-        {/* Date */}
-        <div className="flex items-center gap-2 mt-0.5">
-          <span className="text-xs text-slate-300 font-medium">{dayName}</span>
-          <span className="text-xs text-slate-400">•</span>
-          <span className="text-xs text-slate-300 font-normal">{day}/{month}/{year}</span>
+        {/* Divider */}
+        <div className="w-px h-8 bg-slate-700/80" />
+        
+        {/* Time */}
+        <div className="flex items-center gap-2">
+          <div className="flex items-baseline text-2xl font-black tracking-tighter tabular-nums text-white drop-shadow-[0_0_8px_rgba(255,255,255,0.3)]">
+            <span>{hours}</span>
+            <span className="mx-1 text-blue-500 animate-[pulse_1s_ease-in-out_infinite] opacity-80">:</span>
+            <span>{minutes}</span>
+            <span className="mx-1 text-blue-500 animate-[pulse_1s_ease-in-out_infinite] opacity-80">:</span>
+            <span className="text-blue-300 w-[2ch] inline-block text-center">{seconds}</span>
+          </div>
         </div>
       </div>
     </div>
@@ -61,6 +67,3 @@ const RealTimeClock = () => {
 };
 
 export default RealTimeClock;
-
-
-

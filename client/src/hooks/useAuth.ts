@@ -17,10 +17,8 @@ export const useLogin = () => {
             // Initialize Socket.IO connection
             initSocket(data.token);
             
-            // Redirect based on role
-            if (data.user.role === 'SALES') {
-                navigate('/dashboard/sales');
-            } else if (data.user.role === 'REQUESTOR') {
+            // Redirect based on role (Sales role removed from workflow)
+            if (data.user.role === 'REQUESTOR') {
                 navigate('/dashboard/requestor');
             } else if (data.user.role === 'BUYER') {
                 navigate('/dashboard/buyer');
@@ -34,10 +32,16 @@ export const useLogin = () => {
                 navigate('/dashboard/department-head');
             } else if (data.user.role === 'BRANCH_MANAGER') {
                 navigate('/dashboard/branch-manager');
+            } else if (data.user.role === 'BRANCH_DIRECTOR') {
+                navigate('/dashboard/branch-manager');
             } else if (data.user.role === 'BGD') {
                 navigate('/dashboard/bgd');
+            } else if (data.user.role === 'SALES') {
+                navigate('/dashboard/sales');
             } else if (data.user.role === 'SYSTEM_ADMIN') {
                 navigate('/dashboard/system-admin');
+            } else if (data.user.role === 'WAREHOUSE') {
+                navigate('/dashboard/warehouse');
             } else {
                 navigate('/dashboard');
             }

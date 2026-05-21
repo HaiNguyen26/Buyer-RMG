@@ -2,8 +2,10 @@ import { useState, useCallback } from 'react';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { Upload, FileText, Download, AlertTriangle, CheckCircle2, X, FileSpreadsheet, Users, Building2, Briefcase, Shield } from 'lucide-react';
 import { systemAdminService } from '../../services/systemAdminService';
+import { useToast } from '../../contexts/ToastContext';
 
 const ImportCenter = () => {
+  const { showSuccess, showError, showWarning } = useToast();
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [showPreviewModal, setShowPreviewModal] = useState(false);
@@ -40,12 +42,12 @@ const ImportCenter = () => {
         `👥 Users: ${users.created} thành công, ${users.skipped} bỏ qua, ${users.failed} thất bại\n` +
         `✅ Roles: ${roles.validated} validated\n\n` +
         `🔑 Mật khẩu mặc định: ${data?.defaultPassword || 'RMG123@'}`;
-      alert(message);
+      showSuccess(message);
     },
     onError: (error: any) => {
       console.error('Import error:', error);
       const errorMessage = error?.response?.data?.message || error?.message || 'Unknown error';
-      alert(`Import thất bại: ${errorMessage}`);
+      showError(`Import thất bại: ${errorMessage}`);
     },
   });
 
@@ -54,7 +56,7 @@ const ImportCenter = () => {
     if (file && file.name.endsWith('.xlsx') || file?.name.endsWith('.xls')) {
       setSelectedFile(file);
     } else {
-      alert('Vui lòng chọn file Excel (.xlsx hoặc .xls)');
+      showWarning('Vui lòng chọn file Excel (.xlsx hoặc .xls)');
     }
   };
 
@@ -75,9 +77,9 @@ const ImportCenter = () => {
     if (file && (file.name.endsWith('.xlsx') || file.name.endsWith('.xls'))) {
       setSelectedFile(file);
     } else {
-      alert('Vui lòng chọn file Excel (.xlsx hoặc .xls)');
+      showWarning('Vui lòng chọn file Excel (.xlsx hoặc .xls)');
     }
-  }, []);
+  }, [showWarning]);
 
   const handlePreview = () => {
     if (selectedFile) {
@@ -213,6 +215,34 @@ const ImportCenter = () => {
           <p className="text-xs text-slate-500">
             💡 Upload 1 lần – xử lý nhiều phần: Employees, Branches, Departments
           </p>
+          <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600 space-y-1">
+            <p className="font-semibold text-slate-800">Dòng tiêu đề (snake_case):</p>
+            <p>
+              <span className="text-rose-600 font-medium">Bắt buộc:</span>{' '}
+              <code className="bg-white px-1 rounded">employee_code</code>,{' '}
+              <code className="bg-white px-1 rounded">full_name</code>
+            </p>
+            <p>
+              <span className="text-slate-700 font-medium">Tuỳ chọn:</span>{' '}
+              <code className="bg-white px-1 rounded">branch_code</code>,{' '}
+              <code className="bg-white px-1 rounded">branch_name</code>,{' '}
+              <code className="bg-white px-1 rounded">department_name</code>,{' '}
+              <code className="bg-white px-1 rounded">department_code</code>,{' '}
+              <code className="bg-white px-1 rounded">job_title</code>,{' '}
+              <code className="bg-white px-1 rounded">work_location</code>,{' '}
+              <code className="bg-white px-1 rounded">is_branch_director</code>,{' '}
+              <code className="bg-white px-1 rounded">direct_manager_code</code>,{' '}
+              <code className="bg-white px-1 rounded">system_roles</code>
+              {' · '}
+              <span className="text-slate-500">
+                (legacy: <code className="bg-white px-1 rounded">email</code>,{' '}
+                <code className="bg-white px-1 rounded">level_code</code>)
+              </span>
+            </p>
+            <p className="text-slate-500">
+              Không có email hợp lệ → tự sinh <code className="bg-white px-1 rounded">{'{employee_code}@import.rmg.local'}</code>.
+            </p>
+          </div>
         </div>
       </div>
 
@@ -269,8 +299,8 @@ const ImportCenter = () => {
 
       {/* Preview Modal */}
       {showPreviewModal && previewData && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
-          <div className="bg-white rounded-2xl shadow-2xl max-w-6xl w-full max-h-[90vh] overflow-y-auto">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4 modal-popup-overlay" onClick={() => setShowPreviewModal(false)}>
+          <div className="modal-popup-panel bg-white rounded-2xl shadow-2xl max-w-6xl w-full max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
             <div className="sticky top-0 bg-white border-b border-slate-200 p-6 flex items-center justify-between z-10">
               <div>
                 <h3 className="text-xl font-bold text-slate-900">Preview Excel Data</h3>

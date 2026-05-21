@@ -1,4 +1,10 @@
 import axios from 'axios';
+import {
+  shouldServeDeptHeadMock,
+  getDeptHeadMockDepartmentDashboard,
+  getDeptHeadMockDepartmentOverview,
+  getDeptHeadMockPendingPRsDetailed,
+} from '../mocks/departmentHeadDevMock';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
 
@@ -59,6 +65,9 @@ api.interceptors.response.use(
 
 // Get Department Head Dashboard
 export const getDepartmentHeadDashboard = async () => {
+  if (shouldServeDeptHeadMock()) {
+    return getDeptHeadMockDepartmentDashboard();
+  }
   try {
     const response = await api.get('/department-head/dashboard');
     return response.data;
@@ -69,9 +78,12 @@ export const getDepartmentHeadDashboard = async () => {
 };
 
 // Get Pending PRs
-export const getPendingPRs = async () => {
+export const getPendingPRs = async (params?: { queue?: string }) => {
+  if (shouldServeDeptHeadMock()) {
+    return getDeptHeadMockPendingPRsDetailed();
+  }
   try {
-    const response = await api.get('/department-head/pending-prs');
+    const response = await api.get('/department-head/pending-prs', { params });
     
     // Handle different response formats
     let data = response.data;
@@ -111,10 +123,21 @@ export const getPendingPRs = async () => {
   }
 };
 
-// Approve PR
-export const approvePR = async (prId: string, comment?: string) => {
+// Approve PR (optional per-line decisions for NEED_PURCHASE lines)
+export type DepartmentItemDecisionPayload = {
+  itemId: string;
+  outcome: 'APPROVED' | 'REJECTED' | 'ON_HOLD' | 'REVISION_REQUIRED';
+  note?: string;
+};
+
+export const approvePR = async (
+  prId: string,
+  options?: string | { comment?: string; itemDecisions?: DepartmentItemDecisionPayload[] }
+) => {
   try {
-    const response = await api.post(`/department-head/prs/${prId}/approve`, { comment });
+    const payload =
+      typeof options === 'string' ? { comment: options } : (options ?? {});
+    const response = await api.post(`/department-head/prs/${prId}/approve`, payload);
     return response.data;
   } catch (error: any) {
     console.error('Approve PR error:', error);
@@ -146,6 +169,9 @@ export const returnPR = async (prId: string, comment: string) => {
 
 // Get Department Overview
 export const getDepartmentOverview = async () => {
+  if (shouldServeDeptHeadMock()) {
+    return getDeptHeadMockDepartmentOverview();
+  }
   try {
     const response = await api.get('/department-head/department-overview');
     return response.data;

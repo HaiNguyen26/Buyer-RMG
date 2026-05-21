@@ -69,7 +69,11 @@ const ExecutiveReports = () => {
           <div className="text-3xl font-bold text-slate-800">
             {reportsData?.procurementEfficiency || 0}%
           </div>
-          <div className="text-sm text-blue-600 mt-1">Tăng 8% so với quý trước</div>
+          <div className="text-sm text-slate-500 mt-1">
+            {reportsData?.procurementPerformance?.length
+              ? 'Theo chỉ số hệ thống'
+              : 'Báo cáo chi tiết sẽ bổ sung khi có dữ liệu'}
+          </div>
         </div>
 
         <div className="glass rounded-soft p-6">

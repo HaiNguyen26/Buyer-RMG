@@ -244,7 +244,18 @@ const OrganizationManagement = () => {
                 <Building2 className="w-16 h-16 text-slate-300 mx-auto mb-4" />
                 <p className="text-slate-500">Chưa có dữ liệu cấu trúc tổ chức</p>
                 <p className="text-sm text-slate-400 mt-2">
-                  Import dữ liệu từ Excel với các cột: <code className="bg-slate-100 px-1 rounded">employee_code</code>, <code className="bg-slate-100 px-1 rounded">direct_manager_code</code>, <code className="bg-slate-100 px-1 rounded">branch_code</code>, <code className="bg-slate-100 px-1 rounded">system_roles</code>
+                  Import Master Data (Import Center):{' '}
+                  <code className="bg-slate-100 px-1 rounded">employee_code</code>,{' '}
+                  <code className="bg-slate-100 px-1 rounded">full_name</code>,{' '}
+                  <code className="bg-slate-100 px-1 rounded">branch_code</code>,{' '}
+                  <code className="bg-slate-100 px-1 rounded">branch_name</code>,{' '}
+                  <code className="bg-slate-100 px-1 rounded">department_name</code>,{' '}
+                  <code className="bg-slate-100 px-1 rounded">department_code</code>,{' '}
+                  <code className="bg-slate-100 px-1 rounded">job_title</code>,{' '}
+                  <code className="bg-slate-100 px-1 rounded">work_location</code>,{' '}
+                  <code className="bg-slate-100 px-1 rounded">is_branch_director</code>,{' '}
+                  <code className="bg-slate-100 px-1 rounded">direct_manager_code</code>,{' '}
+                  <code className="bg-slate-100 px-1 rounded">system_roles</code>
                 </p>
               </div>
             </div>

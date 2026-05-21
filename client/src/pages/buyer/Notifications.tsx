@@ -1,8 +1,9 @@
 import { useQuery } from '@tanstack/react-query';
-import { Bell, Inbox, MessageSquare, FileQuestion, AlertCircle, CheckCircle } from 'lucide-react';
+import { Bell, Inbox, MessageSquare, FileQuestion, AlertCircle } from 'lucide-react';
 import { buyerService } from '../../services/buyerService';
+import { buyerOutletPageShellClass, buyerPageStackClass } from '../../constants/buyerLayout';
 
-const Notifications = () => {
+export default function Notifications() {
   const { data: notificationsData, isLoading, error } = useQuery({
     queryKey: ['buyer-notifications'],
     queryFn: () => buyerService.getNotifications(),
@@ -43,7 +44,7 @@ const Notifications = () => {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-slate-50 p-6">
+      <div className={`${buyerOutletPageShellClass} py-3 sm:py-4 md:py-5`}>
         <div className="animate-pulse space-y-4">
           <div className="h-8 bg-slate-200 rounded w-64"></div>
           <div className="space-y-3">
@@ -58,7 +59,7 @@ const Notifications = () => {
 
   if (error) {
     return (
-      <div className="min-h-screen bg-slate-50 p-6">
+      <div className={`${buyerOutletPageShellClass} py-3 sm:py-4 md:py-5`}>
         <div className="bg-red-50 border border-red-200 rounded-soft p-4">
           <p className="text-red-800 font-medium">Lỗi khi tải dữ liệu</p>
           <p className="text-red-600 text-sm mt-1">{error instanceof Error ? error.message : 'Vui lòng thử lại sau'}</p>
@@ -67,18 +68,20 @@ const Notifications = () => {
     );
   }
 
-  const unreadCount = notificationsData?.notifications.filter((n: any) => !n.read).length || 0;
+  const notifications = notificationsData?.notifications || [];
+  const unreadCount = notifications.filter((n: any) => !n.read).length || 0;
 
   return (
-    <div className="min-h-screen bg-slate-50 p-6 space-y-6">
+    <div className={`${buyerOutletPageShellClass} py-3 sm:py-4 md:py-5 animate-fade-in-right fade-in-right-delay-0`}>
+      <div className={`${buyerPageStackClass} space-y-6`}>
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900">Notifications</h1>
-          <p className="text-sm text-slate-500 mt-1">Cập nhật thay đổi liên quan đến PR / RFQ</p>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          <h1 className="text-xl font-bold text-slate-900 sm:text-2xl">Notifications</h1>
+          <p className="mt-1 text-xs text-slate-500 sm:text-sm">Cập nhật thay đổi liên quan đến PR / RFQ</p>
         </div>
         {unreadCount > 0 && (
-          <div className="px-4 py-2 bg-blue-100 text-blue-700 rounded-soft-lg font-semibold">
+          <div className="shrink-0 self-start rounded-soft-lg bg-blue-100 px-3 py-2 text-sm font-semibold text-blue-700 sm:self-auto sm:px-4">
             {unreadCount} thông báo chưa đọc
           </div>
         )}
@@ -86,8 +89,8 @@ const Notifications = () => {
 
       {/* Notifications List */}
       <div className="space-y-3">
-        {notificationsData?.notifications && notificationsData.notifications.length > 0 ? (
-          notificationsData.notifications.map((notification: any) => (
+        {notifications.length > 0 ? (
+          notifications.map((notification: any) => (
             <div
               key={notification.id}
               className={`bg-white rounded-soft shadow-soft border-l-4 p-4 card-hover transition-all ${
@@ -142,9 +145,8 @@ const Notifications = () => {
           </div>
         )}
       </div>
+      </div>
     </div>
   );
-};
-
-export default Notifications;
+}
 

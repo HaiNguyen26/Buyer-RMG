@@ -1,26 +1,35 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { useNavigate, useLocation, Outlet } from 'react-router-dom';
-import { useCurrentUser, useLogout } from '../hooks/useAuth';
-import {
-  Menu,
-  LayoutDashboard,
-  ShoppingCart,
-  MapPin,
-  Search,
-  User,
-  X,
-  Bell,
-} from 'lucide-react';
-import LogoRMG from '../assets/LogoRMG.png';
+import { useCurrentUser } from '../hooks/useAuth';
+import { LayoutDashboard, ShoppingCart, MapPin, Bell, Package } from 'lucide-react';
 import DashboardHeader from '../components/DashboardHeader';
+import { StandardDashboardSidebar } from '../components/StandardDashboardSidebar';
+import { useMobileDashboardNav, mainMarginForSidebar240 } from '../hooks/useMobileDashboardNav';
+import {
+  dashboardMainOutletFlushClass,
+} from '../constants/dashboardLayout';
+import { requestorMainShellPaddingClass } from '../constants/requestorLayout';
+
+/**
+ * Layout Requestor — cùng “khung xương” dashboard RMG (đồng bộ Branch / Dept Head):
+ *
+ * 1) Xương sống: `flex h-[100dvh] max-h-[100dvh] min-w-0 overflow-hidden` — một khối cao đúng viewport,
+ *    không cuộn body lung tung; main `flex-1 min-h-0 min-w-0` chiếm phần còn lại sau sidebar.
+ * 2) Sidebar mobile: `StandardDashboardSidebar` + `asideFixed240Motion` (fixed / translate / overlay).
+ * 3) Bảng: token chung `src/constants/dataTableLayout.ts` (~7–8 dòng, cuộn, sticky thead, min-width ngang); từng module thêm `table-fixed`/colgroup nếu cần.
+ * 4) Cuộn main: header `shrink-0`; vùng dưới — **cùng** `dashboardMainPaddingX` + `dashboardMainPaddingTopTight` + pb overview
+ *    cho mọi route (`requestorMainShellPaddingClass`). Mặc định main `WideXFlushTop` + cuộn; PR/stock/form dùng `overflow-hidden`
+ *    + outlet flush nhưng **không** bỏ padding shell — tránh lệch mép so với tổng quan.
+ */
 
 const RequestorDashboard = () => {
   const { data: user, isLoading } = useCurrentUser();
-  const logout = useLogout();
   const navigate = useNavigate();
   const location = useLocation();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const contentScrollRef = useRef<HTMLDivElement>(null);
+  const { mobileNavOpen, toggleMobileNav, closeMobileNav } = useMobileDashboardNav();
 
   if (isLoading) {
     return (
@@ -35,27 +44,28 @@ const RequestorDashboard = () => {
 
   // Redirect if user is not Requestor
   if (user?.role !== 'REQUESTOR') {
-    return <div className="min-h-screen flex items-center justify-center bg-[#F8FAFC] text-red-500">Access Denied</div>;
+    return <div className="min-h-screen flex items-center justify-center bg-[#F8FAFC] text-red-500">Từ chối truy cập</div>;
   }
 
   const menuGroups = [
     {
       title: 'Tổng quan',
       items: [
-        { icon: LayoutDashboard, label: 'My PR Dashboard', path: '/dashboard/requestor' },
+        { icon: LayoutDashboard, label: 'Tổng quan PR của tôi', path: '/dashboard/requestor' },
       ],
     },
     {
       title: 'Quản lý',
       items: [
-        { icon: ShoppingCart, label: 'My Purchase Requests', path: '/dashboard/requestor/pr' },
-        { icon: MapPin, label: 'PR Status Tracking', path: '/dashboard/requestor/tracking' },
+        { icon: ShoppingCart, label: 'Yêu cầu mua hàng của tôi', path: '/dashboard/requestor/pr' },
+        { icon: MapPin, label: 'Theo dõi trạng thái PR', path: '/dashboard/requestor/tracking' },
+        { icon: Package, label: 'Theo dõi phiếu xuất kho', path: '/dashboard/requestor/stock-issues' },
       ],
     },
     {
       title: 'Thông báo',
       items: [
-        { icon: Bell, label: 'Notifications', path: '/dashboard/requestor/notifications' },
+        { icon: Bell, label: 'Thông báo', path: '/dashboard/requestor/notifications' },
       ],
     },
   ];
@@ -67,23 +77,41 @@ const RequestorDashboard = () => {
     return location.pathname.startsWith(path);
   };
 
+  const isRequestorPRList = location.pathname === '/dashboard/requestor/pr';
+  const isRequestorPRCreate = location.pathname === '/dashboard/requestor/pr/create';
+  const isRequestorStockIssues = location.pathname.startsWith('/dashboard/requestor/stock-issues');
+  const isRequestorPRTracking = location.pathname.startsWith('/dashboard/requestor/tracking');
+  /** Danh sách PR / tạo PR / stock / theo dõi: outlet flush + trang con tự inset (giống MyPurchaseRequests). */
+  const requestorMainInnerScrollLayout =
+    isRequestorPRList ||
+    isRequestorPRCreate ||
+    isRequestorStockIssues ||
+    isRequestorPRTracking;
+
   // Get page title based on route
   const getPageTitle = () => {
     if (location.pathname === '/dashboard/requestor') {
-      return 'My PR Dashboard';
+      return 'Tổng quan PR của tôi';
+    } else if (location.pathname.includes('/stock-issues')) {
+      if (location.pathname.includes('/create') || location.pathname.includes('/edit')) {
+        return 'Tạo / sửa phiếu xuất kho';
+      }
+      return 'Phiếu xuất kho';
     } else if (location.pathname.includes('/pr')) {
-      return 'My Purchase Requests';
+      return 'Yêu cầu mua hàng của tôi';
     } else if (location.pathname.includes('/tracking')) {
-      return 'PR Status Tracking';
+      return 'Theo dõi trạng thái PR';
     } else if (location.pathname.includes('/notifications')) {
-      return 'Notifications';
+      return 'Thông báo';
     }
-    return 'My PR Dashboard';
+    return 'Tổng quan PR của tôi';
   };
 
   const getPageSubtitle = () => {
     if (location.pathname === '/dashboard/requestor') {
-      return 'Requestor Dashboard';
+      return 'Bảng điều khiển người yêu cầu';
+    } else if (location.pathname.includes('/stock-issues')) {
+      return 'Dùng tồn kho — tách với PR mua hàng';
     } else if (location.pathname.includes('/pr')) {
       return 'Tạo và quản lý các PR của cá nhân';
     } else if (location.pathname.includes('/tracking')) {
@@ -95,143 +123,74 @@ const RequestorDashboard = () => {
   };
 
   return (
-    <div className="h-screen flex flex-col bg-[#F8FAFC] overflow-hidden" style={{ height: '100vh' }}>
-      {/* Sidebar - Fixed */}
-      <aside
-        className={`bg-[#0F172A] border-r border-slate-700/50 transition-all duration-300 ease-in-out fixed left-0 top-0 ${
-          sidebarCollapsed ? 'w-20' : 'w-[240px]'
-        } flex flex-col h-screen overflow-hidden z-50`}
-      >
-        {/* Sticky Header với Search */}
-        <div className="sticky top-0 z-10 bg-[#0F172A] border-b border-slate-700/50 p-4">
-          {!sidebarCollapsed && (
-            <div className="space-y-3">
-              {/* Logo và Title */}
-              <div className="flex flex-col items-center gap-2 mb-2">
-                <img 
-                  src={LogoRMG} 
-                  alt="RMG Logo" 
-                  className="h-12 w-auto object-contain"
-                />
-                <h1 className="text-white font-bold text-lg">RMG Enterprise</h1>
-              </div>
-              {/* Search Bar */}
-              <div className="relative">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                <input
-                  type="text"
-                  placeholder="Tìm kiếm..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  className="w-full pl-10 pr-4 py-2 text-sm bg-slate-800/50 border border-slate-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#3B82F6]/20 focus:border-[#3B82F6] text-white placeholder-slate-400 backdrop-blur-sm"
-                />
-                {searchQuery && (
-                  <button
-                    onClick={() => setSearchQuery('')}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
-                )}
-              </div>
-              <button
-                onClick={() => setSidebarCollapsed(true)}
-                className="w-full flex items-center justify-center p-1.5 hover:bg-white/10 rounded-lg transition-colors"
-                title="Thu gọn"
-              >
-                <X className="w-4 h-4 text-slate-300" />
-              </button>
-            </div>
-          )}
-          {sidebarCollapsed && (
-            <div className="flex justify-center">
-              <button
-                onClick={() => setSidebarCollapsed(false)}
-                className="p-2 hover:bg-white/10 rounded-lg transition-colors"
-                title="Mở rộng"
-              >
-                <Menu className="w-5 h-5 text-white" />
-              </button>
-            </div>
-          )}
-        </div>
-
-        {/* Navigation Menu - Independent Scroll */}
-        <nav className="flex-1 overflow-y-auto py-4 px-3">
-          {menuGroups.map((group, groupIdx) => (
-            <div key={groupIdx} className={groupIdx > 0 ? 'mt-6' : ''}>
-              {!sidebarCollapsed && (
-                <h3 className="px-2 text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
-                  {group.title}
-                </h3>
-              )}
-              <ul className="space-y-1">
-                {group.items.map((item, itemIdx) => {
-                  const Icon = item.icon;
-                  const active = isActive(item.path);
-                  return (
-                    <li key={itemIdx}>
-                      <button
-                        onClick={() => navigate(item.path)}
-                        className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-soft transition-all duration-200 ease-in-out ${
-                          active
-                            ? 'bg-[#3B82F6] text-white'
-                            : 'text-slate-300 hover:bg-white/10 hover:text-white backdrop-blur-sm'
-                        }`}
-                        title={sidebarCollapsed ? item.label : undefined}
-                      >
-                        <Icon className={`w-5 h-5 flex-shrink-0 ${active ? 'text-white' : 'text-slate-400'}`} strokeWidth={2} />
-                        {!sidebarCollapsed && (
-                          <span className="text-sm font-medium flex-1 text-left">{item.label}</span>
-                        )}
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            </div>
-          ))}
-        </nav>
-
-        {/* Sidebar Footer */}
-        <div className="border-t border-slate-700/50 p-4 bg-[#0F172A]">
-          <div className={`flex items-center gap-3 ${sidebarCollapsed ? 'justify-center' : ''}`}>
-            <div className="w-10 h-10 bg-slate-700/50 rounded-full flex items-center justify-center flex-shrink-0">
-              <User className="w-5 h-5 text-slate-300" />
-            </div>
-            {!sidebarCollapsed && (
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-semibold text-white truncate">{user?.username}</p>
-                <p className="text-xs text-slate-400 truncate">{user?.role}</p>
-              </div>
-            )}
-          </div>
-        </div>
-      </aside>
-
-      {/* Main Content Area - With margin for fixed sidebar */}
-      <div 
-        className={`flex-1 flex flex-col transition-all duration-300 ease-in-out ${
-          sidebarCollapsed ? 'ml-20' : 'ml-[240px]'
-        }`}
-        style={{ height: '100vh', overflow: 'hidden' }}
-      >
-        {/* Sticky Header */}
-        <DashboardHeader 
-          title={getPageTitle()} 
-          subtitle={getPageSubtitle()}
-          showSearch={true}
-          showNotifications={true}
-          showClock={true}
-          roleLabel="Requestor"
+    <div
+      className="flex h-[100dvh] max-h-[100dvh] min-w-0 flex-col overflow-hidden bg-[#F8FAFC]"
+      style={{ minHeight: '100dvh' }}
+    >
+      {mobileNavOpen ? (
+        <button
+          type="button"
+          className="fixed inset-0 z-[55] bg-slate-900/50 backdrop-blur-[1px] md:hidden"
+          onClick={closeMobileNav}
+          aria-label="Đóng menu"
         />
-        
-        {/* Content - Allow scroll for non-dashboard pages */}
-        <main className={`flex-1 ${location.pathname === '/dashboard/requestor' ? 'overflow-hidden' : 'overflow-y-auto'}`}>
-          <div className={location.pathname === '/dashboard/requestor' ? 'h-full overflow-y-auto' : 'p-6'}>
+      ) : null}
+      <StandardDashboardSidebar
+        menuGroups={menuGroups}
+        sidebarCollapsed={sidebarCollapsed}
+        setSidebarCollapsed={setSidebarCollapsed}
+        searchQuery={searchQuery}
+        setSearchQuery={setSearchQuery}
+        mobileNavOpen={mobileNavOpen}
+        user={user}
+        isActive={isActive}
+        navigate={navigate}
+      />
+
+      <div
+        className={`flex min-h-0 min-w-0 flex-1 flex-col overflow-x-clip ${mainMarginForSidebar240(sidebarCollapsed)}`}
+      >
+        <div className="shrink-0 min-w-0">
+          <DashboardHeader
+            title={getPageTitle()}
+            subtitle={getPageSubtitle()}
+            showSearch={true}
+            showNotifications={true}
+            showClock={true}
+            roleLabel="Requestor"
+            scrollContainerRef={requestorMainInnerScrollLayout ? undefined : contentScrollRef}
+            onMobileNavToggle={toggleMobileNav}
+          />
+        </div>
+
+        <div
+          ref={requestorMainInnerScrollLayout ? undefined : contentScrollRef}
+          className={
+            requestorMainInnerScrollLayout
+              ? isRequestorPRList ||
+                isRequestorPRCreate ||
+                isRequestorStockIssues ||
+                isRequestorPRTracking
+                ? 'h-full min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden scrollbar-hide touch-pan-y bg-[#f1f5f9]'
+                : `flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-[#f1f5f9] ${requestorMainShellPaddingClass}`
+              : 'h-full min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden scrollbar-hide touch-pan-y bg-[#f1f5f9]'
+          }
+        >
+          <div
+            key={location.pathname}
+            className={
+              isRequestorPRCreate
+                ? `dashboard-outlet flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden ${dashboardMainOutletFlushClass}`
+                : isRequestorPRTracking
+                  ? `dashboard-outlet flex h-full min-h-0 min-w-0 w-full flex-1 flex-col basis-0 overflow-hidden ${dashboardMainOutletFlushClass}`
+                  : isRequestorPRList || isRequestorStockIssues
+                    ? `dashboard-outlet flex h-full min-h-full min-w-0 w-full flex-1 flex-col basis-0 overflow-hidden ${dashboardMainOutletFlushClass}`
+                : 'dashboard-outlet flex h-full min-h-full w-full min-w-0 flex-1 self-stretch flex-col overflow-x-hidden'
+            }
+          >
             <Outlet />
           </div>
-        </main>
+        </div>
       </div>
     </div>
   );

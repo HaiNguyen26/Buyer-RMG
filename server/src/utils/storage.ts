@@ -1,11 +1,17 @@
 import { uploadFile, getFileUrl, deleteFile, generateFileKey } from '../config/s3';
 import { FastifyRequest } from 'fastify';
 
+// Type assertion for multipart requests
+interface MultipartRequest extends FastifyRequest {
+  file: () => Promise<any>;
+  parts: () => AsyncIterable<any>;
+}
+
 /**
  * Handle file upload from multipart form
  */
 export async function handleFileUpload(
-  request: FastifyRequest,
+  request: FastifyRequest | MultipartRequest,
   type: 'document' | 'image' | 'attachment',
   companyId?: string | null,
   userId?: string
@@ -16,7 +22,8 @@ export async function handleFileUpload(
   size: number;
   contentType: string;
 }> {
-  const data = await request.file();
+  const multipartRequest = request as MultipartRequest;
+  const data = await multipartRequest.file();
 
   if (!data) {
     throw new Error('No file uploaded');
@@ -48,7 +55,7 @@ export async function handleFileUpload(
  * Handle multiple file uploads
  */
 export async function handleMultipleFileUpload(
-  request: FastifyRequest,
+  request: FastifyRequest | MultipartRequest,
   type: 'document' | 'image' | 'attachment',
   companyId?: string | null,
   userId?: string
@@ -60,8 +67,8 @@ export async function handleMultipleFileUpload(
   contentType: string;
 }>> {
   const files = [];
-
-  const parts = request.parts();
+  const multipartRequest = request as MultipartRequest;
+  const parts = multipartRequest.parts();
   for await (const part of parts) {
     if (part.type === 'file') {
       const buffer = await part.toBuffer();

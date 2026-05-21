@@ -10,39 +10,20 @@ import {
   getCriticalAlerts,
   getGovernancePolicy,
 } from '../controllers/bgdController';
+import { authenticate } from '../middleware/auth';
 
 export default async function bgdRoutes(fastify: FastifyInstance) {
-  // All routes require authentication
-  fastify.addHook('onRequest', async (request, reply) => {
-    try {
-      await request.jwtVerify();
-    } catch (err) {
-      reply.send(err);
-    }
-  });
+  fastify.addHook('onRequest', authenticate);
 
-  // Dashboard
-  fastify.get('/dashboard', getExecutiveDashboard);
+  fastify.get('/dashboard', { compress: false }, getExecutiveDashboard);
+  fastify.get('/business-overview', { compress: false }, getBusinessOverview);
 
-  // Business Overview
-  fastify.get('/business-overview', getBusinessOverview);
-
-  // Exception Approval
-  fastify.get('/exception-approval', getExceptionApprovals);
+  fastify.get('/exception-approval', { compress: false }, getExceptionApprovals);
   fastify.post('/exception-approval/:id/approve', approveException);
   fastify.post('/exception-approval/:id/reject', rejectException);
 
-  // Strategic Supplier View
-  fastify.get('/strategic-suppliers', getStrategicSupplierView);
-
-  // Executive Reports
-  fastify.get('/executive-reports', getExecutiveReports);
-
-  // Critical Alerts
-  fastify.get('/critical-alerts', getCriticalAlerts);
-
-  // Governance & Policy
-  fastify.get('/governance', getGovernancePolicy);
+  fastify.get('/strategic-suppliers', { compress: false }, getStrategicSupplierView);
+  fastify.get('/executive-reports', { compress: false }, getExecutiveReports);
+  fastify.get('/critical-alerts', { compress: false }, getCriticalAlerts);
+  fastify.get('/governance', { compress: false }, getGovernancePolicy);
 }
-
-

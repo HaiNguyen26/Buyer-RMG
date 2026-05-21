@@ -6,6 +6,7 @@ import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { salesService } from '../../services/salesService';
 import { ArrowLeft, Save, X } from 'lucide-react';
+import CustomSelect from '../../components/CustomSelect';
 
 const updateSalesPOSchema = z.object({
   salesPONumber: z.string().min(1, 'Số Sales PO là bắt buộc'),
@@ -13,7 +14,6 @@ const updateSalesPOSchema = z.object({
   projectName: z.string().optional(),
   projectCode: z.string().optional(),
   amount: z.number().positive('Giá trị PO phải lớn hơn 0'),
-  currency: z.string().default('VND'),
   effectiveDate: z.string().min(1, 'Ngày hiệu lực là bắt buộc'),
   notes: z.string().optional(),
 });
@@ -25,27 +25,30 @@ const EditSalesPO = () => {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
-  // Mock customers
-  const customers = [
-    { id: '1', name: 'Công ty A', code: 'CUST-001' },
-    { id: '2', name: 'Công ty B', code: 'CUST-002' },
-    { id: '3', name: 'Công ty C', code: 'CUST-003' },
-  ];
+  const { data: customers = [], isLoading: loadingCustomers } = useQuery({
+    queryKey: ['customers-list'],
+    queryFn: () => salesService.listCustomers(),
+    staleTime: 60_000,
+  });
 
-  const { data: salesPO, isLoading } = useQuery({
+  const { data: salesPO, isLoading: loadingSalesPO } = useQuery({
     queryKey: ['sales-po', id],
     queryFn: () => salesService.getSalesPOById(id!),
     enabled: !!id,
   });
+  const isLoading = loadingSalesPO || loadingCustomers;
 
   const {
     register,
     handleSubmit,
+    watch,
     formState: { errors },
     reset,
   } = useForm<UpdateSalesPOForm>({
     resolver: zodResolver(updateSalesPOSchema),
   });
+
+  const amountWatched = watch('amount');
 
   useEffect(() => {
     if (salesPO) {
@@ -55,7 +58,6 @@ const EditSalesPO = () => {
         projectName: salesPO.projectName || '',
         projectCode: salesPO.projectCode || '',
         amount: salesPO.amount,
-        currency: salesPO.currency,
         effectiveDate: new Date(salesPO.effectiveDate).toISOString().split('T')[0],
         notes: '',
       });
@@ -63,10 +65,12 @@ const EditSalesPO = () => {
   }, [salesPO, reset]);
 
   const updateMutation = useMutation({
-    mutationFn: (data: UpdateSalesPOForm) => salesService.updateSalesPO(id!, {
-      ...data,
-      effectiveDate: new Date(data.effectiveDate).toISOString(),
-    }),
+    mutationFn: (data: UpdateSalesPOForm) =>
+      salesService.updateSalesPO(id!, {
+        ...data,
+        currency: 'VND',
+        effectiveDate: new Date(data.effectiveDate).toISOString(),
+      }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['sales-pos'] });
       queryClient.invalidateQueries({ queryKey: ['sales-dashboard'] });
@@ -77,6 +81,15 @@ const EditSalesPO = () => {
   const onSubmit = (data: UpdateSalesPOForm) => {
     updateMutation.mutate(data);
   };
+
+  const formatMoneyPreview = (n: number) =>
+    n > 0
+      ? new Intl.NumberFormat('vi-VN', {
+          style: 'currency',
+          currency: 'VND',
+          maximumFractionDigits: 0,
+        }).format(n)
+      : '';
 
   if (isLoading) {
     return (
@@ -138,7 +151,7 @@ const EditSalesPO = () => {
             <label className="block text-sm font-medium text-slate-700 mb-2">
               Khách hàng <span className="text-red-500">*</span>
             </label>
-            <select
+            <CustomSelect
               {...register('customerId')}
               className={`w-full px-4 py-2 border rounded-soft focus:outline-none focus:ring-2 focus:ring-[#3B82F6] focus:border-transparent font-normal ${
                 errors.customerId ? 'border-red-300' : 'border-slate-300'
@@ -147,10 +160,11 @@ const EditSalesPO = () => {
               <option value="">Chọn khách hàng</option>
               {customers.map((customer) => (
                 <option key={customer.id} value={customer.id}>
-                  {customer.name} ({customer.code})
+                  {customer.name}
+                  {customer.code ? ` (${customer.code})` : ''}
                 </option>
               ))}
-            </select>
+            </CustomSelect>
             {errors.customerId && (
               <p className="mt-1 text-sm text-red-600 font-normal">{errors.customerId.message}</p>
             )}
@@ -189,22 +203,12 @@ const EditSalesPO = () => {
                 errors.amount ? 'border-red-300' : 'border-slate-300'
               }`}
             />
+            {typeof amountWatched === 'number' && amountWatched > 0 && (
+              <p className="mt-1 text-xs text-slate-500 tabular-nums">{formatMoneyPreview(amountWatched)}</p>
+            )}
             {errors.amount && (
               <p className="mt-1 text-sm text-red-600 font-normal">{errors.amount.message}</p>
             )}
-          </div>
-
-          {/* Currency */}
-          <div>
-            <label className="block text-sm font-medium text-slate-700 mb-2">Tiền tệ</label>
-            <select
-              {...register('currency')}
-              className="w-full px-4 py-2 border border-slate-300 rounded-soft focus:outline-none focus:ring-2 focus:ring-[#3B82F6] focus:border-transparent font-normal"
-            >
-              <option value="VND">VND</option>
-              <option value="USD">USD</option>
-              <option value="EUR">EUR</option>
-            </select>
           </div>
 
           {/* Effective Date */}

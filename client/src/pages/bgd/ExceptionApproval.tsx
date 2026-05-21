@@ -198,8 +198,8 @@ const ExceptionApproval = () => {
 
       {/* Exception Detail Modal */}
       {selectedException && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="glass-dark rounded-soft-lg p-6 max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4 modal-popup-overlay" onClick={() => setSelectedException(null)}>
+          <div className="modal-popup-panel glass-dark rounded-soft-lg p-6 max-w-2xl w-full max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-xl font-bold text-white">Chi tiết ngoại lệ</h3>
               <button

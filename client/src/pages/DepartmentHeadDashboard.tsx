@@ -1,21 +1,29 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { useNavigate, useLocation, Outlet } from 'react-router-dom';
+import { setDeptHeadMockOutletActive } from '../mocks/deptHeadMockScope';
+import { isDeptHeadMockEnvEnabled } from '../mocks/departmentHeadDevMock';
 import { useCurrentUser } from '../hooks/useAuth';
 import {
-  Menu,
   LayoutDashboard,
   ClipboardList,
   CheckSquare,
   Building2,
   Bell,
   User,
-  Search,
-  X,
   FilePlus,
-  TrendingUp,
+  Package,
 } from 'lucide-react';
-import LogoRMG from '../assets/LogoRMG.png';
 import DashboardHeader from '../components/DashboardHeader';
+import { StandardDashboardSidebar } from '../components/StandardDashboardSidebar';
+import { useMobileDashboardNav, mainMarginForSidebar240 } from '../hooks/useMobileDashboardNav';
+import {
+  dashboardMainHorizontalBleedClass,
+  dashboardMainOutletCompactClass,
+  dashboardMainOutletFlushClass,
+  dashboardMainScrollableOverviewWideXFlushTopClass,
+  dashboardOutletWorkspaceFlexClass,
+} from '../constants/dashboardLayout';
+import { requestorMainShellPaddingClass } from '../constants/requestorLayout';
 
 const DepartmentHeadDashboard = () => {
   const { data: user, isLoading } = useCurrentUser();
@@ -23,7 +31,14 @@ const DepartmentHeadDashboard = () => {
   const location = useLocation();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const mainContentRef = useRef<HTMLElement>(null);
+  const contentScrollRef = useRef<HTMLDivElement>(null);
+  const { mobileNavOpen, toggleMobileNav, closeMobileNav } = useMobileDashboardNav();
+
+  useEffect(() => {
+    if (!isDeptHeadMockEnvEnabled()) return;
+    setDeptHeadMockOutletActive(true);
+    return () => setDeptHeadMockOutletActive(false);
+  }, []);
 
   if (isLoading) {
     return (
@@ -38,22 +53,28 @@ const DepartmentHeadDashboard = () => {
 
   const menuGroups = [
     {
-      title: 'NHÓM A - KHI TRƯỞNG PHÒNG LÀ REQUESTOR',
+      title: 'Điều hướng cá nhân',
       items: [
         { icon: LayoutDashboard, label: 'Dashboard cá nhân', path: '/dashboard/department-head' },
         { icon: ClipboardList, label: 'PR của tôi', path: '/dashboard/department-head/my-prs' },
         { icon: FilePlus, label: 'Tạo Phiếu yêu cầu (PR)', path: '/dashboard/department-head/my-prs/create' },
+        { icon: Package, label: 'Theo dõi phiếu xuất kho', path: '/dashboard/department-head/stock-issues' },
       ],
     },
     {
-      title: 'NHÓM B - KHI TRƯỞNG PHÒNG LÀ NGƯỜI DUYỆT',
+      title: 'Phê duyệt phòng ban',
       items: [
         { icon: CheckSquare, label: 'Duyệt PR phòng ban', path: '/dashboard/department-head/pr-approval' },
+      ],
+    },
+    {
+      title: 'Trung tâm tổng quan',
+      items: [
         { icon: Building2, label: 'Tổng quan PR phòng ban', path: '/dashboard/department-head/department-overview' },
       ],
     },
     {
-      title: 'NHÓM C - HỖ TRỢ',
+      title: 'Tiện ích',
       items: [
         { icon: Bell, label: 'Thông báo', path: '/dashboard/department-head/notifications' },
         { icon: User, label: 'Hồ sơ cá nhân', path: '/dashboard/department-head/profile' },
@@ -68,135 +89,134 @@ const DepartmentHeadDashboard = () => {
     return location.pathname.startsWith(path);
   };
 
+  const getPageTitle = () => {
+    const p = location.pathname;
+    if (p === '/dashboard/department-head') return 'Dashboard cá nhân';
+    if (p.includes('/stock-issues')) return 'Phiếu xuất kho';
+    if (p.includes('/my-prs/create')) return 'Tạo Phiếu yêu cầu (PR)';
+    if (p.includes('/my-prs')) return 'PR của tôi';
+    if (p.includes('/pr-approval')) return 'Duyệt PR phòng ban';
+    if (p.includes('/department-overview')) return 'Tổng quan PR phòng ban';
+    if (p.includes('/notifications')) return 'Thông báo';
+    if (p.includes('/profile')) return 'Hồ sơ cá nhân';
+    return 'Trưởng phòng';
+  };
+
+  const isDepartmentHeadPRForm =
+    location.pathname.includes('/my-prs/create') ||
+    /\/dashboard\/department-head\/my-prs\/[^/]+\/edit$/.test(location.pathname);
+
+  const isDeptHeadStockIssues = location.pathname.startsWith('/dashboard/department-head/stock-issues');
+
+  const getPageSubtitle = () => {
+    const p = location.pathname;
+    if (p === '/dashboard/department-head') return 'Tổng quan khi trưởng phòng là người yêu cầu';
+    if (p.includes('/stock-issues')) return 'Dùng tồn kho — tách với PR mua hàng';
+    if (p.includes('/my-prs')) return 'PR do bạn tạo và theo dõi';
+    if (p.includes('/pr-approval')) return 'Duyệt PR thuộc phòng ban';
+    if (p.includes('/department-overview')) return 'Toàn cảnh PR phòng ban';
+    if (p.includes('/notifications')) return 'Thông báo hệ thống';
+    if (p.includes('/profile')) return 'Thông tin tài khoản';
+    return '';
+  };
+
+  /**
+   * Header nằm NGOÀI vùng cuộn: shell 100dvh + chỉ khối dưới header có overflow-y-auto.
+   * Outlet không flex-1 trên trang dài — scrollHeight đủ, tránh cắt đáy.
+   */
+  const isDeptHeadPersonalHome = location.pathname === '/dashboard/department-head';
+  const isDeptHeadPrApprovalPage = location.pathname.startsWith('/dashboard/department-head/pr-approval');
+  const isDeptHeadDepartmentOverviewPage = location.pathname.startsWith(
+    '/dashboard/department-head/department-overview',
+  );
+  const isDeptHeadContentSizedOutlet =
+    isDeptHeadPersonalHome || isDeptHeadPrApprovalPage || isDeptHeadDepartmentOverviewPage;
+
+  /** Bảng rộng: cuộn ngang chỉ ở `departmentHeadMainScrollClass` (WideX); outlet không thêm `overflow-x-auto` (tránh scrollbar/góc vuông). */
+  const isDeptHeadWideTableRoute = isDeptHeadPrApprovalPage || isDeptHeadDepartmentOverviewPage;
+
+  /** Form PR: overflow-hidden + padding shell. Stock issues: nội dung cao được cuộn trên main (không khóa h-full + overflow-hidden trên outlet — sẽ cắt trang không tạo scroll). */
+  const departmentHeadOutletClass = isDepartmentHeadPRForm
+    ? `dashboard-outlet flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden ${dashboardMainOutletFlushClass}`
+    : isDeptHeadStockIssues
+      ? `dashboard-outlet flex w-full min-w-0 flex-col overflow-x-clip !min-h-full ${dashboardMainOutletCompactClass}`
+      : isDeptHeadContentSizedOutlet
+        ? [
+            'dashboard-outlet flex h-full min-h-full min-w-0 flex-1 basis-0 flex-col',
+            isDeptHeadWideTableRoute ? '' : 'overflow-x-clip',
+            'dashboard-main-outlet max-w-none pb-3 sm:pb-4 md:pb-5',
+            dashboardMainHorizontalBleedClass,
+          ]
+            .filter(Boolean)
+            .join(' ')
+        : dashboardOutletWorkspaceFlexClass;
+  /** Chỉ một tầng `overflow-x-auto` (ở đây) — tránh đè trên `mainColumn` + `dashboard-outlet` (góc scrollbar vuông / nền lạ). */
+  const departmentHeadMainScrollClass = isDepartmentHeadPRForm
+    ? `flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-[#f1f5f9] ${requestorMainShellPaddingClass}`
+    : isDeptHeadStockIssues
+      ? [
+          'flex h-full min-h-0 min-w-0 w-full flex-1 flex-col basis-0',
+          'overflow-y-auto overflow-x-hidden scrollbar-hide touch-pan-y bg-[#f1f5f9]',
+        ].join(' ')
+    : [
+        dashboardMainScrollableOverviewWideXFlushTopClass,
+        'bg-[#f1f5f9]',
+        isDeptHeadPersonalHome ? 'pb-6 sm:pb-8 md:pb-10' : '',
+      ]
+        .filter(Boolean)
+        .join(' ');
+
+  const rootShellClass =
+    'flex h-[100dvh] max-h-[100dvh] min-w-0 flex-col overflow-hidden bg-[#F8FAFC]';
+
+  const mainColumnClass = [
+    'flex min-h-0 min-w-0 flex-1 flex-col',
+    'overflow-x-clip',
+    mainMarginForSidebar240(sidebarCollapsed),
+  ].join(' ');
+
   return (
-    <div className="h-screen flex flex-col bg-[#F8FAFC] overflow-hidden">
-      {/* Sidebar */}
-      <aside
-        className={`bg-[#0F172A] border-r border-slate-700/50 transition-all duration-300 ease-in-out fixed left-0 top-0 ${
-          sidebarCollapsed ? 'w-20' : 'w-[240px]'
-        } flex flex-col h-screen overflow-hidden z-50`}
-      >
-        {/* Sidebar Header */}
-        <div className="sticky top-0 z-10 bg-[#0F172A] border-b border-slate-700/50 p-4">
-          {!sidebarCollapsed && (
-            <div className="space-y-3">
-              {/* Logo và Title */}
-              <div className="flex flex-col items-center gap-2 mb-2">
-                <img
-                  src={LogoRMG}
-                  alt="RMG Logo"
-                  className="h-12 w-auto object-contain"
-                />
-                <h1 className="text-white font-bold text-lg">RMG Enterprise</h1>
-              </div>
-              {/* Search Bar */}
-              <div className="relative">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                <input
-                  type="text"
-                  placeholder="Tìm kiếm..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  className="w-full pl-10 pr-4 py-2 text-sm bg-slate-800/50 border border-slate-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#3B82F6]/20 focus:border-[#3B82F6] text-white placeholder-slate-400 backdrop-blur-sm"
-                />
-                {searchQuery && (
-                  <button
-                    onClick={() => setSearchQuery('')}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
-                )}
-              </div>
-              <button
-                onClick={() => setSidebarCollapsed(true)}
-                className="w-full flex items-center justify-center p-1.5 hover:bg-white/10 rounded-lg transition-colors"
-                title="Thu gọn"
-              >
-                <X className="w-4 h-4 text-slate-300" />
-              </button>
-            </div>
-          )}
-          {sidebarCollapsed && (
-            <div className="flex justify-center">
-              <button
-                onClick={() => setSidebarCollapsed(false)}
-                className="p-2 hover:bg-white/10 rounded-lg transition-colors"
-                title="Mở rộng"
-              >
-                <Menu className="w-5 h-5 text-white" />
-              </button>
-            </div>
-          )}
-        </div>
-
-        {/* Navigation Menu */}
-        <nav className="flex-1 overflow-y-auto py-4 px-3">
-          {menuGroups.map((group, groupIdx) => (
-            <div key={groupIdx} className="mb-6">
-              {!sidebarCollapsed && (
-                <h3 className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-2 px-2">
-                  {group.title}
-                </h3>
-              )}
-              <ul className="space-y-1">
-                {group.items.map((item, itemIdx) => {
-                  const Icon = item.icon;
-                  const active = isActive(item.path);
-                  return (
-                    <li key={itemIdx}>
-                      <button
-                        onClick={() => navigate(item.path)}
-                        className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all ${
-                          active
-                            ? 'bg-[#2563EB] text-white shadow-lg shadow-[#2563EB]/20'
-                            : 'text-slate-300 hover:bg-slate-800/50 hover:text-white'
-                        } ${sidebarCollapsed ? 'justify-center' : ''}`}
-                      >
-                        <Icon className="w-5 h-5 flex-shrink-0" />
-                        {!sidebarCollapsed && <span className="text-sm font-medium">{item.label}</span>}
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            </div>
-          ))}
-        </nav>
-
-        {/* Sidebar Footer */}
-        <div className="border-t border-slate-700/50 p-4 bg-[#0F172A]">
-          {!sidebarCollapsed && user && (
-            <div className="flex items-center gap-3 px-2 py-2 text-slate-300">
-              <User className="w-5 h-5 flex-shrink-0" />
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium truncate">{user.username}</p>
-                <p className="text-xs text-slate-400 truncate">{user.email}</p>
-              </div>
-            </div>
-          )}
-          {sidebarCollapsed && user && (
-            <div className="flex justify-center">
-              <User className="w-5 h-5 text-slate-300" />
-            </div>
-          )}
-        </div>
-      </aside>
+    <div className={rootShellClass} style={{ minHeight: '100dvh' }}>
+      {mobileNavOpen ? (
+        <button
+          type="button"
+          className="fixed inset-0 z-[55] bg-slate-900/50 backdrop-blur-[1px] md:hidden"
+          onClick={closeMobileNav}
+          aria-label="Đóng menu"
+        />
+      ) : null}
+      <StandardDashboardSidebar
+        menuGroups={menuGroups}
+        sidebarCollapsed={sidebarCollapsed}
+        setSidebarCollapsed={setSidebarCollapsed}
+        searchQuery={searchQuery}
+        setSearchQuery={setSearchQuery}
+        mobileNavOpen={mobileNavOpen}
+        user={user}
+        isActive={isActive}
+        navigate={navigate}
+      />
 
       {/* Main Content */}
-      <main
-        ref={mainContentRef}
-        className={`flex-1 flex flex-col min-w-0 h-screen overflow-hidden transition-all duration-300 ease-in-out ${
-          sidebarCollapsed ? 'ml-20' : 'ml-[240px]'
-        }`}
-      >
-        <DashboardHeader scrollContainerRef={mainContentRef} />
-        <div className={`flex-1 ${location.pathname.includes('/create') || location.pathname.includes('/edit') ? 'overflow-y-auto' : 'overflow-hidden'} p-6`}>
-          <div className={location.pathname.includes('/create') || location.pathname.includes('/edit') ? '' : 'h-full max-w-full mx-auto'}>
+      <div className={mainColumnClass}>
+        <div className="shrink-0">
+          <DashboardHeader
+            title={getPageTitle()}
+            subtitle={getPageSubtitle()}
+            showSearch={true}
+            showNotifications={true}
+            showClock={true}
+            roleLabel="Trưởng phòng"
+            scrollContainerRef={contentScrollRef}
+            onMobileNavToggle={toggleMobileNav}
+          />
+        </div>
+        <div ref={contentScrollRef} className={departmentHeadMainScrollClass}>
+          <div key={location.pathname} className={departmentHeadOutletClass}>
             <Outlet />
           </div>
         </div>
-      </main>
+      </div>
     </div>
   );
 };

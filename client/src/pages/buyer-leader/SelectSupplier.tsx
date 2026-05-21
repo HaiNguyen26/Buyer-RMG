@@ -1,8 +1,11 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { CheckCircle, Star, AlertTriangle, ArrowLeft, Info, X, FileText } from 'lucide-react';
+import { CheckCircle, Star, AlertTriangle, ArrowLeft, Info, X, FileText, Handshake, Search, SlidersHorizontal, Landmark, Clock3 } from 'lucide-react';
 import { buyerLeaderService } from '../../services/buyerLeaderService';
+import { useToast } from '../../contexts/ToastContext';
+import { BuyerLeaderPageHero } from '../../components/BuyerLeaderPageHero';
+import { buyerLeaderPageStackClass } from '../../constants/buyerLeaderLayout';
 
 const formatCurrency = (amount: number | null, currency: string = 'VND') => {
   if (!amount) return 'Chưa có';
@@ -15,12 +18,15 @@ const formatCurrency = (amount: number | null, currency: string = 'VND') => {
 const SelectSupplier = () => {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const { showSuccess, showWarning, showInfo } = useToast();
   const [searchParams] = useSearchParams();
   const prId = searchParams.get('prId');
   const rfqId = searchParams.get('rfqId');
   const [selectedQuotationId, setSelectedQuotationId] = useState<string | null>(null);
   const [showOtherReasonModal, setShowOtherReasonModal] = useState(false);
   const [otherReason, setOtherReason] = useState('');
+  const [supplierSearch, setSupplierSearch] = useState('');
+  const [showOverBudgetOnly, setShowOverBudgetOnly] = useState(false);
   const [showReturnModal, setShowReturnModal] = useState(false);
   const [returnReason, setReturnReason] = useState('');
   const [showOverBudgetModal, setShowOverBudgetModal] = useState(false);
@@ -45,7 +51,9 @@ const SelectSupplier = () => {
       queryClient.invalidateQueries({ queryKey: ['buyer-leader-over-budget-prs'] });
       
       if (response.isOverBudget) {
-        alert('Đã chọn NCC. PR đang chờ GĐ CN duyệt do vượt ngân sách.');
+        showInfo('Đã chọn NCC. PR đang chờ GĐ CN duyệt do vượt ngân sách.');
+      } else {
+        showSuccess('Đã chọn NCC thành công!');
       }
       
       navigate('/dashboard/buyer-leader');
@@ -112,6 +120,21 @@ const SelectSupplier = () => {
   }
 
   const { pr, recommendedQuotation, otherQuotations, overBudgetInfo, quotations } = data;
+  const prBaseAmount = Number(pr?.totalAmount ?? 0);
+
+  const filteredOtherQuotations = useMemo(() => {
+    const list = (otherQuotations ?? []).filter((q: any) => {
+      const supplier = String(q?.supplier?.name ?? '').toLowerCase();
+      const code = String(q?.supplier?.code ?? '').toLowerCase();
+      const query = supplierSearch.trim().toLowerCase();
+      const matchesQuery = !query || supplier.includes(query) || code.includes(query);
+      if (!matchesQuery) return false;
+      if (!showOverBudgetOnly) return true;
+      const amount = Number(q?.totalAmount ?? 0);
+      return prBaseAmount > 0 && amount > prBaseAmount;
+    });
+    return list;
+  }, [otherQuotations, supplierSearch, showOverBudgetOnly, prBaseAmount]);
 
   const handleSelectRecommended = () => {
     if (!recommendedQuotation || !prId) return;
@@ -133,7 +156,7 @@ const SelectSupplier = () => {
 
   const handleSelectOther = () => {
     if (!selectedQuotationId) {
-      alert('Vui lòng chọn NCC khác');
+      showWarning('Vui lòng chọn NCC khác');
       return;
     }
     setShowOtherReasonModal(true);
@@ -141,7 +164,7 @@ const SelectSupplier = () => {
 
   const handleConfirmOtherSelection = () => {
     if (!otherReason.trim()) {
-      alert('Vui lòng nhập lý do chọn NCC');
+      showWarning('Vui lòng nhập lý do chọn NCC');
       return;
     }
     
@@ -167,7 +190,7 @@ const SelectSupplier = () => {
 
   const handleConfirmOverBudget = () => {
     if (!overBudgetReason.trim()) {
-      alert('Vui lòng nhập lý do đề xuất vượt ngân sách');
+      showWarning('Vui lòng nhập lý do đề xuất vượt ngân sách');
       return;
     }
     
@@ -195,39 +218,37 @@ const SelectSupplier = () => {
 
   const handleConfirmReturn = () => {
     if (!returnReason.trim()) {
-      alert('Vui lòng nhập lý do trả PR');
+      showWarning('Vui lòng nhập lý do trả PR');
       return;
     }
     
     // TODO: Implement return to buyer API
     console.log('Return to buyer:', { prId, reason: returnReason });
-    alert('Chức năng trả PR cho Buyer đang được phát triển');
+    showInfo('Chức năng trả PR cho Buyer đang được phát triển');
   };
 
   return (
-    <div className="h-full flex flex-col overflow-hidden" style={{ backgroundColor: 'transparent' }}>
-      {/* Header */}
-      <div className="flex-shrink-0 mb-6 px-6 pt-6">
-        <div className="bg-white/80 backdrop-blur-sm rounded-2xl shadow-soft-md border border-slate-200/50 p-6 slide-right-title">
-          <div className="flex items-center justify-between">
-            <div className="flex-1">
-              <h1 className="text-2xl font-bold text-slate-900 mb-2">Chọn NCC</h1>
-              <p className="text-slate-600">
-                PR: <span className="font-semibold text-indigo-600">{pr.prNumber}</span>
-                {' • '}
-                RFQ: <span className="font-semibold text-slate-900">{data.rfq?.rfqNumber}</span>
-              </p>
-            </div>
-          </div>
-        </div>
+    <div
+      className={`h-full min-h-0 w-full min-w-0 flex flex-col overflow-hidden animate-fade-in-right fade-in-right-delay-0 ${buyerLeaderPageStackClass}`}
+      style={{ backgroundColor: 'transparent' }}
+    >
+      <div className="flex-shrink-0 px-2 pt-3 sm:px-3 sm:pt-4 md:px-4">
+        <BuyerLeaderPageHero
+          kicker="Buyer Leader · NCC"
+          title="Chọn NCC"
+          description={`PR: ${pr.prNumber} · RFQ: ${data.rfq?.rfqNumber ?? ''}`}
+          Icon={Handshake}
+          tint="azure"
+          regionLabel="Chọn nhà cung cấp"
+        />
       </div>
 
-      {/* Content */}
-      <div className="flex-1 min-h-0 flex flex-col overflow-hidden px-6 pb-24">
-        <div className="flex-1 min-h-0 overflow-y-auto scrollbar-hide space-y-6">
+      {/* Content — scrollable, footer cố định phía dưới cùng */}
+      <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+        <div className="flex-1 min-h-0 overflow-y-auto scrollbar-hide space-y-5 px-2 pb-4 pt-3 sm:px-3 sm:pb-5 sm:pt-4 md:px-4">
           {/* A. NCC RECOMMEND (HIGHLIGHT) */}
           {recommendedQuotation && (
-            <div className="bg-white rounded-2xl shadow-lg border-2 border-indigo-500 p-6 slide-right-content relative overflow-hidden">
+            <div className="bg-white rounded-2xl border-2 border-indigo-500 p-6 slide-right-content relative overflow-hidden shadow-[0_22px_48px_-20px_rgba(79,70,229,0.45)]">
               {/* Decorative background */}
               <div className="absolute top-0 right-0 w-32 h-32 bg-indigo-100/30 rounded-full -mr-16 -mt-16"></div>
               
@@ -293,7 +314,7 @@ const SelectSupplier = () => {
 
           {/* C. OVER-BUDGET BANNER (STICKY) - BUYER LEADER */}
           {overBudgetInfo && overBudgetInfo.isOverBudget && (
-            <div className="sticky top-0 z-20 bg-red-50 border-2 border-red-400 rounded-2xl p-4 slide-right-card-1 mb-6">
+            <div className="sticky top-0 z-20 bg-red-50 border-2 border-red-400 rounded-2xl p-4 slide-right-card-1 mb-6 shadow-[0_18px_36px_-20px_rgba(220,38,38,0.45)]">
               <div className="flex items-center gap-3">
                 <AlertTriangle className="w-6 h-6 text-red-600 flex-shrink-0" strokeWidth={2} />
                 <div className="flex-1">
@@ -312,76 +333,126 @@ const SelectSupplier = () => {
 
           {/* B. DANH SÁCH NCC KHÁC */}
           {otherQuotations && otherQuotations.length > 0 && (
-            <div className="bg-white rounded-2xl shadow-lg border border-slate-200/50 slide-right-card-2">
-              <div className="px-6 py-4 border-b border-slate-200 bg-gradient-to-r from-slate-50 to-slate-100 rounded-t-2xl">
-                <h2 className="text-lg font-bold text-slate-900">Các NCC khác</h2>
-              </div>
-              <div className="divide-y divide-slate-100">
-                {otherQuotations.map((q: any) => (
-                  <div
-                    key={q.id}
-                    className={`p-6 hover:bg-slate-50 transition-colors cursor-pointer ${
-                      selectedQuotationId === q.id ? 'bg-blue-50 border-l-4 border-blue-500' : ''
+            <div className="bg-white rounded-2xl border border-slate-200/60 slide-right-card-2 overflow-hidden shadow-[0_24px_44px_-24px_rgba(15,23,42,0.35)] ring-1 ring-slate-900/5">
+              <div className="px-4 py-3 border-b border-slate-200 bg-gradient-to-r from-slate-50 to-slate-100">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <h2 className="text-base font-bold text-slate-900">Các NCC khác</h2>
+                  <span className="inline-flex items-center rounded-full bg-indigo-50 px-2.5 py-1 text-xs font-semibold text-indigo-700">
+                    {filteredOtherQuotations.length} báo giá
+                  </span>
+                </div>
+                <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-[minmax(0,1fr)_auto]">
+                  <label className="relative">
+                    <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" strokeWidth={2} />
+                    <input
+                      value={supplierSearch}
+                      onChange={(e) => setSupplierSearch(e.target.value)}
+                      placeholder="Tìm NCC theo tên hoặc mã..."
+                      className="w-full rounded-xl border border-slate-200 bg-white py-2 pl-9 pr-3 text-sm text-slate-700 outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100"
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setShowOverBudgetOnly((v) => !v)}
+                    className={`inline-flex items-center justify-center gap-2 rounded-xl border px-3 py-2 text-sm font-medium transition ${
+                      showOverBudgetOnly
+                        ? 'border-rose-300 bg-rose-50 text-rose-700'
+                        : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
                     }`}
-                    onClick={() => setSelectedQuotationId(q.id)}
                   >
-                    <div className="flex items-start justify-between">
-                      <div className="flex-1">
-                        <div className="flex items-center gap-2 mb-2">
-                          <h3 className="text-base font-semibold text-slate-900">{q.supplier.name}</h3>
-                          {selectedQuotationId === q.id && (
-                            <CheckCircle className="w-5 h-5 text-blue-600" strokeWidth={2} />
-                          )}
-                        </div>
-                        {q.supplier.code && (
-                          <p className="text-sm text-slate-600 mb-2">Mã: {q.supplier.code}</p>
-                        )}
-                        <div className="flex items-center gap-4 text-sm">
-                          <div>
-                            <span className="text-slate-500">Giá: </span>
-                            <span className="font-semibold text-slate-900">
+                    <SlidersHorizontal className="h-4 w-4" strokeWidth={2} />
+                    Chỉ hiện NCC vượt ngân sách
+                  </button>
+                </div>
+              </div>
+              <div className="max-h-[520px] overflow-auto">
+                <table className="w-full min-w-[980px] border-separate border-spacing-0 text-sm">
+                  <thead className="sticky top-0 z-10 bg-[#F8FAFC]">
+                    <tr className="border-b border-slate-200">
+                      <th className="w-14 px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-600">STT</th>
+                      <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-600">NCC</th>
+                      <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-600">
+                        <span className="inline-flex items-center gap-1.5"><Landmark className="h-3.5 w-3.5 text-indigo-600" />Tổng giá</span>
+                      </th>
+                      <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-600">
+                        <span className="inline-flex items-center gap-1.5"><Clock3 className="h-3.5 w-3.5 text-cyan-600" />Lead time</span>
+                      </th>
+                      <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-600">Điểm</th>
+                      <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-600">Ngân sách</th>
+                      <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wide text-slate-600">Thao tác</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredOtherQuotations.length === 0 ? (
+                      <tr>
+                        <td colSpan={7} className="px-4 py-12 text-center text-sm text-slate-500">
+                          Không có NCC phù hợp bộ lọc
+                        </td>
+                      </tr>
+                    ) : (
+                      filteredOtherQuotations.map((q: any, index: number) => {
+                        const isSelected = selectedQuotationId === q.id;
+                        const isOver = prBaseAmount > 0 && Number(q.totalAmount ?? 0) > prBaseAmount;
+                        return (
+                          <tr
+                            key={q.id}
+                            onClick={() => setSelectedQuotationId(q.id)}
+                            className={`group cursor-pointer transition-all duration-200 hover:[&>td]:bg-indigo-50/40 ${index % 2 === 0 ? '[&>td]:bg-white' : '[&>td]:bg-[#FBFCFE]'}`}
+                          >
+                            <td className="relative px-4 py-3 text-sm text-slate-600">
+                              <div aria-hidden className={`absolute inset-y-2 left-0 w-[3px] rounded-r-full bg-indigo-500 transition-all ${isSelected ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`} />
+                              <div className="ml-1">{index + 1}</div>
+                            </td>
+                            <td className="px-4 py-3">
+                              <div className="min-w-0">
+                                <p className="truncate font-semibold text-slate-900">{q.supplier.name}</p>
+                                <p className="text-xs text-slate-500">{q.supplier.code ? `Mã: ${q.supplier.code}` : '—'}</p>
+                              </div>
+                            </td>
+                            <td className="px-4 py-3 text-sm font-semibold text-slate-900">
                               {formatCurrency(q.totalAmount, q.currency)}
-                            </span>
-                          </div>
-                          {q.leadTime && (
-                            <div>
-                              <span className="text-slate-500">Lead time: </span>
-                              <span className="font-medium text-slate-900">{q.leadTime} ngày</span>
-                            </div>
-                          )}
-                          {q.recommendationScore !== null && (
-                            <div>
-                              <span className="text-slate-500">Điểm: </span>
-                              <span className="font-semibold text-slate-900">
-                                {q.recommendationScore.toFixed(1)}/100
-                              </span>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          // TODO: Show quotation details modal
-                          alert('Chi tiết báo giá sẽ được hiển thị ở đây');
-                        }}
-                        className="ml-4 p-2 hover:bg-slate-200 rounded-lg transition-colors"
-                        title="Xem chi tiết"
-                      >
-                        <FileText className="w-5 h-5 text-slate-600" strokeWidth={2} />
-                      </button>
-                    </div>
-                  </div>
-                ))}
+                            </td>
+                            <td className="px-4 py-3 text-sm text-slate-700">{q.leadTime ? `${q.leadTime} ngày` : '-'}</td>
+                            <td className="px-4 py-3 text-sm text-slate-700">
+                              {q.recommendationScore !== null ? `${q.recommendationScore.toFixed(1)}/100` : '-'}
+                            </td>
+                            <td className="px-4 py-3">
+                              {isOver ? (
+                                <span className="inline-flex rounded-full bg-rose-100 px-2 py-0.5 text-xs font-semibold text-rose-700">Vượt</span>
+                              ) : (
+                                <span className="inline-flex rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-semibold text-emerald-700">Trong mức</span>
+                              )}
+                            </td>
+                            <td className="px-4 py-3">
+                              <div className="ml-auto flex items-center justify-end gap-2">
+                                {isSelected ? <CheckCircle className="h-4 w-4 text-indigo-600" strokeWidth={2} /> : null}
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    showInfo('Chi tiết báo giá sẽ được hiển thị ở đây');
+                                  }}
+                                  className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 transition hover:bg-slate-100"
+                                  title="Xem chi tiết"
+                                >
+                                  <FileText className="h-4 w-4" strokeWidth={2} />
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
               </div>
             </div>
           )}
         </div>
       </div>
 
-      {/* D. ACTION BAR (STICKY) */}
-      <div className="fixed bottom-0 bg-white border-t border-slate-200 shadow-lg z-50 px-6 py-4" style={{ left: '240px', right: 0 }}>
-        <div className="flex items-center justify-between gap-4 max-w-full mx-auto">
+      {/* D. ACTION BAR — sticky dưới cùng, full width main content, không fixed để tránh vệt xám */}
+      <div className="flex-shrink-0 w-full bg-white border-t border-slate-200 shadow-[0_-8px_18px_-10px_rgba(15,23,42,0.18)] px-3 py-3 sm:px-4 sm:py-4">
+        <div className="flex items-center justify-between gap-4">
           <button
             onClick={handleReturnToBuyer}
             className="px-6 py-3 bg-slate-300 text-slate-700 rounded-xl hover:bg-slate-400 transition-colors font-medium shadow-sm flex items-center gap-2"
@@ -402,7 +473,7 @@ const SelectSupplier = () => {
             <button
               onClick={handleSelectRecommended}
               disabled={selectSupplierMutation.isPending || (overBudgetInfo?.isOverBudget && !overBudgetReason.trim())}
-              className="px-6 py-3 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 transition-all font-medium shadow-sm button-glow-indigo disabled:opacity-50 flex items-center gap-2"
+              className="px-6 py-3 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 transition-all font-medium shadow-sm disabled:opacity-50 flex items-center gap-2"
             >
               <CheckCircle className="w-4 h-4" strokeWidth={2} />
               <span>{overBudgetInfo?.isOverBudget ? 'Gửi GĐ Chi nhánh xem xét' : 'Chọn NCC'}</span>
@@ -413,8 +484,8 @@ const SelectSupplier = () => {
 
       {/* Modal: Chọn khác - Nhập lý do */}
       {showOtherReasonModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm animate-fadeIn">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 modal-enter animate-slideUpFadeIn">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm modal-popup-overlay" onClick={() => { setShowOtherReasonModal(false); setOtherReason(''); }}>
+          <div className="modal-popup-panel bg-white rounded-2xl shadow-2xl w-full max-w-md p-6" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg font-bold text-slate-900">Chọn NCC khác</h3>
               <button
@@ -463,8 +534,8 @@ const SelectSupplier = () => {
 
       {/* Modal: Over-Budget - Nhập lý do */}
       {showOverBudgetModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm animate-fadeIn">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 modal-enter animate-slideUpFadeIn">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm modal-popup-overlay" onClick={() => { setShowOverBudgetModal(false); setOverBudgetReason(''); }}>
+          <div className="modal-popup-panel bg-white rounded-2xl shadow-2xl w-full max-w-md p-6" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2">
                 <AlertTriangle className="w-6 h-6 text-red-600" strokeWidth={2} />
@@ -534,8 +605,8 @@ const SelectSupplier = () => {
 
       {/* Modal: Trả Buyer - Nhập lý do */}
       {showReturnModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm animate-fadeIn">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 modal-enter animate-slideUpFadeIn">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm modal-popup-overlay" onClick={() => { setShowReturnModal(false); setReturnReason(''); }}>
+          <div className="modal-popup-panel bg-white rounded-2xl shadow-2xl w-full max-w-md p-6" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg font-bold text-slate-900">Trả PR cho Buyer</h3>
               <button

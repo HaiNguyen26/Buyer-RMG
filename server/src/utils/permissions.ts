@@ -119,7 +119,8 @@ export async function initializePermissions(): Promise<void> {
       { resource: PermissionResource.DELIVERY, action: PermissionAction.READ },
       { resource: PermissionResource.DELIVERY, action: PermissionAction.UPDATE },
     ],
-    [Role.APPROVER]: [
+    // Trưởng phòng / trưởng nhóm duyệt PR (enum không còn APPROVER)
+    [Role.DEPARTMENT_HEAD]: [
       { resource: PermissionResource.PURCHASE_REQUEST, action: PermissionAction.READ },
       { resource: PermissionResource.PURCHASE_REQUEST, action: PermissionAction.APPROVE },
       { resource: PermissionResource.PURCHASE_REQUEST, action: PermissionAction.REJECT },

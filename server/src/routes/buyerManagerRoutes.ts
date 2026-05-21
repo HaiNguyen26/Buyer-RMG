@@ -8,32 +8,37 @@ import {
   getPolicyGuidelines,
   getAlertsRisks,
 } from '../controllers/buyerManagerController';
+import {
+  getPOsPendingApproval,
+  getPODetailForApproval,
+  approvePO,
+  rejectPO,
+} from '../controllers/buyerLeaderController';
 import { authenticate } from '../middleware/auth';
+import { requireBuyerManagerPortal } from '../middleware/requireBuyerManagerPortal';
 
 export default async function buyerManagerRoutes(fastify: FastifyInstance) {
-  // All routes require authentication
   fastify.addHook('onRequest', authenticate);
 
-  // Dashboard
-  fastify.get('/dashboard', getBuyerManagerDashboard);
+  fastify.get('/dashboard', { compress: false }, getBuyerManagerDashboard);
+  fastify.get('/team-management', { compress: false }, getTeamManagement);
+  fastify.get('/cost-analysis', { compress: false }, getCostAnalysis);
+  fastify.get('/supplier-performance', { compress: false }, getSupplierPerformance);
+  fastify.get('/strategic-reports', { compress: false }, getStrategicReports);
+  fastify.get('/policy-guidelines', { compress: false }, getPolicyGuidelines);
+  fastify.get('/alerts-risks', { compress: false }, getAlertsRisks);
 
-  // Team Management
-  fastify.get('/team-management', getTeamManagement);
-
-  // Cost & Lead-time Analysis
-  fastify.get('/cost-analysis', getCostAnalysis);
-
-  // Supplier Performance
-  fastify.get('/supplier-performance', getSupplierPerformance);
-
-  // Strategic Reports
-  fastify.get('/strategic-reports', getStrategicReports);
-
-  // Policy & Guidelines
-  fastify.get('/policy-guidelines', getPolicyGuidelines);
-
-  // Alerts & Risks
-  fastify.get('/alerts-risks', getAlertsRisks);
+  // PO duyệt — Trưởng phòng Mua hàng (BUYER_MANAGER)
+  fastify.get(
+    '/po/pending-approval',
+    { compress: false, preHandler: requireBuyerManagerPortal },
+    getPOsPendingApproval
+  );
+  fastify.get(
+    '/po/:poId/review',
+    { compress: false, preHandler: requireBuyerManagerPortal },
+    getPODetailForApproval
+  );
+  fastify.post('/po/:poId/approve', { preHandler: requireBuyerManagerPortal }, approvePO);
+  fastify.post('/po/:poId/reject', { preHandler: requireBuyerManagerPortal }, rejectPO);
 }
-
-

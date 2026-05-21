@@ -4,19 +4,105 @@ import { AuthenticatedRequest } from '../middleware/auth';
 import { auditCreate, auditUpdate, auditDelete } from '../utils/audit';
 import { z } from 'zod';
 
+const COUNTRY_CODE_MAP: Record<string, string> = {
+  vietnam: 'VN',
+  'viet nam': 'VN',
+  'việt nam': 'VN',
+  vn: 'VN',
+  china: 'CN',
+  cn: 'CN',
+  usa: 'US',
+  us: 'US',
+  'united states': 'US',
+  japan: 'JP',
+  jp: 'JP',
+  korea: 'KR',
+  kr: 'KR',
+};
+
+const CATEGORY_CODE_MAP: Record<string, string> = {
+  electrical: 'ELE',
+  'điện': 'ELE',
+  dien: 'ELE',
+  mechanical: 'MEC',
+  'cơ khí': 'MEC',
+  'co khi': 'MEC',
+  fabrication: 'FAB',
+  'gia công': 'FAB',
+  'gia cong': 'FAB',
+  services: 'SRV',
+  service: 'SRV',
+  'dịch vụ': 'SRV',
+  'dich vu': 'SRV',
+  chemical: 'CHM',
+  'hóa chất': 'CHM',
+  'hoa chat': 'CHM',
+  it: 'ITE',
+  technology: 'ITE',
+};
+
+const normalizeCountryCode = (country?: string): string => {
+  const key = (country || '').trim().toLowerCase();
+  return COUNTRY_CODE_MAP[key] || 'VN';
+};
+
+const normalizeCategoryCode = (category?: string): string => {
+  const key = (category || '').split(',')[0]?.trim().toLowerCase() || '';
+  return CATEGORY_CODE_MAP[key] || 'SRV';
+};
+
+const formatVendorCode = (countryCode: string, categoryCode: string, sequence: number): string =>
+  `VND-${countryCode}-${categoryCode}-${String(sequence).padStart(5, '0')}`;
+
+const getNextVendorSequence = async (): Promise<number> => {
+  const suppliers = await prisma.supplier.findMany({
+    where: {
+      deletedAt: null,
+      code: { startsWith: 'VND-' },
+    },
+    select: { code: true },
+  });
+
+  let maxSequence = 0;
+  for (const supplier of suppliers) {
+    const match = (supplier.code || '').match(/-(\d{5})$/);
+    if (!match) continue;
+    const value = parseInt(match[1], 10);
+    if (Number.isFinite(value) && value > maxSequence) {
+      maxSequence = value;
+    }
+  }
+
+  return maxSequence + 1;
+};
+
 // Validation schemas
 const createSupplierSchema = z.object({
   name: z.string().min(1, 'Tên NCC là bắt buộc'),
   code: z.string().optional(),
-  email: z.string().email().optional().or(z.literal('')),
+  country: z.string().optional(),
+  category: z.string().optional(),
+  email: z.string().optional().refine((val) => {
+    // If email is provided and not empty, validate it
+    if (!val || val.trim() === '') return true;
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    return emailRegex.test(val.trim());
+  }, {
+    message: 'Email không hợp lệ. Vui lòng nhập email đúng định dạng hoặc để trống.',
+  }),
   phone: z.string().optional(),
   address: z.string().optional(),
   taxCode: z.string().optional(),
   contactPerson: z.string().optional(),
+  bankName: z.string().optional(),
+  bankAccount: z.string().optional(),
   notes: z.string().optional(),
 });
 
 const updateSupplierSchema = createSupplierSchema.partial();
+const bulkImportSuppliersSchema = z.object({
+  suppliers: z.array(createSupplierSchema).min(1, 'Danh sách NCC import không được rỗng'),
+});
 
 // Get Suppliers
 export const getSuppliers = async (
@@ -69,7 +155,7 @@ export const getSuppliers = async (
       orderBy: {
         name: 'asc',
       },
-      take: 100,
+      take: 500,
     });
 
     const mappedSuppliers = suppliers.map((supplier) => ({
@@ -202,36 +288,54 @@ export const createSupplier = async (
     }
 
     const body = createSupplierSchema.parse(request.body);
+    let supplierCode = body.code?.trim() || '';
+
+    if (!supplierCode) {
+      const nextSequence = await getNextVendorSequence();
+      supplierCode = formatVendorCode(
+        normalizeCountryCode(body.country),
+        normalizeCategoryCode(body.category),
+        nextSequence
+      );
+    }
 
     // Check if code already exists
-    if (body.code) {
+    if (supplierCode) {
       const existing = await prisma.supplier.findFirst({
         where: {
-          code: body.code,
+          code: supplierCode,
           deletedAt: null,
         },
       });
 
       if (existing) {
-        return reply.code(400).send({ error: 'Supplier code already exists' });
+        return reply.code(400).send({ 
+          error: 'Supplier code already exists',
+          message: 'Mã nhà cung cấp đã tồn tại. Vui lòng sử dụng mã khác.',
+        });
       }
     }
 
     const supplier = await prisma.supplier.create({
       data: {
-        name: body.name,
-        code: body.code || null,
-        email: body.email || null,
-        phone: body.phone || null,
-        address: body.address || null,
-        taxCode: body.taxCode || null,
-        contactPerson: body.contactPerson || null,
-        notes: body.notes || null,
+        name: body.name.trim(),
+        code: supplierCode || null,
+        email: body.email?.trim() || null,
+        phone: body.phone?.trim() || null,
+        address: body.address?.trim() || null,
+        taxCode: body.taxCode?.trim() || null,
+        contactPerson: body.contactPerson?.trim() || null,
+        bankName: body.bankName?.trim() || null,
+        bankAccount: body.bankAccount?.trim() || null,
+        notes: body.notes?.trim() || null,
       },
     });
 
     // Audit log
-    await auditCreate('suppliers', supplier.id, userId, supplier);
+    await auditCreate('suppliers', supplier.id, supplier, {
+      userId,
+      companyId: supplier.companyId || undefined,
+    });
 
     reply.code(201).send({
       id: supplier.id,
@@ -242,6 +346,8 @@ export const createSupplier = async (
       address: supplier.address,
       taxCode: supplier.taxCode,
       contactPerson: supplier.contactPerson,
+      bankName: supplier.bankName,
+      bankAccount: supplier.bankAccount,
       notes: supplier.notes,
       createdAt: supplier.createdAt.toISOString(),
     });
@@ -251,6 +357,150 @@ export const createSupplier = async (
     }
     console.error('Create supplier error:', error);
     reply.code(500).send({
+      error: 'Internal server error',
+      message: error.message,
+    });
+  }
+};
+
+// Bulk Import Suppliers
+export const bulkImportSuppliers = async (
+  request: AuthenticatedRequest,
+  reply: FastifyReply
+) => {
+  try {
+    const userId = request.user?.userId;
+    if (!userId) {
+      return reply.code(401).send({ error: 'Unauthorized' });
+    }
+
+    const body = bulkImportSuppliersSchema.parse(request.body);
+    const now = new Date();
+
+    const normalizedSuppliers = body.suppliers.map((item, index) => ({
+      index,
+      name: item.name?.trim() || `Vendor-${index + 1}`,
+      code: item.code?.trim() || null,
+      country: item.country?.trim() || null,
+      category: item.category?.trim() || null,
+      email: item.email?.trim() || null,
+      phone: item.phone?.trim() || null,
+      address: item.address?.trim() || null,
+      taxCode: item.taxCode?.trim() || null,
+      contactPerson: item.contactPerson?.trim() || null,
+      bankName: item.bankName?.trim() || null,
+      bankAccount: item.bankAccount?.trim() || null,
+      notes: item.notes?.trim() || null,
+    }));
+
+    // De-dup in request payload by code/taxCode/name
+    const seen = new Set<string>();
+    const dedupedSuppliers = normalizedSuppliers.filter((supplier) => {
+      const key = `${supplier.code || ''}|${supplier.taxCode || ''}|${supplier.name.toLowerCase()}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+    const existingSuppliers = await prisma.supplier.findMany({
+      where: { deletedAt: null },
+      select: { id: true, code: true, taxCode: true, name: true },
+    });
+
+    const existingCodeSet = new Set(
+      existingSuppliers
+        .map((s) => s.code?.trim().toLowerCase())
+        .filter((v): v is string => Boolean(v))
+    );
+    const existingTaxSet = new Set(
+      existingSuppliers
+        .map((s) => s.taxCode?.trim().toLowerCase())
+        .filter((v): v is string => Boolean(v))
+    );
+    const existingNameSet = new Set(existingSuppliers.map((s) => s.name.trim().toLowerCase()));
+    const usedCodeSet = new Set(existingCodeSet);
+    let nextSequence = await getNextVendorSequence();
+
+    for (const supplier of dedupedSuppliers) {
+      if (supplier.code) {
+        usedCodeSet.add(supplier.code.toLowerCase());
+        continue;
+      }
+
+      let generatedCode = formatVendorCode(
+        normalizeCountryCode(supplier.country || undefined),
+        normalizeCategoryCode(supplier.category || undefined),
+        nextSequence
+      );
+
+      while (usedCodeSet.has(generatedCode.toLowerCase())) {
+        nextSequence += 1;
+        generatedCode = formatVendorCode(
+          normalizeCountryCode(supplier.country || undefined),
+          normalizeCategoryCode(supplier.category || undefined),
+          nextSequence
+        );
+      }
+
+      supplier.code = generatedCode;
+      usedCodeSet.add(generatedCode.toLowerCase());
+      nextSequence += 1;
+    }
+
+    const toCreate = dedupedSuppliers.filter((supplier) => {
+      const code = supplier.code?.toLowerCase() || null;
+      const taxCode = supplier.taxCode?.toLowerCase() || null;
+      const name = supplier.name.toLowerCase();
+      if (code && existingCodeSet.has(code)) return false;
+      if (taxCode && existingTaxSet.has(taxCode)) return false;
+      if (existingNameSet.has(name)) return false;
+      return true;
+    });
+
+    if (toCreate.length > 0) {
+      await prisma.supplier.createMany({
+        data: toCreate.map((supplier) => ({
+          name: supplier.name,
+          code: supplier.code,
+          email: supplier.email,
+          phone: supplier.phone,
+          address: supplier.address,
+          taxCode: supplier.taxCode,
+          contactPerson: supplier.contactPerson,
+          bankName: supplier.bankName,
+          bankAccount: supplier.bankAccount,
+          notes: supplier.notes,
+          createdAt: now,
+          updatedAt: now,
+        })),
+      });
+    }
+
+    await auditCreate(
+      'suppliers',
+      `bulk-import-${now.getTime()}`,
+      {
+        totalReceived: body.suppliers.length,
+        dedupedInPayload: dedupedSuppliers.length,
+        inserted: toCreate.length,
+        skipped: dedupedSuppliers.length - toCreate.length,
+      },
+      { userId }
+    );
+
+    return reply.code(201).send({
+      message: 'Import NCC thành công',
+      totalReceived: body.suppliers.length,
+      dedupedInPayload: dedupedSuppliers.length,
+      inserted: toCreate.length,
+      skipped: dedupedSuppliers.length - toCreate.length,
+    });
+  } catch (error: any) {
+    if (error instanceof z.ZodError) {
+      return reply.code(400).send({ error: 'Validation error', details: error.errors });
+    }
+    console.error('Bulk import suppliers error:', error);
+    return reply.code(500).send({
       error: 'Internal server error',
       message: error.message,
     });

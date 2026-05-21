@@ -5,20 +5,15 @@ import { useNotifications } from '../hooks/useNotifications';
 
 interface NotificationBellProps {
   role: string;
+  /** Nút chuông trên header tối (icon/hover) */
+  toolbarOnDark?: boolean;
 }
 
-const NotificationBell = ({ role }: NotificationBellProps) => {
+const NotificationBell = ({ role, toolbarOnDark = false }: NotificationBellProps) => {
   const navigate = useNavigate();
   const [isOpen, setIsOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const { notifications, unreadCount, markAsRead, markAllAsRead, isLoading } = useNotifications();
-
-  // Debug logging
-  useEffect(() => {
-    console.log('🔔 NotificationBell - Role:', role);
-    console.log('🔔 NotificationBell - Unread count:', unreadCount);
-    console.log('🔔 NotificationBell - Notifications:', notifications);
-  }, [role, unreadCount, notifications]);
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -70,7 +65,7 @@ const NotificationBell = ({ role }: NotificationBellProps) => {
           if (type === 'PR_READY_FOR_ASSIGNMENT') {
             navigate(`/dashboard/buyer-leader/pending-assignments?prId=${relatedId}`);
           } else if (type === 'PR_QUOTATIONS_COMPLETE') {
-            navigate(`/dashboard/buyer-leader/compare-quotations?prId=${relatedId}`);
+            navigate(`/dashboard/buyer-leader/rfq-monitoring?prId=${relatedId}`);
           } else if (type === 'PR_OVER_BUDGET_ACTION_REQUIRED') {
             navigate(`/dashboard/buyer-leader/over-budget-prs?prId=${relatedId}`);
           } else if (type === 'PR_RETURNED_FROM_BRANCH_MANAGER') {
@@ -81,8 +76,12 @@ const NotificationBell = ({ role }: NotificationBellProps) => {
 
       case 'BUYER':
         // BUYER: Open assigned PR/item
-        if (relatedType === 'PR' && relatedId) {
-          navigate(`/dashboard/buyer/pr/${relatedId}`);
+        if (relatedId) {
+          if (relatedType === 'RFQ') {
+            navigate(`/dashboard/buyer/rfq/${relatedId}`);
+          } else {
+            navigate(`/dashboard/buyer/assigned-prs/${relatedId}`);
+          }
         }
         break;
 
@@ -121,12 +120,21 @@ const NotificationBell = ({ role }: NotificationBellProps) => {
       {/* Bell Icon */}
       <button
         onClick={() => setIsOpen(!isOpen)}
-        className="relative p-2 rounded-xl hover:bg-slate-100 transition-colors"
+        className={`relative rounded-xl p-2 transition-colors ${
+          toolbarOnDark ? 'hover:bg-white/10' : 'hover:bg-slate-100'
+        }`}
         aria-label="Notifications"
       >
-        <Bell className="w-5 h-5 text-slate-700" strokeWidth={2} />
+        <Bell
+          className={`h-5 w-5 ${toolbarOnDark ? 'text-slate-100' : 'text-slate-700'}`}
+          strokeWidth={2}
+        />
         {hasUnread && (
-          <span className="absolute top-0 right-0 w-5 h-5 bg-red-600 text-white text-xs font-bold rounded-full flex items-center justify-center border-2 border-white">
+          <span
+            className={`absolute right-0 top-0 flex h-5 w-5 items-center justify-center rounded-full border-2 text-xs font-bold text-white ${
+              toolbarOnDark ? 'border-slate-800 bg-red-500' : 'border-white bg-red-600'
+            }`}
+          >
             {unreadCount > 9 ? '9+' : unreadCount}
           </span>
         )}
@@ -134,10 +142,10 @@ const NotificationBell = ({ role }: NotificationBellProps) => {
 
       {/* Dropdown */}
       {isOpen && (
-        <div className="absolute right-0 mt-2 w-96 bg-white rounded-2xl shadow-2xl border border-slate-200 z-50 max-h-[600px] flex flex-col animate-slideUpFadeIn">
+        <div className="absolute right-0 z-[200] mt-2 flex w-80 flex-col rounded-2xl border border-slate-200 bg-white shadow-2xl animate-slideUpFadeIn">
           {/* Header */}
-          <div className="flex items-center justify-between p-4 border-b border-slate-200">
-            <h3 className="text-lg font-bold text-slate-900">Thông báo</h3>
+          <div className="flex items-center justify-between px-3 py-2.5 border-b border-slate-200 flex-shrink-0">
+            <h3 className="text-sm font-bold text-slate-900">Thông báo</h3>
             <div className="flex items-center gap-2">
               {hasUnread && (
                 <button
@@ -160,11 +168,11 @@ const NotificationBell = ({ role }: NotificationBellProps) => {
             </div>
           </div>
 
-          {/* Notifications List */}
-          <div className="flex-1 overflow-y-auto scrollbar-hide">
+          {/* Notifications List — chỉ hiển thị ~3–4 đơn, dài hơn thì cuộn */}
+          <div className="overflow-y-auto scrollbar-hide max-h-[280px] min-h-0">
             {notifications.length === 0 ? (
-              <div className="p-8 text-center">
-                <Bell className="w-12 h-12 text-slate-300 mx-auto mb-3" strokeWidth={1.5} />
+              <div className="p-6 text-center">
+                <Bell className="w-10 h-10 text-slate-300 mx-auto mb-2" strokeWidth={1.5} />
                 <p className="text-slate-500 text-sm">Không có thông báo</p>
               </div>
             ) : (
@@ -175,22 +183,22 @@ const NotificationBell = ({ role }: NotificationBellProps) => {
                     <div
                       key={notification.id}
                       onClick={() => handleNotificationClick(notification)}
-                      className={`p-4 cursor-pointer transition-colors ${
+                      className={`px-3 py-2.5 cursor-pointer transition-colors ${
                         isUnread
                           ? 'bg-indigo-50/50 hover:bg-indigo-100/50'
                           : 'bg-white hover:bg-slate-50'
                       }`}
                     >
-                      <div className="flex items-start gap-3">
+                      <div className="flex items-start gap-2">
                         <div
-                          className={`w-2 h-2 rounded-full mt-2 flex-shrink-0 ${
+                          className={`w-1.5 h-1.5 rounded-full mt-2 flex-shrink-0 ${
                             isUnread ? 'bg-red-500' : 'bg-transparent'
                           }`}
                         />
                         <div className="flex-1 min-w-0">
-                          <div className="flex items-start justify-between gap-2 mb-1">
+                          <div className="flex items-start justify-between gap-1 mb-0.5">
                             <h4
-                              className={`text-sm font-semibold ${
+                              className={`text-xs font-semibold leading-tight line-clamp-2 ${
                                 isUnread ? 'text-slate-900' : 'text-slate-700'
                               }`}
                             >
@@ -202,15 +210,15 @@ const NotificationBell = ({ role }: NotificationBellProps) => {
                                   e.stopPropagation();
                                   markAsRead(notification.id);
                                 }}
-                                className="p-1 hover:bg-indigo-100 rounded transition-colors flex-shrink-0"
+                                className="p-0.5 hover:bg-indigo-100 rounded transition-colors flex-shrink-0"
                                 title="Đánh dấu đã đọc"
                               >
-                                <Check className="w-3.5 h-3.5 text-indigo-600" strokeWidth={2} />
+                                <Check className="w-3 h-3 text-indigo-600" strokeWidth={2} />
                               </button>
                             )}
                           </div>
-                          <p className="text-sm text-slate-600 mb-2">{notification.message}</p>
-                          <p className="text-xs text-slate-400">
+                          <p className="text-xs text-slate-600 mb-1 line-clamp-2">{notification.message}</p>
+                          <p className="text-[10px] text-slate-400">
                             {formatTimeAgo(notification.createdAt)}
                           </p>
                         </div>

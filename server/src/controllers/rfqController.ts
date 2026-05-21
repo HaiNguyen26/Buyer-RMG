@@ -2,49 +2,31 @@ import { FastifyReply } from 'fastify';
 import { prisma } from '../config/database';
 import { AuthenticatedRequest } from '../middleware/auth';
 import { auditCreate, auditUpdate } from '../utils/audit';
+import { computePRStatusFromItemStatuses } from '../utils/prStatusFromItems';
+import {
+  itemDepartmentOutcomeAllowsProcurement,
+  prismaDepartmentOutcomeRowActive,
+  resolveBuyerAssignedItemIds,
+} from '../utils/departmentPrItemReview';
+import {
+  allocateNextCounter,
+  rfqPrBuyerSequenceKey,
+  scanMaxRFQPRBuyerSuffix,
+} from '../utils/documentSequence';
 import { z } from 'zod';
+import { prSalesPOSelect, serializePRSalesOrder } from '../utils/prSalesOrder';
 
 // Validation schemas
 const createRFQSchema = z.object({
   purchaseRequestId: z.string().min(1),
   notes: z.string().optional(),
+  itemIds: z.array(z.string()).optional(), // Items that belong to this RFQ
 });
 
 const updateRFQSchema = z.object({
   notes: z.string().optional(),
-  status: z.enum(['DRAFT', 'SENT', 'QUOTATION_RECEIVED', 'CLOSED']).optional(),
+  status: z.enum(['DRAFT', 'SENT', 'QUOTATION_RECEIVED', 'READY_FOR_COMPARISON', 'CLOSED']).optional(),
 });
-
-// Generate RFQ Number
-const generateRFQNumber = async () => {
-  const year = new Date().getFullYear();
-  const prefix = `RFQ-${year}-`;
-  
-  const existingRFQs = await prisma.rFQ.findMany({
-    where: { rfqNumber: { startsWith: prefix } },
-    select: { rfqNumber: true },
-  });
-  
-  const existingSequences = existingRFQs
-    .map((rfq) => {
-      const match = rfq.rfqNumber.match(/-(\d{4})$/);
-      return match ? parseInt(match[1], 10) : 0;
-    })
-    .filter((num) => num > 0)
-    .sort((a, b) => b - a);
-  
-  let nextSeq = 1;
-  for (const seq of existingSequences) {
-    if (seq === nextSeq) {
-      nextSeq++;
-    } else if (seq > nextSeq) {
-      break;
-    }
-  }
-  
-  const seq = String(nextSeq).padStart(4, '0');
-  return `${prefix}${seq}`;
-};
 
 // Create RFQ
 export const createRFQ = async (
@@ -63,6 +45,9 @@ export const createRFQ = async (
     const pr = await prisma.purchaseRequest.findUnique({
       where: { id: body.purchaseRequestId },
       include: {
+        items: {
+          where: { deletedAt: null, ...prismaDepartmentOutcomeRowActive },
+        },
         assignments: {
           where: {
             buyerId: userId,
@@ -76,39 +61,207 @@ export const createRFQ = async (
       return reply.code(404).send({ error: 'PR not found' });
     }
 
-    if (pr.status !== 'ASSIGNED_TO_BUYER') {
-      return reply.code(400).send({ error: 'PR must be assigned to buyer first' });
-    }
-
+    // Buyer phải có assignment thì mới được tạo RFQ (kiểm tra trước để dùng trong điều kiện status)
     if (pr.assignments.length === 0) {
       return reply.code(403).send({ error: 'PR is not assigned to you' });
     }
 
-    // Generate RFQ number
-    const rfqNumber = await generateRFQNumber();
+    // Cho phép tạo RFQ khi PR đang trong giai đoạn có thể hỏi giá (đã có phân công cho buyer này):
+    // - BUYER_LEADER_PENDING / BRANCH_MANAGER_APPROVED: phân công một phần, PR chưa chuyển ASSIGNED_TO_BUYER
+    // - ASSIGNED_TO_BUYER: đã phân công (toàn bộ hoặc phần còn lại)
+    // - RFQ_IN_PROGRESS: đang hỏi giá
+    // - QUOTATION_RECEIVED: đã có báo giá, vẫn có thể tạo RFQ cho item chưa nằm trong RFQ nào
+    const allowedStatuses = [
+      'BUYER_LEADER_PENDING',
+      'BRANCH_MANAGER_APPROVED',
+      'ASSIGNED_TO_BUYER',
+      'RFQ_IN_PROGRESS',
+      'QUOTATION_RECEIVED',
+    ];
+    if (!allowedStatuses.includes(pr.status)) {
+      return reply.code(400).send({
+        error: `PR hiện đang ở trạng thái ${pr.status}, không thể tạo RFQ mới. Vui lòng kiểm tra lại luồng nghiệp vụ.`,
+      });
+    }
 
-    // Create RFQ
-    const rfq = await prisma.rFQ.create({
-      data: {
-        purchaseRequestId: body.purchaseRequestId,
-        rfqNumber,
-        buyerId: userId,
-        status: 'DRAFT',
-        notes: body.notes || null,
-        companyId: pr.companyId || null,
-      },
-    });
+    const assignment = pr.assignments[0];
+    if (!assignment) {
+      return reply.code(403).send({ error: 'PR is not assigned to you' });
+    }
 
-    // Update PR status
-    await prisma.purchaseRequest.update({
-      where: { id: body.purchaseRequestId },
-      data: {
-        status: 'RFQ_IN_PROGRESS',
-      },
+    const assignedItemIds = resolveBuyerAssignedItemIds(assignment, pr.items);
+
+    // Validate itemIds if provided
+    if (body.itemIds && Array.isArray(body.itemIds) && body.itemIds.length > 0) {
+      // Validate all itemIds belong to assigned items (cùng tập với getPRDetails)
+      const invalidItems = body.itemIds.filter((id) => !assignedItemIds.includes(id));
+      if (invalidItems.length > 0) {
+        return reply.code(400).send({
+          error: 'Some items are not assigned to you',
+          message: 'Một hoặc nhiều dòng không thuộc phạm vi phân công của bạn.',
+          invalidItems,
+        });
+      }
+
+      // Check if any selected items already belong to another RFQ (items are locked)
+      // Lấy tất cả RFQ của PR (mọi buyer) để khóa item theo đúng nghiệp vụ:
+      // mỗi item chỉ thuộc về một RFQ tại một thời điểm.
+      const existingRFQs = await prisma.rFQ.findMany({
+        where: {
+          purchaseRequestId: body.purchaseRequestId,
+          deletedAt: null,
+        },
+        select: {
+          id: true,
+          rfqNumber: true,
+          notes: true,
+        },
+      });
+
+      // Collect all items that are already locked by existing RFQs
+      const lockedItemIds = new Set<string>();
+      const itemToRFQMap: Record<string, { id: string; rfqNumber: string }> = {};
+      
+      for (const existingRFQ of existingRFQs) {
+        let rfqItemIds: string[] = [];
+        
+        // Extract itemIds from notes if exists
+        if (existingRFQ.notes) {
+          const match = existingRFQ.notes.match(/\[RFQ_ITEMS\](.+?)\[\/RFQ_ITEMS\]/);
+          if (match) {
+            try {
+              const parsed = JSON.parse(match[1]);
+              if (parsed.itemIds && Array.isArray(parsed.itemIds)) {
+                rfqItemIds = parsed.itemIds as string[];
+              }
+            } catch (e) {
+              // Ignore parse errors
+            }
+          }
+        }
+
+        // Mark items as locked
+        rfqItemIds.forEach(itemId => {
+          lockedItemIds.add(itemId);
+          if (!itemToRFQMap[itemId]) {
+            itemToRFQMap[itemId] = {
+              id: existingRFQ.id,
+              rfqNumber: existingRFQ.rfqNumber,
+            };
+          }
+        });
+      }
+
+      // Check if any selected items are already locked
+      const selectedLockedItems = body.itemIds.filter(id => lockedItemIds.has(id));
+      if (selectedLockedItems.length > 0) {
+        const lockedItemsInfo = selectedLockedItems.map(itemId => ({
+          itemId,
+          rfqId: itemToRFQMap[itemId].id,
+          rfqNumber: itemToRFQMap[itemId].rfqNumber,
+        }));
+        
+        return reply.code(400).send({
+          error: 'Some items are already locked by another RFQ',
+          lockedItems: lockedItemsInfo,
+          message: 'Các items đã được chọn vào RFQ khác. Vui lòng chọn items chưa thuộc RFQ nào.',
+        });
+      }
+    }
+
+    // Get buyer username for RFQ number
+    const buyer = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { username: true },
     });
+    const buyerUsername = buyer?.username || 'BUYER';
+
+    // Prepare notes: combine user notes with itemIds (stored as JSON in notes)
+    let notesContent = body.notes || '';
+    if (body.itemIds && Array.isArray(body.itemIds) && body.itemIds.length > 0) {
+      const itemIdsJson = JSON.stringify({ itemIds: body.itemIds });
+      notesContent = notesContent 
+        ? `${notesContent}\n\n[RFQ_ITEMS]${itemIdsJson}[/RFQ_ITEMS]`
+        : `[RFQ_ITEMS]${itemIdsJson}[/RFQ_ITEMS]`;
+      console.log(`[createRFQ] Saving itemIds to notes:`, body.itemIds);
+      console.log(`[createRFQ] Notes content:`, notesContent);
+    } else {
+      console.warn(`[createRFQ] No itemIds provided! body.itemIds:`, body.itemIds);
+    }
+
+    const prPrefix = pr.prNumber.split('-').slice(0, -1).join('-');
+    const buyerTag = buyerUsername.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 10);
+    const seqKey = rfqPrBuyerSequenceKey(prPrefix, buyerTag);
+
+    const rfq = await prisma.$transaction(
+      async (tx) => {
+        const seq = await allocateNextCounter(tx, seqKey, () =>
+          scanMaxRFQPRBuyerSuffix(tx, prPrefix, buyerTag)
+        );
+        const rfqNumber = `RFQ-PR-${prPrefix}-${buyerTag}-${String(seq).padStart(3, '0')}`;
+        return tx.rFQ.create({
+          data: {
+            purchaseRequestId: body.purchaseRequestId,
+            rfqNumber,
+            buyerId: userId,
+            status: 'DRAFT',
+            notes: notesContent || null,
+            companyId: pr.companyId || null,
+          },
+        });
+      },
+      { maxWait: 10000, timeout: 30000 }
+    );
+
+    // Cập nhật trạng thái ITEM: RFQ_CREATED cho các item thuộc RFQ này
+    if (body.itemIds && Array.isArray(body.itemIds) && body.itemIds.length > 0) {
+      await prisma.purchaseRequestItem.updateMany({
+        where: {
+          id: { in: body.itemIds },
+          purchaseRequestId: body.purchaseRequestId,
+          deletedAt: null,
+          ...prismaDepartmentOutcomeRowActive,
+        },
+        data: { status: 'RFQ_CREATED' as any },
+      });
+    }
+
+    // Tổng hợp PR status từ trạng thái item
+    const prItemsForStatus = await prisma.purchaseRequestItem.findMany({
+      where: { purchaseRequestId: body.purchaseRequestId, deletedAt: null },
+      select: { status: true, departmentItemOutcome: true },
+    });
+    const aggregatedStatus = computePRStatusFromItemStatuses(
+      prItemsForStatus
+        .filter((i) => itemDepartmentOutcomeAllowsProcurement(i.departmentItemOutcome))
+        .map((i) => i.status)
+    );
+    if (aggregatedStatus) {
+      await prisma.purchaseRequest.update({
+        where: { id: body.purchaseRequestId },
+        data: { status: aggregatedStatus },
+      });
+    }
 
     // Audit log
-    await auditCreate('rfqs', rfq.id, userId, rfq);
+    await auditCreate('rfqs', rfq.id, rfq, {
+      userId,
+      companyId: rfq.companyId ?? pr.companyId ?? undefined,
+    });
+
+    // Extract itemIds from notes for response
+    let itemIds: string[] = [];
+    if (rfq.notes) {
+      const match = rfq.notes.match(/\[RFQ_ITEMS\](.+?)\[\/RFQ_ITEMS\]/);
+      if (match) {
+        try {
+          const parsed = JSON.parse(match[1]);
+          itemIds = parsed.itemIds || [];
+        } catch (e) {
+          // Ignore parse errors
+        }
+      }
+    }
 
     reply.code(201).send({
       id: rfq.id,
@@ -116,6 +269,7 @@ export const createRFQ = async (
       purchaseRequestId: rfq.purchaseRequestId,
       status: rfq.status,
       notes: rfq.notes,
+      itemIds: itemIds.length > 0 ? itemIds : undefined,
       createdAt: rfq.createdAt.toISOString(),
     });
   } catch (error: any) {
@@ -152,6 +306,7 @@ export const getRFQs = async (
       where.status = status;
     }
 
+    // Fetch RFQs without quotations relation to avoid dependency on quotation_attachments table
     const rfqs = await prisma.rFQ.findMany({
       where,
       include: {
@@ -162,20 +317,12 @@ export const getRFQs = async (
             department: true,
             totalAmount: true,
             currency: true,
+            status: true,
           },
         },
         quotations: {
           where: { deletedAt: null },
-          select: {
-            id: true,
-            supplier: {
-              select: {
-                name: true,
-              },
-            },
-            totalAmount: true,
-            status: true,
-          },
+          select: { id: true }, // Only select id for counting
         },
       },
       orderBy: {
@@ -184,26 +331,51 @@ export const getRFQs = async (
       take: 100,
     });
 
-    const mappedRFQs = rfqs.map((rfq) => ({
-      id: rfq.id,
-      rfqNumber: rfq.rfqNumber,
-      prNumber: rfq.purchaseRequest.prNumber,
-      prId: rfq.purchaseRequest.id,
-      department: rfq.purchaseRequest.department,
-      status: rfq.status,
-      quotationsCount: rfq.quotations.length,
-      quotations: rfq.quotations.map((q: any) => ({
-        id: q.id,
-        supplierName: q.supplier.name,
-        totalAmount: Number(q.totalAmount),
-        status: q.status,
-      })),
-      sentDate: rfq.sentDate?.toISOString(),
-      notes: rfq.notes,
-      createdAt: rfq.createdAt.toISOString(),
-    }));
+    const mappedRFQs = rfqs.map((rfq) => {
+      // Extract itemIds from notes
+      let itemIds: string[] = [];
+      if (rfq.notes) {
+        const match = rfq.notes.match(/\[RFQ_ITEMS\](.+?)\[\/RFQ_ITEMS\]/);
+        if (match) {
+          try {
+            const parsed = JSON.parse(match[1]);
+            if (parsed.itemIds && Array.isArray(parsed.itemIds)) {
+              itemIds = parsed.itemIds as string[];
+            }
+          } catch (e) {
+            // Ignore parse errors
+          }
+        }
+      }
 
-    reply.send({ rfqs: mappedRFQs });
+      const quotationsCount = rfq.quotations?.length ?? 0;
+      
+      return {
+        id: rfq.id,
+        rfqNumber: rfq.rfqNumber,
+        prNumber: rfq.purchaseRequest.prNumber,
+        prId: rfq.purchaseRequest.id,
+        department: rfq.purchaseRequest.department,
+        prStatus: rfq.purchaseRequest.status,
+        status: rfq.status,
+        quotationsCount: quotationsCount,
+        quotations: [], // Omit full quotation list to avoid quotation_attachments; use RFQ detail when needed
+        sentDate: rfq.sentDate?.toISOString(),
+        notes: rfq.notes,
+        itemIds: itemIds,
+        itemCount: itemIds.length,
+        createdAt: rfq.createdAt.toISOString(),
+      };
+    });
+
+    const filteredRFQs = mappedRFQs.filter((rfq) => {
+      const rfqNumber = String(rfq.rfqNumber || '').toUpperCase();
+      const prNumber = String(rfq.prNumber || '').toUpperCase();
+      return !rfqNumber.startsWith('MOCK-') && !prNumber.startsWith('MOCK-');
+    });
+
+    console.log(`[getRFQs] Returning ${filteredRFQs.length} RFQs for buyer ${userId}`);
+    reply.send({ rfqs: filteredRFQs });
   } catch (error: any) {
     console.error('Get RFQs error:', error);
     reply.code(500).send({
@@ -239,6 +411,13 @@ export const getRFQById = async (
               select: {
                 username: true,
                 email: true,
+                fullName: true,
+              },
+            },
+            salesPO: {
+              select: {
+                ...prSalesPOSelect,
+                deliveryDeadline: true,
               },
             },
             assignments: {
@@ -283,6 +462,29 @@ export const getRFQById = async (
       return reply.code(403).send({ error: 'PR is not assigned to you' });
     }
 
+    // Extract itemIds from RFQ notes
+    let rfqItemIds: string[] = [];
+    if (rfq.notes) {
+      const match = rfq.notes.match(/\[RFQ_ITEMS\](.+?)\[\/RFQ_ITEMS\]/);
+      if (match) {
+        try {
+          const parsed = JSON.parse(match[1]);
+          if (parsed.itemIds && Array.isArray(parsed.itemIds)) {
+            rfqItemIds = parsed.itemIds as string[];
+            console.log(`[getRFQById] Extracted itemIds from notes:`, rfqItemIds);
+          }
+        } catch (e) {
+          console.error('[getRFQById] Error parsing RFQ itemIds from notes:', e);
+          console.error('[getRFQById] Notes content:', rfq.notes);
+        }
+      } else {
+        console.warn(`[getRFQById] No RFQ_ITEMS tag found in notes. RFQ ID: ${rfq.id}`);
+        console.warn(`[getRFQById] Notes content:`, rfq.notes);
+      }
+    } else {
+      console.warn(`[getRFQById] RFQ has no notes. RFQ ID: ${rfq.id}`);
+    }
+
     // Filter items based on assignment scope
     let assignedItemIds: string[] = [];
     if (assignment.scope === 'FULL') {
@@ -291,23 +493,115 @@ export const getRFQById = async (
       assignedItemIds = JSON.parse(assignment.assignedItemIds) as string[];
     }
 
-    // Filter items to only show assigned ones
-    const assignedItems = rfq.purchaseRequest.items.filter(item => assignedItemIds.includes(item.id));
+    // Filter items: if RFQ has specific itemIds, use those; otherwise use all assigned items
+    let itemsToShow = rfq.purchaseRequest.items;
+    if (rfqItemIds.length > 0) {
+      // RFQ has specific items - filter by both RFQ itemIds AND assigned items
+      itemsToShow = rfq.purchaseRequest.items.filter(item => 
+        rfqItemIds.includes(item.id) && assignedItemIds.includes(item.id)
+      );
+    } else {
+      // RFQ doesn't have specific items - use all assigned items (backward compatibility)
+      itemsToShow = rfq.purchaseRequest.items.filter(item => assignedItemIds.includes(item.id));
+    }
 
-    reply.send({
+    const resolvePrItemUnitPrice = (item: any): number | null => {
+      const estimated = Number(item?.estimatedUnitPriceVnd ?? 0);
+      if (Number.isFinite(estimated) && estimated > 0) return estimated;
+      const unitPrice = Number(item?.unitPrice ?? 0);
+      return Number.isFinite(unitPrice) && unitPrice > 0 ? unitPrice : null;
+    };
+    const resolvePrItemAmount = (item: any): number | null => {
+      const amount = Number(item?.amount ?? 0);
+      if (Number.isFinite(amount) && amount > 0) return amount;
+      const qty = Number(item?.qty ?? 0);
+      const unitPrice = resolvePrItemUnitPrice(item);
+      if (!Number.isFinite(qty) || qty <= 0 || unitPrice == null) return null;
+      return qty * unitPrice;
+    };
+
+    // Baseline = giá PR từng item (để so sánh với báo giá NCC)
+    const prItemsBaseline = itemsToShow.map((item: any) => ({
+      id: item.id,
+      lineNo: item.lineNo,
+      unitPrice: resolvePrItemUnitPrice(item),
+      amount: resolvePrItemAmount(item),
+      qty: Number(item.qty) || 0,
+    }));
+
+    // Supplier selections (per item) cho PR này – để hiển thị "Item thắng" / "Tổng tiền item thắng" theo NCC
+    const supplierSelections = await prisma.supplierSelection.findMany({
+      where: { purchaseRequestId: rfq.purchaseRequest.id },
+      select: { quotationId: true, purchaseRequestItemId: true },
+    });
+    const selectedItemIdsByQuotationId = new Map<string, string[]>();
+    for (const sel of supplierSelections) {
+      if (sel.purchaseRequestItemId && sel.quotationId) {
+        const arr = selectedItemIdsByQuotationId.get(sel.quotationId) ?? [];
+        if (!arr.includes(sel.purchaseRequestItemId)) arr.push(sel.purchaseRequestItemId);
+        selectedItemIdsByQuotationId.set(sel.quotationId, arr);
+      }
+    }
+
+    const { computeQuotationBaseline } = await import('../utils/baseline');
+
+    const salesOrder = serializePRSalesOrder(rfq.purchaseRequest as any);
+
+    /** Route Buyer `/buyer/rfqs/:id` — không trả các trường giá (PR + báo giá NCC). */
+    const stripBuyerFacingPrices = (payload: Record<string, any>) => {
+      if (payload.purchaseRequest) {
+        payload.purchaseRequest.totalAmount = null;
+        payload.purchaseRequest.items = (payload.purchaseRequest.items || []).map((it: any) => ({
+          ...it,
+          unitPrice: null,
+          amount: null,
+          baselineUnitPrice: null,
+          estimatedUnitPriceVnd: null,
+        }));
+      }
+      if (payload.quotations?.length) {
+        payload.quotations = payload.quotations.map((q: any) => ({
+          ...q,
+          totalAmount: null,
+          selectedItemsTotalAmount: null,
+          overBaseline: false,
+          itemsBaseline: [],
+          items: (q.items || []).map((it: any) => ({
+            ...it,
+            unitPrice: null,
+            totalPrice: null,
+          })),
+        }));
+      }
+    };
+
+    const responsePayload = {
       id: rfq.id,
       rfqNumber: rfq.rfqNumber,
       status: rfq.status,
       notes: rfq.notes,
       sentDate: rfq.sentDate?.toISOString(),
+      itemIds: rfqItemIds.length > 0 ? rfqItemIds : undefined,
+      itemCount: itemsToShow.length,
       purchaseRequest: {
         id: rfq.purchaseRequest.id,
         prNumber: rfq.purchaseRequest.prNumber,
         department: rfq.purchaseRequest.department,
+        salesPOId: rfq.purchaseRequest.salesPOId,
+        customerPO: rfq.purchaseRequest.customerPO,
+        projectCode: rfq.purchaseRequest.projectCode,
+        projectName: rfq.purchaseRequest.projectName,
+        customerName: rfq.purchaseRequest.customerName,
+        location: rfq.purchaseRequest.location,
+        requiredDate: rfq.purchaseRequest.requiredDate?.toISOString() ?? null,
         totalAmount: rfq.purchaseRequest.totalAmount ? Number(rfq.purchaseRequest.totalAmount) : null,
         currency: rfq.purchaseRequest.currency,
         requestor: rfq.purchaseRequest.requestor,
-        items: assignedItems.map((item: any) => ({
+        salesPO: rfq.purchaseRequest.salesPO,
+        /** Cùng shape với API danh sách PR (`salesOrder`) — dùng cho PDF / UI */
+        salesOrder,
+        salesOrderSummary: salesOrder,
+        items: itemsToShow.map((item: any) => ({
           id: item.id,
           lineNo: item.lineNo,
           description: item.description,
@@ -316,35 +610,68 @@ export const getRFQById = async (
           manufacturer: item.manufacturer,
           qty: Number(item.qty),
           unit: item.unit,
-          unitPrice: item.unitPrice ? Number(item.unitPrice) : null,
-          amount: item.amount ? Number(item.amount) : null,
+          desiredDeliveryDate: item.desiredDeliveryDate
+            ? new Date(item.desiredDeliveryDate).toISOString().slice(0, 10)
+            : null,
+          remark: item.remark ?? null,
+          unitPrice: resolvePrItemUnitPrice(item),
+          amount: resolvePrItemAmount(item),
+          baselineUnitPrice: resolvePrItemUnitPrice(item),
+          estimatedUnitPriceVnd:
+            Number(item?.estimatedUnitPriceVnd ?? 0) > 0 ? Number(item.estimatedUnitPriceVnd) : null,
         })),
       },
-      quotations: rfq.quotations.map((q: any) => ({
-        id: q.id,
-        supplier: q.supplier,
-        quotationNumber: q.quotationNumber,
-        totalAmount: Number(q.totalAmount),
-        currency: q.currency,
-        leadTime: q.leadTime,
-        deliveryTerms: q.deliveryTerms,
-        paymentTerms: q.paymentTerms,
-        warranty: q.warranty,
-        riskNotes: q.riskNotes,
-        status: q.status,
-        items: q.items.map((item: any) => ({
-          id: item.id,
+      quotations: rfq.quotations.map((q: any) => {
+        const baselineResult = computeQuotationBaseline(prItemsBaseline, q.items.map((item: any) => ({
+          purchaseRequestItemId: item.purchaseRequestItemId,
+          unitPrice: item.unitPrice,
           lineNo: item.lineNo,
-          description: item.description,
-          qty: Number(item.qty),
-          unit: item.unit,
-          unitPrice: Number(item.unitPrice),
-          totalPrice: Number(item.totalPrice),
-        })),
-      })),
+        })));
+        const selectedItemIds = selectedItemIdsByQuotationId.get(q.id) ?? [];
+        const selectedItemsTotalAmount = q.items
+          .filter((item: any) => selectedItemIds.includes(item.purchaseRequestItemId))
+          .reduce((sum: number, item: any) => sum + Number(item.totalPrice || 0), 0);
+        return {
+          id: q.id,
+          supplier: q.supplier,
+          quotationNumber: q.quotationNumber,
+          totalAmount: Number(q.totalAmount),
+          currency: q.currency,
+          leadTime: q.leadTime,
+          deliveryTerms: q.deliveryTerms,
+          paymentTerms: q.paymentTerms,
+          warranty: q.warranty,
+          riskNotes: q.riskNotes,
+          status: q.status,
+          overBaseline: baselineResult.overBaseline,
+          itemsBaseline: baselineResult.items,
+          selectedItemCount: selectedItemIds.length,
+          selectedItemsTotalAmount,
+          selectedItemIds,
+          items: q.items.map((item: any) => ({
+            id: item.id,
+            lineNo: item.lineNo,
+            description: item.description,
+            qty: Number(item.qty),
+            unit: item.unit,
+            unitPrice: Number(item.unitPrice),
+            totalPrice: Number(item.totalPrice),
+            purchaseRequestItemId: item.purchaseRequestItemId,
+          })),
+        };
+      }),
       createdAt: rfq.createdAt.toISOString(),
       updatedAt: rfq.updatedAt.toISOString(),
-    });
+    };
+
+    stripBuyerFacingPrices(responsePayload);
+    (responsePayload as Record<string, unknown>).buyerPriceFieldsHidden = true;
+
+    // Explicitly set headers to prevent compression issues
+    reply.header('Content-Type', 'application/json; charset=utf-8');
+    reply.header('Content-Encoding', 'identity');
+    reply.code(200);
+    reply.send(responsePayload);
   } catch (error: any) {
     console.error('Get RFQ by ID error:', error);
     reply.code(500).send({
@@ -378,6 +705,14 @@ export const updateRFQ = async (
 
     if (rfq.buyerId !== userId) {
       return reply.code(403).send({ error: 'Access denied' });
+    }
+
+    // Khóa RFQ khi đã submit (READY_FOR_COMPARISON) - buyer không thể sửa
+    if (rfq.status === 'READY_FOR_COMPARISON') {
+      return reply.code(403).send({
+        error: 'RFQ đã được submit và bị khóa. Không thể chỉnh sửa.',
+        currentStatus: rfq.status,
+      });
     }
 
     const updateData: any = {};
@@ -501,4 +836,330 @@ export const sendRFQ = async (
   }
 };
 
+// Export RFQ (PDF/JSON)
+export const exportRFQ = async (
+  request: AuthenticatedRequest,
+  reply: FastifyReply
+) => {
+  try {
+    const userId = request.user?.userId;
+    if (!userId) {
+      return reply.code(401).send({ error: 'Unauthorized' });
+    }
+
+    const { id } = request.params as { id: string };
+    const { format } = request.query as { format?: string };
+
+    const rfq = await prisma.rFQ.findUnique({
+      where: { id },
+      include: {
+        purchaseRequest: {
+          include: {
+            items: {
+              where: { deletedAt: null },
+              orderBy: { lineNo: 'asc' },
+            },
+            requestor: {
+              select: {
+                username: true,
+                email: true,
+              },
+            },
+          },
+        },
+        quotations: {
+          where: { deletedAt: null },
+          include: {
+            supplier: {
+              select: {
+                name: true,
+                code: true,
+              },
+            },
+            items: {
+              orderBy: { lineNo: 'asc' },
+            },
+          },
+        },
+      },
+    });
+
+    if (!rfq) {
+      return reply.code(404).send({ error: 'RFQ not found' });
+    }
+
+    if (rfq.buyerId !== userId) {
+      return reply.code(403).send({ error: 'Access denied' });
+    }
+
+    // For now, return JSON data. PDF generation can be added later
+    const exportData = {
+      rfqNumber: rfq.rfqNumber,
+      status: rfq.status,
+      notes: rfq.notes,
+      sentDate: rfq.sentDate?.toISOString(),
+      createdAt: rfq.createdAt.toISOString(),
+      purchaseRequest: {
+        prNumber: rfq.purchaseRequest.prNumber,
+        department: rfq.purchaseRequest.department,
+        totalAmount: rfq.purchaseRequest.totalAmount ? Number(rfq.purchaseRequest.totalAmount) : null,
+        currency: rfq.purchaseRequest.currency,
+        requestor: rfq.purchaseRequest.requestor,
+        items: rfq.purchaseRequest.items.map((item: any) => ({
+          lineNo: item.lineNo,
+          description: item.description,
+          partNo: item.partNo,
+          qty: Number(item.qty),
+          unit: item.unit,
+          unitPrice: item.unitPrice ? Number(item.unitPrice) : null,
+          amount: item.amount ? Number(item.amount) : null,
+        })),
+      },
+      quotations: rfq.quotations.map((q: any) => ({
+        supplier: q.supplier,
+        quotationNumber: q.quotationNumber,
+        totalAmount: Number(q.totalAmount),
+        currency: q.currency,
+        leadTime: q.leadTime,
+        paymentTerms: q.paymentTerms,
+        deliveryTerms: q.deliveryTerms,
+        warranty: q.warranty,
+        items: q.items.map((item: any) => ({
+          lineNo: item.lineNo,
+          description: item.description,
+          qty: Number(item.qty),
+          unit: item.unit,
+          unitPrice: Number(item.unitPrice),
+          totalPrice: Number(item.totalPrice),
+        })),
+      })),
+    };
+
+    if (format === 'pdf') {
+      // TODO: Implement PDF generation using a library like pdfkit or puppeteer
+      // For now, return JSON
+      reply.type('application/json');
+      reply.header('Content-Disposition', `attachment; filename="RFQ_${rfq.rfqNumber}.json"`);
+      reply.send(exportData);
+    } else {
+      // Return JSON
+      reply.type('application/json');
+      reply.header('Content-Disposition', `attachment; filename="RFQ_${rfq.rfqNumber}.json"`);
+      reply.send(exportData);
+    }
+  } catch (error: any) {
+    console.error('Export RFQ error:', error);
+    reply.code(500).send({
+      error: 'Internal server error',
+      message: error.message,
+    });
+  }
+};
+
+// Complete RFQ - Buyer xác nhận hoàn thành nhập báo giá, sẵn sàng để Buyer Leader so sánh
+export const completeRFQ = async (
+  request: AuthenticatedRequest,
+  reply: FastifyReply
+) => {
+  try {
+    const userId = request.user?.userId;
+    if (!userId) {
+      return reply.code(401).send({ error: 'Unauthorized' });
+    }
+
+    const { id } = request.params as { id: string };
+
+    const rfq = await prisma.rFQ.findUnique({
+      where: { id },
+      include: {
+        purchaseRequest: {
+          select: {
+            id: true,
+            prNumber: true,
+            companyId: true,
+          },
+        },
+        quotations: {
+          where: { deletedAt: null },
+        },
+      },
+    });
+
+    if (!rfq) {
+      return reply.code(404).send({ error: 'RFQ not found' });
+    }
+
+    if (rfq.buyerId !== userId) {
+      return reply.code(403).send({ error: 'Access denied' });
+    }
+
+    // Kiểm tra RFQ phải có ít nhất 1 báo giá để hoàn thành
+    if (rfq.quotations.length < 1) {
+      return reply.code(400).send({
+        error: 'RFQ phải có ít nhất 1 báo giá trước khi hoàn thành',
+        quotationsCount: rfq.quotations.length,
+      });
+    }
+
+    // Cho phép chuyển từ DRAFT, SENT hoặc QUOTATION_RECEIVED sang READY_FOR_COMPARISON
+    // Nếu là DRAFT nhưng đã có >= 2 báo giá, cho phép submit
+    if (rfq.status !== 'DRAFT' && rfq.status !== 'SENT' && rfq.status !== 'QUOTATION_RECEIVED') {
+      return reply.code(400).send({
+        error: `RFQ ở trạng thái ${rfq.status}, không thể hoàn thành`,
+        currentStatus: rfq.status,
+      });
+    }
+
+    // Update RFQ status (raw query: id::text = $1 để tránh lỗi text = uuid)
+    try {
+      const updateSql = `UPDATE rfqs SET status = 'READY_FOR_COMPARISON'::"RFQStatus", updated_at = NOW() WHERE id::text = $1`;
+      await prisma.$executeRawUnsafe(updateSql, id);
+    } catch (rawErr: any) {
+      if (rawErr?.message?.includes('invalid input value') || rawErr?.message?.includes('RFQStatus')) {
+        console.error('Complete RFQ: DB enum RFQStatus may not have READY_FOR_COMPARISON. Run: npx prisma migrate deploy');
+        return reply.code(500).send({
+          error: 'Cấu hình database chưa đúng. Vui lòng chạy migration: npx prisma migrate deploy (trong thư mục server)',
+        });
+      }
+      throw rawErr;
+    }
+    const updatedRFQ = await prisma.rFQ.findUnique({
+      where: { id },
+    });
+    if (!updatedRFQ) {
+      return reply.code(500).send({ error: 'RFQ update failed' });
+    }
+
+    // Cập nhật trạng thái ITEM: RFQ_SUBMITTED / READY_FOR_REVIEW cho các item thuộc RFQ này
+    try {
+      // Lấy itemIds từ notes (đã lưu khi tạo RFQ)
+      let itemIds: string[] = [];
+      if (rfq.notes) {
+        const match = rfq.notes.match(/\[RFQ_ITEMS\](.+?)\[\/RFQ_ITEMS\]/);
+        if (match) {
+          try {
+            const parsed = JSON.parse(match[1]);
+            if (parsed.itemIds && Array.isArray(parsed.itemIds)) {
+              itemIds = parsed.itemIds as string[];
+            }
+          } catch {
+            // ignore parse error
+          }
+        }
+      }
+      if (itemIds.length > 0) {
+        await prisma.purchaseRequestItem.updateMany({
+          where: {
+            id: { in: itemIds },
+            deletedAt: null,
+          },
+          data: {
+            status: 'READY_FOR_REVIEW' as any,
+          },
+        });
+      }
+      // Tổng hợp PR status từ trạng thái item
+      const prId = rfq.purchaseRequestId;
+      const prItemsForStatus = await prisma.purchaseRequestItem.findMany({
+        where: { purchaseRequestId: prId, deletedAt: null },
+        select: { status: true, departmentItemOutcome: true },
+      });
+      const aggregatedStatus = computePRStatusFromItemStatuses(
+        prItemsForStatus
+          .filter((i) => itemDepartmentOutcomeAllowsProcurement(i.departmentItemOutcome))
+          .map((i) => i.status)
+      );
+      if (aggregatedStatus) {
+        await prisma.purchaseRequest.update({
+          where: { id: prId },
+          data: { status: aggregatedStatus },
+        });
+      }
+    } catch (e) {
+      console.error('[completeRFQ] Failed to update item statuses:', (e as any)?.message || e);
+    }
+
+    // Audit log
+    await auditUpdate(
+      'rfqs',
+      id,
+      rfq,
+      updatedRFQ,
+      { userId, companyId: rfq.companyId || undefined }
+    );
+
+    // Send notifications to Buyer Leader and Buyer Manager (non-blocking)
+    try {
+      const { createNotification, NotificationTemplates } = await import('../utils/notifications');
+      const { getIO } = await import('../utils/getIO');
+      const io = getIO();
+
+      const buyerLeader = await prisma.user.findFirst({
+        where: { role: 'BUYER_LEADER', deletedAt: null },
+        select: { id: true },
+      });
+
+      const buyerManager = await prisma.user.findFirst({
+        where: { role: 'BUYER_MANAGER', deletedAt: null },
+        select: { id: true },
+      });
+
+      const quotationCount = rfq.quotations.length;
+      const prNumber = rfq.purchaseRequest?.prNumber || 'N/A';
+
+      if (buyerLeader) {
+        const template = NotificationTemplates.RFQ_SUBMITTED(updatedRFQ.rfqNumber, prNumber, quotationCount);
+        await createNotification(io, {
+          userId: buyerLeader.id,
+          role: 'BUYER_LEADER',
+          type: 'RFQ_SUBMITTED',
+          title: template.title,
+          message: template.message,
+          relatedId: id,
+          relatedType: 'RFQ',
+          metadata: {
+            rfqNumber: updatedRFQ.rfqNumber,
+            prNumber,
+            quotationCount,
+          },
+          companyId: rfq.companyId || null,
+        });
+      }
+
+      if (buyerManager) {
+        const template = NotificationTemplates.RFQ_SUBMITTED(updatedRFQ.rfqNumber, prNumber, quotationCount);
+        await createNotification(io, {
+          userId: buyerManager.id,
+          role: 'BUYER_MANAGER',
+          type: 'RFQ_SUBMITTED',
+          title: template.title,
+          message: template.message,
+          relatedId: id,
+          relatedType: 'RFQ',
+          metadata: {
+            rfqNumber: updatedRFQ.rfqNumber,
+            prNumber,
+            quotationCount,
+          },
+          companyId: rfq.companyId || null,
+        });
+      }
+    } catch (notifError: any) {
+      console.error('Complete RFQ: notification error (RFQ still completed):', notifError?.message || notifError);
+    }
+
+    reply.send({
+      id: updatedRFQ.id,
+      rfqNumber: updatedRFQ.rfqNumber,
+      status: updatedRFQ.status,
+      message: 'RFQ đã được đánh dấu hoàn thành. Buyer Leader có thể so sánh báo giá.',
+    });
+  } catch (error: any) {
+    console.error('Complete RFQ error:', error);
+    reply.code(500).send({
+      error: 'Internal server error',
+      message: error.message,
+    });
+  }
+};
 

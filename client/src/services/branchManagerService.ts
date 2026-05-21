@@ -1,4 +1,11 @@
 import axios from 'axios';
+import type { DepartmentItemDecisionPayload } from './departmentHeadService';
+import {
+  getBranchManagerMockBranchOverview,
+  getBranchManagerMockDashboard,
+  getBranchManagerMockPendingPRs,
+  shouldServeBranchManagerMock,
+} from '../mocks/branchManagerDevMock';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
 
@@ -55,6 +62,14 @@ export interface BranchManagerDashboardData {
   urgentPRs: number;
   budgetExceptionsPending: number;
   totalPRValueThisMonth: number;
+  /** PR đã duyệt / (đã duyệt + từ chối) trong 30 ngày — % */
+  approvalRateLast30d?: number;
+  /** Trung bình (giờ) từ lúc tạo PR đến lúc GĐ CN duyệt — mẫu pRApproval APPROVE của bạn */
+  avgBranchApprovalLeadTimeHours?: number;
+  /** Trung bình % vượt (overPercent) trên các ngoại lệ ngân sách đang PENDING */
+  budgetVarianceAvgOverPercent?: number;
+  /** Giá trị PR loại PRODUCTION / tổng giá trị PR đã duyệt tháng — % */
+  productionValueSharePercent?: number;
   prsByDepartment: Array<{
     department: string;
     count: number;
@@ -170,14 +185,20 @@ export interface BranchManagerNotificationsData {
 export const branchManagerService = {
   // Dashboard
   getDashboard: async (): Promise<BranchManagerDashboardData> => {
+    if (shouldServeBranchManagerMock()) {
+      return getBranchManagerMockDashboard();
+    }
     const response = await api.get('/branch-manager/dashboard');
     return response.data;
   },
 
   // PR Approval
-  getPendingPRs: async (): Promise<PendingPRsData> => {
+  getPendingPRs: async (params?: { queue?: string }): Promise<PendingPRsData> => {
+    if (shouldServeBranchManagerMock()) {
+      return getBranchManagerMockPendingPRs();
+    }
     try {
-      const response = await api.get('/branch-manager/pending-prs');
+      const response = await api.get('/branch-manager/pending-prs', { params });
       console.log('branchManagerService.getPendingPRs - Raw response:', {
         status: response.status,
         statusText: response.statusText,
@@ -232,8 +253,11 @@ export const branchManagerService = {
     }
   },
 
-  approvePR: async (prId: string): Promise<{ message: string }> => {
-    const response = await api.post(`/branch-manager/prs/${prId}/approve`);
+  approvePR: async (
+    prId: string,
+    options?: { comment?: string; itemDecisions?: DepartmentItemDecisionPayload[] },
+  ): Promise<{ message: string }> => {
+    const response = await api.post(`/branch-manager/prs/${prId}/approve`, options ?? {});
     return response.data;
   },
 
@@ -259,6 +283,9 @@ export const branchManagerService = {
 
   // Branch Overview
   getBranchOverview: async (): Promise<BranchOverviewData> => {
+    if (shouldServeBranchManagerMock()) {
+      return getBranchManagerMockBranchOverview();
+    }
     const response = await api.get('/branch-manager/branch-overview');
     return response.data;
   },

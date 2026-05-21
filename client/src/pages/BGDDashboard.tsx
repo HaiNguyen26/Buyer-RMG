@@ -1,140 +1,152 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { Outlet, useNavigate, useLocation } from 'react-router-dom';
-import { 
-  LayoutDashboard, 
-  PieChart, 
-  ShieldAlert, 
-  Globe, 
-  BarChart3, 
-  Bell, 
+import {
+  LayoutDashboard,
+  PieChart,
+  ShieldAlert,
+  Globe,
+  BarChart3,
+  Bell,
   Settings,
-  ChevronLeft,
-  ChevronRight
 } from 'lucide-react';
 import DashboardHeader from '../components/DashboardHeader';
+import { StandardDashboardSidebar } from '../components/StandardDashboardSidebar';
+import { useCurrentUser } from '../hooks/useAuth';
+import { useMobileDashboardNav, mainMarginForSidebar240 } from '../hooks/useMobileDashboardNav';
+import {
+  dashboardMainHorizontalBleedClass,
+  dashboardMainOutletClass,
+  dashboardMainScrollableClass,
+} from '../constants/dashboardLayout';
 
 const BGDDashboard = () => {
-  const [isSidebarExpanded, setIsSidebarExpanded] = useState(true);
+  const { data: user, isLoading } = useCurrentUser();
   const navigate = useNavigate();
   const location = useLocation();
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const mainScrollRef = useRef<HTMLElement>(null);
+  const { mobileNavOpen, toggleMobileNav, closeMobileNav } = useMobileDashboardNav();
 
   const menuGroups = [
     {
-      title: 'Dashboard',
+      title: 'Tổng quan',
+      items: [{ icon: LayoutDashboard, label: 'Bảng điều khiển BGD', path: '/dashboard/bgd' }],
+    },
+    {
+      title: 'Tổng quan & Phân tích',
       items: [
-        { icon: LayoutDashboard, label: 'Executive Dashboard', path: '/dashboard/bgd' },
+        { icon: PieChart, label: 'Tổng quan kinh doanh', path: '/dashboard/bgd/business-overview' },
+        { icon: Globe, label: 'Nhà cung cấp chiến lược', path: '/dashboard/bgd/strategic-suppliers' },
       ],
     },
     {
-      title: 'Overview & Analysis',
+      title: 'Duyệt & Quản trị',
       items: [
-        { icon: PieChart, label: 'Business Overview', path: '/dashboard/bgd/business-overview' },
-        { icon: Globe, label: 'Strategic Supplier View', path: '/dashboard/bgd/strategic-suppliers' },
+        { icon: ShieldAlert, label: 'Duyệt ngoại lệ', path: '/dashboard/bgd/exception-approval' },
+        { icon: Settings, label: 'Quản trị & chính sách', path: '/dashboard/bgd/governance' },
       ],
     },
     {
-      title: 'Approval & Governance',
+      title: 'Báo cáo & Cảnh báo',
       items: [
-        { icon: ShieldAlert, label: 'Exception Approval', path: '/dashboard/bgd/exception-approval' },
-        { icon: Settings, label: 'Governance & Policy', path: '/dashboard/bgd/governance' },
-      ],
-    },
-    {
-      title: 'Reports & Alerts',
-      items: [
-        { icon: BarChart3, label: 'Executive Reports', path: '/dashboard/bgd/reports' },
-        { icon: Bell, label: 'Critical Alerts', path: '/dashboard/bgd/alerts' },
+        { icon: BarChart3, label: 'Báo cáo BGD', path: '/dashboard/bgd/reports' },
+        { icon: Bell, label: 'Cảnh báo quan trọng', path: '/dashboard/bgd/alerts' },
       ],
     },
   ];
 
-  const isActive = (path: string) => location.pathname === path;
+  const isActive = (path: string) => {
+    if (path === '/dashboard/bgd') {
+      return location.pathname === '/dashboard/bgd';
+    }
+    return location.pathname.startsWith(path);
+  };
+
+  const getPageTitle = () => {
+    const p = location.pathname;
+    if (p === '/dashboard/bgd') return 'Bảng điều khiển BGD';
+    if (p.includes('/business-overview')) return 'Tổng quan kinh doanh';
+    if (p.includes('/strategic-suppliers')) return 'Nhà cung cấp chiến lược';
+    if (p.includes('/exception-approval')) return 'Duyệt ngoại lệ';
+    if (p.includes('/governance')) return 'Quản trị & chính sách';
+    if (p.includes('/reports')) return 'Báo cáo BGD';
+    if (p.includes('/alerts')) return 'Cảnh báo quan trọng';
+    return 'BGD';
+  };
+
+  const getPageSubtitle = () => {
+    const p = location.pathname;
+    if (p === '/dashboard/bgd') return 'Góc nhìn tổng giám đốc';
+    if (p.includes('/business-overview')) return 'Kết quả và xu hướng kinh doanh';
+    if (p.includes('/strategic-suppliers')) return 'Đối tác chiến lược';
+    if (p.includes('/exception-approval')) return 'Quyết định ngoại lệ';
+    if (p.includes('/governance')) return 'Chính sách và tuân thủ';
+    if (p.includes('/reports')) return 'Báo cáo điều hành';
+    if (p.includes('/alerts')) return 'Cảnh báo cần chú ý';
+    return '';
+  };
+
+  if (isLoading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-[#F8FAFC]">
+        <div className="text-center">
+          <div className="mx-auto mb-4 h-12 w-12 animate-spin rounded-full border-4 border-[#2563EB] border-t-transparent" />
+          <p className="text-slate-600">Đang tải...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-slate-100">
-      {/* Sidebar */}
-      <aside
-        className={`fixed left-0 top-0 h-screen bg-gradient-to-b from-slate-900 via-slate-800 to-slate-900 text-white transition-all duration-300 z-50 ${
-          isSidebarExpanded ? 'w-[240px]' : 'w-20'
-        }`}
-      >
-        {/* Logo */}
-        <div className="h-16 flex items-center justify-center border-b border-slate-700/50 px-4">
-          {isSidebarExpanded ? (
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center shadow-lg">
-                <span className="text-white font-bold text-lg">BGD</span>
-              </div>
-              <div>
-                <div className="text-sm font-semibold">Tổng Giám Đốc</div>
-                <div className="text-xs text-slate-400">Executive View</div>
-              </div>
-            </div>
-          ) : (
-            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center shadow-lg">
-              <span className="text-white font-bold text-lg">BGD</span>
-            </div>
-          )}
-        </div>
-
-        {/* Toggle Button */}
+    <div
+      className="flex h-[100dvh] max-h-[100dvh] flex-col overflow-hidden bg-gradient-to-br from-slate-50 via-blue-50 to-slate-100"
+      style={{ minHeight: '100dvh' }}
+    >
+      {mobileNavOpen ? (
         <button
-          onClick={() => setIsSidebarExpanded(!isSidebarExpanded)}
-          className="absolute -right-3 top-20 w-6 h-6 bg-slate-700 hover:bg-slate-600 rounded-full flex items-center justify-center shadow-lg transition-colors z-10"
-        >
-          {isSidebarExpanded ? (
-            <ChevronLeft className="w-4 h-4" />
-          ) : (
-            <ChevronRight className="w-4 h-4" />
-          )}
-        </button>
+          type="button"
+          className="fixed inset-0 z-[55] bg-slate-900/50 backdrop-blur-[1px] md:hidden"
+          onClick={closeMobileNav}
+          aria-label="Đóng menu"
+        />
+      ) : null}
+      <StandardDashboardSidebar
+        menuGroups={menuGroups}
+        sidebarCollapsed={sidebarCollapsed}
+        setSidebarCollapsed={setSidebarCollapsed}
+        searchQuery={searchQuery}
+        setSearchQuery={setSearchQuery}
+        mobileNavOpen={mobileNavOpen}
+        user={user}
+        isActive={isActive}
+        navigate={navigate}
+        profileSecondaryText="Tổng Giám đốc"
+      />
 
-        {/* Navigation */}
-        <nav className="flex-1 overflow-y-auto py-6 px-3 space-y-6">
-          {menuGroups.map((group, idx) => (
-            <div key={idx}>
-              {isSidebarExpanded && (
-                <div className="px-3 mb-2 text-xs font-semibold text-slate-400 uppercase tracking-wider">
-                  {group.title}
-                </div>
-              )}
-              <div className="space-y-1">
-                {group.items.map((item) => {
-                  const Icon = item.icon;
-                  const active = isActive(item.path);
-                  return (
-                    <button
-                      key={item.path}
-                      onClick={() => navigate(item.path)}
-                      className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-200 group ${
-                        active
-                          ? 'bg-gradient-to-r from-purple-500 to-pink-500 text-white shadow-lg shadow-purple-500/30'
-                          : 'text-slate-300 hover:bg-slate-700/50 hover:text-white'
-                      }`}
-                      title={!isSidebarExpanded ? item.label : undefined}
-                    >
-                      <Icon className={`w-5 h-5 flex-shrink-0 ${active ? '' : 'group-hover:scale-110 transition-transform'}`} />
-                      {isSidebarExpanded && (
-                        <span className="text-sm font-medium truncate">{item.label}</span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          ))}
-        </nav>
-      </aside>
-
-      {/* Main Content */}
       <div
-        className={`transition-all duration-300 ${
-          isSidebarExpanded ? 'ml-[240px]' : 'ml-20'
-        }`}
+        className={`flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden ${mainMarginForSidebar240(sidebarCollapsed)}`}
       >
-        <DashboardHeader />
-        <main className="pt-16">
-          <Outlet />
+        <DashboardHeader
+          title={getPageTitle()}
+          subtitle={getPageSubtitle()}
+          showSearch={true}
+          showNotifications={true}
+          showClock={true}
+          roleLabel="BGD"
+          scrollContainerRef={mainScrollRef}
+          onMobileNavToggle={toggleMobileNav}
+        />
+        <main
+          ref={mainScrollRef}
+          className={`${dashboardMainScrollableClass} bg-gradient-to-br from-slate-50 via-blue-50 to-slate-100`}
+        >
+          <div
+            key={location.pathname}
+            className={`dashboard-outlet flex min-h-0 min-w-0 flex-col ${dashboardMainOutletClass} ${dashboardMainHorizontalBleedClass}`}
+          >
+            <Outlet />
+          </div>
         </main>
       </div>
     </div>
@@ -142,5 +154,3 @@ const BGDDashboard = () => {
 };
 
 export default BGDDashboard;
-
-

@@ -1,6 +1,7 @@
 import { FastifyReply } from 'fastify';
 import { prisma } from '../config/database';
 import { AuthenticatedRequest } from '../middleware/auth';
+import { prSalesPOSelect, serializePRSalesOrder } from '../utils/prSalesOrder';
 
 // Executive Dashboard - Tổng quan tổng thể
 export const getExecutiveDashboard = async (
@@ -12,14 +13,6 @@ export const getExecutiveDashboard = async (
     if (!userId) {
       return reply.code(401).send({ error: 'Unauthorized' });
     }
-
-    // Get all active Sales POs
-    const activeSalesPOs = await prisma.salesPO.findMany({
-      where: {
-        status: 'ACTIVE',
-        deletedAt: null,
-      },
-    });
 
     // Get all payments with status DONE
     const donePayments = await prisma.payment.findMany({
@@ -38,37 +31,9 @@ export const getExecutiveDashboard = async (
       totalActualCost += Number(payment.amount);
     });
 
-    // Find projects near/over budget (using 80% threshold)
-    // Note: Since PRs are no longer directly linked to SalesPO in Phase 1,
-    // we'll calculate based on SalesPO amount vs total payments
+    // Sales PO feature removed - no project budget tracking
     const projectsNearBudget: any[] = [];
     const projectsOverBudget: any[] = [];
-
-    activeSalesPOs.forEach((po) => {
-      // For now, we'll use a simplified calculation
-      // In a real system, you'd need to link PRs to SalesPOs somehow
-      const usagePercent = 0; // Placeholder - needs proper implementation
-
-      if (usagePercent >= 100) {
-        projectsOverBudget.push({
-          salesPONumber: po.salesPONumber,
-          projectName: po.projectName,
-          salesPOAmount: Number(po.amount),
-          actualCost: 0,
-          remainingBudget: Number(po.amount),
-          progress: usagePercent,
-        });
-      } else if (usagePercent >= 80) {
-        projectsNearBudget.push({
-          salesPONumber: po.salesPONumber,
-          projectName: po.projectName,
-          salesPOAmount: Number(po.amount),
-          actualCost: 0,
-          remainingBudget: Number(po.amount),
-          progress: usagePercent,
-        });
-      }
-    });
 
     // Get PR by status - Count all PRs (all statuses count as submitted for now)
     const allPRs = await prisma.purchaseRequest.findMany({
@@ -88,7 +53,6 @@ export const getExecutiveDashboard = async (
     };
 
     reply.send({
-      activeSalesPOs: activeSalesPOs.length,
       totalActualCost,
       projectsNearBudget,
       projectsOverBudget,
@@ -114,7 +78,7 @@ export const getPROverview = async (
       return reply.code(401).send({ error: 'Unauthorized' });
     }
 
-    const { branch, department, salesPO, buyer, status } = request.query as any;
+    const { branch, department, buyer, status } = request.query as any;
 
     const where: any = {
       deletedAt: null,
@@ -122,10 +86,6 @@ export const getPROverview = async (
 
     if (status && status !== 'all') {
       where.status = status;
-    }
-
-    if (salesPO && salesPO !== 'all') {
-      where.salesPOId = salesPO;
     }
 
     const prs = await prisma.purchaseRequest.findMany({
@@ -140,6 +100,7 @@ export const getPROverview = async (
           },
         },
         supplier: true,
+        salesPO: { select: prSalesPOSelect },
       },
       orderBy: {
         createdAt: 'desc',
@@ -152,7 +113,7 @@ export const getPROverview = async (
       id: pr.id,
       prNumber: pr.prNumber,
       itemName: pr.itemName,
-      salesPO: null, // SalesPO relation removed in Phase 1
+      salesOrder: serializePRSalesOrder(pr),
       branch: pr.requestor.location || 'N/A',
       department: pr.department || 'N/A',
       buyer: null, // TODO: Add buyer assignment to PR
@@ -334,58 +295,7 @@ export const getNotifications = async (
 
     const notifications: any[] = [];
 
-    // Check for projects over budget
-    const activeSalesPOs = await prisma.salesPO.findMany({
-      where: {
-        status: 'ACTIVE',
-        deletedAt: null,
-      },
-    });
-
-    // Get all done payments
-    const donePayments = await prisma.payment.findMany({
-      where: {
-        status: 'DONE',
-        deletedAt: null,
-      },
-    });
-
-    activeSalesPOs.forEach((po) => {
-      // Simplified calculation - in Phase 1, PRs are not linked to SalesPO
-      // This would need proper implementation based on business logic
-      let poActualCost = 0;
-      const usagePercent = poActualCost > 0 ? (poActualCost / Number(po.amount)) * 100 : 0;
-
-      if (usagePercent >= 100) {
-        notifications.push({
-          id: `budget-exceeded-${po.id}`,
-          type: 'BUDGET_EXCEEDED',
-          message: `Dự án ${po.salesPONumber} - ${po.projectName} đã vượt ngân sách`,
-          details: {
-            project: {
-              salesPONumber: po.salesPONumber,
-              projectName: po.projectName,
-            },
-          },
-          createdAt: new Date().toISOString(),
-          read: false,
-        });
-      } else if (usagePercent >= 80) {
-        notifications.push({
-          id: `budget-near-${po.id}`,
-          type: 'PROJECT_NEAR_BUDGET',
-          message: `Dự án ${po.salesPONumber} - ${po.projectName} đã sử dụng ${usagePercent.toFixed(1)}% ngân sách`,
-          details: {
-            project: {
-              salesPONumber: po.salesPONumber,
-              projectName: po.projectName,
-            },
-          },
-          createdAt: new Date().toISOString(),
-          read: false,
-        });
-      }
-    });
+    // Sales PO feature removed - no project budget notifications
 
     // Check for stuck PRs (pending > 30 days)
     const stuckPRs = await prisma.purchaseRequest.findMany({

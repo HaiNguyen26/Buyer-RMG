@@ -23,18 +23,23 @@ const BusinessOverview = () => {
   const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'];
 
   return (
-    <div className="p-8 space-y-8 animate-fade-in">
+    <div className="p-8 space-y-8 animate-fade-in bg-gradient-to-b from-slate-50/50 to-white">
       {/* Header */}
-      <div>
-        <h1 className="text-3xl font-bold text-slate-800 mb-2">Business Overview</h1>
-        <p className="text-slate-600">Nhìn tổng quan chi phí & nhu cầu</p>
+      <div className="flex items-center gap-4 p-5 rounded-2xl bg-gradient-to-r from-slate-100 to-indigo-50 border border-slate-200/80 shadow-sm">
+        <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-gradient-to-br from-slate-600 to-indigo-600 text-white shadow-md">
+          <PieChart className="w-6 h-6" />
+        </div>
+        <div>
+          <h1 className="text-2xl font-bold text-slate-800 mb-0.5">Tổng quan kinh doanh</h1>
+          <p className="text-slate-600 text-sm">Nhìn tổng quan chi phí & nhu cầu</p>
+        </div>
       </div>
 
       {/* Key Metrics */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <div className="glass rounded-soft p-6">
+        <div className="glass rounded-2xl p-6 border border-slate-200/80 shadow-sm">
           <div className="flex items-center gap-3 mb-4">
-            <div className="w-10 h-10 rounded-lg bg-blue-50 flex items-center justify-center">
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-100 to-indigo-100 flex items-center justify-center">
               <DollarSign className="w-5 h-5 text-blue-600" />
             </div>
             <div className="text-sm text-slate-600">Tổng chi phí</div>
@@ -47,9 +52,9 @@ const BusinessOverview = () => {
           </div>
         </div>
 
-        <div className="glass rounded-soft p-6">
+        <div className="glass rounded-2xl p-6 border border-slate-200/80 shadow-sm">
           <div className="flex items-center gap-3 mb-4">
-            <div className="w-10 h-10 rounded-lg bg-green-50 flex items-center justify-center">
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-emerald-100 to-teal-100 flex items-center justify-center">
               <TrendingUp className="w-5 h-5 text-green-600" />
             </div>
             <div className="text-sm text-slate-600">Tỷ lệ PR → mua</div>
@@ -57,12 +62,16 @@ const BusinessOverview = () => {
           <div className="text-3xl font-bold text-slate-800">
             {overviewData?.prToPurchaseRatio || 0}%
           </div>
-          <div className="text-sm text-green-600 mt-1">Tăng 5% so với quý trước</div>
+          <div className="text-sm text-slate-500 mt-1">
+            {overviewData?.demandTrends?.length
+              ? 'Theo dữ liệu PR trong hệ thống'
+              : 'Chưa có đủ dữ liệu so sánh kỳ'}
+          </div>
         </div>
 
-        <div className="glass rounded-soft p-6">
+        <div className="glass rounded-2xl p-6 border border-slate-200/80 shadow-sm">
           <div className="flex items-center gap-3 mb-4">
-            <div className="w-10 h-10 rounded-lg bg-purple-50 flex items-center justify-center">
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-violet-100 to-purple-100 flex items-center justify-center">
               <PieChart className="w-5 h-5 text-purple-600" />
             </div>
             <div className="text-sm text-slate-600">Số dự án active</div>
@@ -75,7 +84,7 @@ const BusinessOverview = () => {
       </div>
 
       {/* Cost Distribution by Project */}
-      <div className="glass rounded-soft p-6">
+      <div className="glass rounded-2xl p-6 border border-slate-200/80 shadow-sm">
         <h3 className="text-lg font-semibold text-slate-800 mb-4">Phân bổ chi phí theo dự án</h3>
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           <div>
@@ -106,7 +115,7 @@ const BusinessOverview = () => {
                   ></div>
                   <div>
                     <div className="font-medium text-slate-800">{item.projectName}</div>
-                    <div className="text-sm text-slate-600">{item.salesPOCode}</div>
+                    <div className="text-sm text-slate-600">{item.salesPOCode ?? item.projectCode ?? '-'}</div>
                   </div>
                 </div>
                 <div className="text-right">

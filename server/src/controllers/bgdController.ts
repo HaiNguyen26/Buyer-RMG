@@ -1,7 +1,12 @@
 import { FastifyRequest, FastifyReply } from 'fastify';
-import { PrismaClient } from '@prisma/client';
+import { prisma } from '../config/database';
+import { AuthenticatedRequest } from '../middleware/auth';
+import { createNotification, markNotificationAsResolved, NotificationTemplates } from '../utils/notifications';
+import { getIO } from '../utils/getIO';
 
-const prisma = new PrismaClient();
+function assertBgdOrAdmin(role: string | undefined): boolean {
+  return role === 'BGD' || role === 'SYSTEM_ADMIN';
+}
 
 // GET /api/bgd/dashboard
 export const getExecutiveDashboard = async (
@@ -9,14 +14,6 @@ export const getExecutiveDashboard = async (
   reply: FastifyReply
 ) => {
   try {
-    // Total Sales PO Budget
-    const salesPOs = await prisma.salesPO.findMany({
-      where: { deletedAt: null },
-      select: { salesPONumber: true, projectName: true, amount: true },
-    });
-    const totalSalesPOBudget = salesPOs.reduce((sum, po) => sum + Number(po.amount), 0);
-
-    // Total Approved PR Value (approx = total Payment DONE for approved+)
     const approvedPayments = await prisma.payment.aggregate({
       _sum: { amount: true },
       where: {
@@ -41,50 +38,14 @@ export const getExecutiveDashboard = async (
     });
     const totalApprovedPRValue = Number(approvedPayments._sum.amount || 0);
 
-    // Projects at Risk (usage > 90%): usage = Payment DONE / SalesPO budget
-    const salesPOWithPayments = await prisma.salesPO.findMany({
-      where: { deletedAt: null },
-      select: {
-        id: true,
-        salesPONumber: true,
-        projectName: true,
-        amount: true,
-        purchaseRequests: {
-          where: { deletedAt: null },
-          select: {
-            payments: { where: { status: 'DONE', deletedAt: null }, select: { amount: true } },
-          },
-        },
-      },
-    });
+    const projectsAtRiskList: unknown[] = [];
 
-    const projectsAtRiskList = salesPOWithPayments
-      .map((po) => {
-        const budget = Number(po.amount);
-        const actualCost = po.purchaseRequests.reduce((sum, pr) => {
-          return sum + pr.payments.reduce((s2, p) => s2 + Number(p.amount), 0);
-        }, 0);
-        const usagePercent = budget > 0 ? (actualCost / budget) * 100 : 0;
-        return {
-          name: po.projectName || '',
-          salesPOCode: po.salesPONumber,
-          budget,
-          actualCost,
-          remaining: budget - actualCost,
-          usagePercent: Math.round(usagePercent * 10) / 10,
-        };
-      })
-      .filter((p) => p.usagePercent >= 90)
-      .sort((a, b) => b.usagePercent - a.usagePercent);
-
-    // Critical PRs Pending: PRs waiting exception decision (basic heuristic)
     const criticalPRs = await prisma.purchaseRequest.findMany({
       where: {
         deletedAt: null,
         status: { in: ['SUBMITTED'] },
       },
       include: {
-        salesPO: { select: { projectName: true } },
         items: { where: { deletedAt: null }, select: { qty: true } },
       },
       orderBy: { createdAt: 'desc' },
@@ -96,7 +57,7 @@ export const getExecutiveDashboard = async (
       return {
         code: pr.prNumber,
         description: pr.itemName || 'Không có mô tả',
-        projectName: pr.salesPO?.projectName || 'N/A',
+        projectName: 'N/A',
         value: qtySum,
         reason: 'Chờ quyết định quan trọng',
       };
@@ -104,7 +65,6 @@ export const getExecutiveDashboard = async (
 
     reply.send({
       metrics: {
-        totalSalesPOBudget,
         totalApprovedPRValue,
         projectsAtRisk: projectsAtRiskList.length,
         criticalPRsPending: criticalPRsList.length,
@@ -112,16 +72,11 @@ export const getExecutiveDashboard = async (
       projectsAtRiskList,
       criticalPRsList,
       budgetUsage: {
-        total: totalSalesPOBudget,
+        total: 0,
         used: totalApprovedPRValue,
-        usedPercent: totalSalesPOBudget > 0
-          ? Math.round((totalApprovedPRValue / totalSalesPOBudget) * 100 * 10) / 10
-          : 0,
+        usedPercent: 0,
       },
-      costTrends: [
-        { period: 'Tháng này', change: -2.5, description: 'Giảm so với tháng trước' },
-        { period: 'Quý này', change: 5.2, description: 'Tăng so với quý trước' },
-      ],
+      costTrends: [] as { period: string; change: number; description: string }[],
     });
   } catch (error) {
     console.error('Error fetching executive dashboard:', error);
@@ -135,66 +90,91 @@ export const getBusinessOverview = async (
   reply: FastifyReply
 ) => {
   try {
-    const salesPOs = await prisma.salesPO.findMany({
-      where: { deletedAt: null },
+    const donePayments = await prisma.payment.findMany({
+      where: {
+        status: 'DONE',
+        deletedAt: null,
+      },
+      select: { amount: true },
+    });
+
+    const totalCost = donePayments.reduce((sum, p) => sum + Number(p.amount), 0);
+
+    const prsForDist = await prisma.purchaseRequest.findMany({
+      where: { deletedAt: null, salesPOId: { not: null } },
       select: {
-        id: true,
-        salesPONumber: true,
-        projectName: true,
-        amount: true,
-        purchaseRequests: {
-          where: { deletedAt: null },
+        salesPOId: true,
+        totalAmount: true,
+        salesPO: {
           select: {
-            payments: { where: { status: 'DONE', deletedAt: null }, select: { amount: true } },
+            salesPONumber: true,
+            projectName: true,
+            projectCode: true,
           },
         },
       },
     });
 
-    const totalCost = salesPOs.reduce((sum, po) => {
-      const actual = po.purchaseRequests.reduce((prSum, pr) => {
-        return prSum + pr.payments.reduce((pSum, p) => pSum + Number(p.amount), 0);
-      }, 0);
-      return sum + actual;
-    }, 0);
+    const distMap = new Map<string, { name: string; code: string; amount: number }>();
+    for (const pr of prsForDist) {
+      const so = pr.salesPO;
+      const key = pr.salesPOId || 'unknown';
+      const name = so?.projectName || so?.salesPONumber || 'Dự án';
+      const code = so?.projectCode || so?.salesPONumber || '';
+      const prev = distMap.get(key) || { name, code, amount: 0 };
+      prev.amount += Number(pr.totalAmount || 0);
+      distMap.set(key, prev);
+    }
 
-    const costDistribution = salesPOs
-      .map((po) => {
-        const amount = po.purchaseRequests.reduce((prSum, pr) => {
-          return prSum + pr.payments.reduce((pSum, p) => pSum + Number(p.amount), 0);
-        }, 0);
-        return {
-          projectName: po.projectName || '',
-          salesPOCode: po.salesPONumber,
-          amount,
-        };
-      })
-      .filter((it) => it.amount > 0)
-      .sort((a, b) => b.amount - a.amount)
-      .slice(0, 6)
-      .map((it) => ({ ...it, percentage: totalCost > 0 ? Math.round((it.amount / totalCost) * 100) : 0 }));
+    const totalDist = [...distMap.values()].reduce((s, v) => s + v.amount, 0);
+    const costDistribution =
+      totalDist > 0
+        ? [...distMap.values()].map((v) => ({
+            projectName: v.name,
+            salesPOCode: v.code,
+            projectCode: v.code,
+            amount: v.amount,
+            percentage: Math.round((v.amount / totalDist) * 1000) / 10,
+          }))
+        : [];
 
     const allPRs = await prisma.purchaseRequest.findMany({
       where: { deletedAt: null },
-      select: { createdAt: true, status: true },
+      select: { createdAt: true, status: true, totalAmount: true },
     });
 
     const completedPRs = allPRs.filter((pr) => pr.status === 'SUPPLIER_SELECTED').length;
     const prToPurchaseRatio =
       allPRs.length > 0 ? Math.round((completedPRs / allPRs.length) * 100) : 0;
 
+    const byMonth = new Map<string, { prCount: number; totalValue: number }>();
+    for (const pr of allPRs) {
+      const d = pr.createdAt;
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      const cur = byMonth.get(key) || { prCount: 0, totalValue: 0 };
+      cur.prCount += 1;
+      cur.totalValue += Number(pr.totalAmount || 0);
+      byMonth.set(key, cur);
+    }
+    const sortedMonths = [...byMonth.entries()].sort((a, b) => a[0].localeCompare(b[0])).slice(-8);
+    const demandTrends = sortedMonths.map(([period, v]) => ({
+      period,
+      prCount: v.prCount,
+      totalValue: v.totalValue,
+    }));
+    const maxPRCount = Math.max(1, ...demandTrends.map((t) => t.prCount));
+
+    const activeProjects = await prisma.salesPO.count({
+      where: { deletedAt: null, status: 'ACTIVE' },
+    });
+
     reply.send({
       totalCost,
-      activeProjects: salesPOs.length,
+      activeProjects,
       prToPurchaseRatio,
       costDistribution,
-      demandTrends: [
-        { period: 'T1', prCount: 45, totalValue: 1200000000 },
-        { period: 'T2', prCount: 52, totalValue: 1350000000 },
-        { period: 'T3', prCount: 48, totalValue: 1280000000 },
-        { period: 'T4', prCount: 55, totalValue: 1420000000 },
-      ],
-      maxPRCount: 60,
+      demandTrends,
+      maxPRCount,
       prStats: {
         totalPRs: allPRs.length,
         completedPRs,
@@ -212,51 +192,56 @@ export const getExceptionApprovals = async (
   reply: FastifyReply
 ) => {
   try {
-    // Mock data for exception approvals
-    // In production, this would query a separate ExceptionApproval table
-    reply.send({
-      pending: [
-        {
-          id: '1',
-          code: 'EX-001',
-          type: 'Giá trị vượt ngưỡng',
-          title: 'Mua thiết bị PCCC giá trị 500M',
-          description: 'Yêu cầu mua thiết bị PCCC với giá trị 500M VNĐ, vượt ngưỡng cho phép 300M',
-          value: 500000000,
-          projectName: 'Dự án A',
-          createdAt: '2024-01-15',
+    const rows = await prisma.budgetException.findMany({
+      orderBy: { createdAt: 'desc' },
+      include: {
+        purchaseRequest: {
+          select: {
+            prNumber: true,
+            itemName: true,
+            projectName: true,
+            projectCode: true,
+          },
         },
-        {
-          id: '2',
-          code: 'EX-002',
-          type: 'NCC chiến lược mới',
-          title: 'Hợp tác với NCC quốc tế',
-          description: 'Đề xuất hợp tác với NCC quốc tế cho vật tư đặc biệt',
-          value: 200000000,
-          projectName: 'Dự án B',
-          createdAt: '2024-01-16',
-        },
-      ],
-      approved: [
-        {
-          id: '3',
-          title: 'Mua vật tư đặc biệt',
-          description: 'Đã được duyệt',
-          approvedBy: 'BGD',
-          approvedAt: '2024-01-10',
-        },
-      ],
-      rejected: [
-        {
-          id: '4',
-          title: 'Mua thiết bị không cần thiết',
-          description: 'Không phù hợp với nhu cầu',
-          rejectionReason: 'Không đáp ứng yêu cầu dự án',
-          rejectedBy: 'BGD',
-          rejectedAt: '2024-01-08',
-        },
-      ],
+        branchManager: { select: { username: true } },
+      },
     });
+
+    const mapPending = (be: (typeof rows)[0]) => ({
+      id: be.id,
+      code: be.purchaseRequest.prNumber,
+      type: 'Vượt ngân sách',
+      title: be.purchaseRequest.itemName || `PR ${be.purchaseRequest.prNumber}`,
+      description: `Chênh PR ${Number(be.prAmount).toLocaleString('vi-VN')} VNĐ vs mua ${Number(be.purchaseAmount).toLocaleString('vi-VN')} VNĐ (+${Number(be.overPercent)}%)`,
+      value: Number(be.purchaseAmount),
+      projectName: be.purchaseRequest.projectName || be.purchaseRequest.projectCode || '—',
+      createdAt: be.createdAt.toLocaleDateString('vi-VN'),
+    });
+
+    const pending = rows.filter((r) => r.status === 'PENDING').map(mapPending);
+
+    const approved = rows
+      .filter((r) => r.status === 'APPROVED')
+      .map((r) => ({
+        id: r.id,
+        title: r.purchaseRequest.itemName || `PR ${r.purchaseRequest.prNumber}`,
+        description: r.comment || 'Đã chấp nhận vượt ngân sách',
+        approvedBy: r.branchManager?.username || '—',
+        approvedAt: r.updatedAt.toLocaleDateString('vi-VN'),
+      }));
+
+    const rejected = rows
+      .filter((r) => r.status === 'REJECTED' || r.status === 'NEGOTIATION_REQUESTED')
+      .map((r) => ({
+        id: r.id,
+        title: r.purchaseRequest.itemName || `PR ${r.purchaseRequest.prNumber}`,
+        description: r.comment || 'Từ chối / đàm phán',
+        rejectionReason: r.comment || '—',
+        rejectedBy: r.branchManager?.username || '—',
+        rejectedAt: r.updatedAt.toLocaleDateString('vi-VN'),
+      }));
+
+    reply.send({ pending, approved, rejected });
   } catch (error) {
     console.error('Error fetching exception approvals:', error);
     reply.status(500).send({ error: 'Failed to fetch exception approvals' });
@@ -264,12 +249,72 @@ export const getExceptionApprovals = async (
 };
 
 // POST /api/bgd/exception-approval/:id/approve
-export const approveException = async (
-  request: FastifyRequest<{ Params: { id: string } }>,
-  reply: FastifyReply
-) => {
+export const approveException = async (request: AuthenticatedRequest, reply: FastifyReply) => {
   try {
-    // TODO: Implement approval logic
+    const userId = request.user?.userId;
+    if (!userId) {
+      return reply.status(401).send({ error: 'Unauthorized' });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { role: true },
+    });
+    if (!assertBgdOrAdmin(user?.role)) {
+      return reply.status(403).send({ error: 'Forbidden' });
+    }
+
+    const { id } = request.params as { id: string };
+    const { comment } = (request.body as { comment?: string }) || {};
+
+    const exception = await prisma.budgetException.findUnique({
+      where: { id },
+      include: { purchaseRequest: true },
+    });
+
+    if (!exception) {
+      return reply.status(404).send({ error: 'Budget exception not found' });
+    }
+
+    if (exception.status !== 'PENDING') {
+      return reply.status(400).send({ error: 'Budget exception is not pending' });
+    }
+
+    await prisma.budgetException.update({
+      where: { id },
+      data: {
+        status: 'APPROVED',
+        action: 'APPROVE',
+        branchManagerId: userId,
+        comment: comment ?? exception.comment,
+      },
+    });
+
+    await prisma.purchaseRequest.update({
+      where: { id: exception.purchaseRequestId },
+      data: { status: 'BUDGET_APPROVED' },
+    });
+
+    const pr = await prisma.purchaseRequest.findUnique({
+      where: { id: exception.purchaseRequestId },
+      include: {
+        requestor: { select: { id: true, role: true } },
+        supplierSelections: {
+          take: 1,
+          orderBy: { createdAt: 'desc' },
+          include: { buyerLeader: { select: { id: true, role: true } } },
+        },
+      },
+    });
+
+    if (pr) {
+      await markNotificationAsResolved(exception.purchaseRequestId, 'PR', 'PR_OVER_BUDGET_DECISION_REQUIRED');
+      await markNotificationAsResolved(exception.purchaseRequestId, 'PR', 'PR_OVER_BUDGET_ACTION_REQUIRED');
+      if (pr.supplierSelections[0]?.buyerLeader) {
+        await markNotificationAsResolved(exception.purchaseRequestId, 'PR', 'PR_OVER_BUDGET');
+      }
+    }
+
     reply.send({ success: true, message: 'Exception approved' });
   } catch (error) {
     console.error('Error approving exception:', error);
@@ -278,12 +323,97 @@ export const approveException = async (
 };
 
 // POST /api/bgd/exception-approval/:id/reject
-export const rejectException = async (
-  request: FastifyRequest<{ Params: { id: string }; Body: { reason: string } }>,
-  reply: FastifyReply
-) => {
+export const rejectException = async (request: AuthenticatedRequest, reply: FastifyReply) => {
   try {
-    // TODO: Implement rejection logic
+    const userId = request.user?.userId;
+    if (!userId) {
+      return reply.status(401).send({ error: 'Unauthorized' });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { role: true },
+    });
+    if (!assertBgdOrAdmin(user?.role)) {
+      return reply.status(403).send({ error: 'Forbidden' });
+    }
+
+    const { id } = request.params as { id: string };
+    const reason = (request.body as { reason?: string })?.reason?.trim() || '';
+    if (!reason) {
+      return reply.status(400).send({ error: 'reason is required' });
+    }
+
+    const exception = await prisma.budgetException.findUnique({
+      where: { id },
+      include: { purchaseRequest: true },
+    });
+
+    if (!exception) {
+      return reply.status(404).send({ error: 'Budget exception not found' });
+    }
+
+    if (exception.status !== 'PENDING') {
+      return reply.status(400).send({ error: 'Budget exception is not pending' });
+    }
+
+    await prisma.budgetException.update({
+      where: { id },
+      data: {
+        status: 'REJECTED',
+        action: 'REJECT',
+        branchManagerId: userId,
+        comment: reason,
+      },
+    });
+
+    await prisma.purchaseRequest.update({
+      where: { id: exception.purchaseRequestId },
+      data: { status: 'BUDGET_REJECTED' },
+    });
+
+    const pr = await prisma.purchaseRequest.findUnique({
+      where: { id: exception.purchaseRequestId },
+      include: {
+        requestor: { select: { id: true, role: true } },
+        supplierSelections: {
+          take: 1,
+          orderBy: { createdAt: 'desc' },
+          include: { buyerLeader: { select: { id: true, role: true } } },
+        },
+      },
+    });
+
+    if (pr?.requestor) {
+      await createNotification(getIO(), {
+        userId: pr.requestor.id,
+        role: pr.requestor.role,
+        type: 'PR_RETURNED',
+        title: 'PR vượt ngân sách bị từ chối',
+        message: `PR ${pr.prNumber} vượt ngân sách bị từ chối – ${reason}`,
+        relatedId: exception.purchaseRequestId,
+        relatedType: 'PR',
+        metadata: { prNumber: pr.prNumber, reason },
+        companyId: pr.companyId,
+      });
+    }
+
+    if (pr?.supplierSelections[0]?.buyerLeader) {
+      const leader = pr.supplierSelections[0].buyerLeader;
+      const template = NotificationTemplates.PR_RETURNED_FROM_BRANCH_MANAGER(pr.prNumber);
+      await createNotification(getIO(), {
+        userId: leader.id,
+        role: leader.role,
+        type: 'PR_RETURNED_FROM_BRANCH_MANAGER',
+        title: template.title,
+        message: template.message,
+        relatedId: exception.purchaseRequestId,
+        relatedType: 'PR',
+        metadata: { prNumber: pr.prNumber },
+        companyId: pr.companyId,
+      });
+    }
+
     reply.send({ success: true, message: 'Exception rejected' });
   } catch (error) {
     console.error('Error rejecting exception:', error);
@@ -297,57 +427,74 @@ export const getStrategicSupplierView = async (
   reply: FastifyReply
 ) => {
   try {
-    // Mock data for strategic supplier view
+    const poAgg = await prisma.purchaseOrder.groupBy({
+      by: ['supplierId'],
+      where: {
+        deletedAt: null,
+        status: {
+          in: [
+            'SUBMITTED',
+            'APPROVED',
+            'ISSUED',
+            'CREATED',
+            'SENT',
+            'CONFIRMED',
+            'PARTIAL_RECEIVED',
+            'FULLY_RECEIVED',
+            'CLOSED',
+          ],
+        },
+      },
+      _sum: { totalAmount: true },
+      _count: { id: true },
+    });
+
+    const totalPurchaseValue = poAgg.reduce((s, g) => s + Number(g._sum.totalAmount || 0), 0);
+
+    const supplierIds = poAgg.map((g) => g.supplierId);
+    const suppliers = await prisma.supplier.findMany({
+      where: { id: { in: supplierIds }, deletedAt: null },
+      select: { id: true, name: true, code: true },
+    });
+    const nameById = new Map(suppliers.map((s) => [s.id, s.name]));
+
+    const withShare = poAgg
+      .map((g) => ({
+        supplierId: g.supplierId,
+        purchaseValue: Number(g._sum.totalAmount || 0),
+        totalPRs: g._count.id,
+        dependencyPercent:
+          totalPurchaseValue > 0
+            ? Math.round((Number(g._sum.totalAmount || 0) / totalPurchaseValue) * 1000) / 10
+            : 0,
+        name: nameById.get(g.supplierId) || 'NCC',
+      }))
+      .sort((a, b) => b.purchaseValue - a.purchaseValue);
+
+    const keySuppliers = withShare.slice(0, 10).map((r) => ({
+      name: r.name,
+      category: '—',
+      purchaseValue: r.purchaseValue,
+      dependencyPercent: r.dependencyPercent,
+      totalPRs: r.totalPRs,
+    }));
+
+    const maxDep = withShare.length ? Math.max(...withShare.map((w) => w.dependencyPercent)) : 0;
+    const supplyChainRisks = withShare.filter((w) => w.dependencyPercent >= 40).length;
+
     reply.send({
-      keySuppliersCount: 8,
-      dependencyLevel: 45,
-      supplyChainRisks: 3,
-      totalPurchaseValue: 2500000000,
-      keySuppliers: [
-        {
-          name: 'Công ty TNHH Vật tư A',
-          category: 'Vật tư xây dựng',
-          purchaseValue: 800000000,
-          dependencyPercent: 55,
-          totalPRs: 45,
-        },
-        {
-          name: 'Công ty CP Thiết bị B',
-          category: 'Thiết bị điện',
-          purchaseValue: 600000000,
-          dependencyPercent: 40,
-          totalPRs: 32,
-        },
-      ],
-      dependencyAnalysis: [
-        { category: 'Vật tư xây dựng', dependencyPercent: 55, supplierCount: 3 },
-        { category: 'Thiết bị điện', dependencyPercent: 40, supplierCount: 5 },
-        { category: 'Vật liệu hoàn thiện', dependencyPercent: 25, supplierCount: 8 },
-      ],
-      supplyChainRiskList: [
-        {
-          title: 'Phụ thuộc cao vào 1 NCC vật tư xây dựng',
-          description: '55% giá trị mua từ 1 NCC duy nhất',
-          impact: 'Rủi ro gián đoạn cao',
-          severity: 'High',
-        },
-        {
-          title: 'Thiếu NCC dự phòng cho thiết bị PCCC',
-          description: 'Chỉ có 1 NCC cung cấp thiết bị PCCC',
-          impact: 'Rủi ro an toàn',
-          severity: 'Critical',
-        },
-      ],
-      recommendations: [
-        {
-          title: 'Đa dạng hóa NCC vật tư xây dựng',
-          description: 'Tìm thêm 2-3 NCC để giảm phụ thuộc',
-        },
-        {
-          title: 'Tìm NCC dự phòng cho thiết bị PCCC',
-          description: 'Ưu tiên cao để đảm bảo an toàn',
-        },
-      ],
+      keySuppliersCount: keySuppliers.length,
+      dependencyLevel: maxDep,
+      supplyChainRisks,
+      totalPurchaseValue,
+      keySuppliers,
+      dependencyAnalysis: withShare.slice(0, 8).map((w) => ({
+        category: w.name,
+        dependencyPercent: Math.min(100, Math.round(w.dependencyPercent)),
+        supplierCount: 1,
+      })),
+      supplyChainRiskList: [] as { title: string; description: string; impact: string; severity: string }[],
+      recommendations: [] as { title: string; description: string }[],
     });
   } catch (error) {
     console.error('Error fetching strategic supplier view:', error);
@@ -362,45 +509,14 @@ export const getExecutiveReports = async (
 ) => {
   try {
     reply.send({
-      totalSaving: 15.2,
-      savingAmount: 125000000,
-      procurementEfficiency: 87,
-      completionRate: 78,
-      savingDetails: [
-        {
-          category: 'Vật tư xây dựng',
-          description: 'Đàm phán giá tốt',
-          savedAmount: 45000000,
-          percentage: 12,
-        },
-        {
-          category: 'Thiết bị điện',
-          description: 'Mua số lượng lớn',
-          savedAmount: 38000000,
-          percentage: 18,
-        },
-      ],
-      procurementPerformance: [
-        { name: 'Tỷ lệ hoàn thành PR', value: '78%', percentage: 78 },
-        { name: 'Thời gian xử lý TB', value: '14 ngày', percentage: 70 },
-        { name: 'Satisfaction rate', value: '92%', percentage: 92 },
-      ],
-      planVsActual: [
-        { period: 'T1', planned: 100, actual: 95 },
-        { period: 'T2', planned: 110, actual: 108 },
-        { period: 'T3', planned: 120, actual: 115 },
-        { period: 'T4', planned: 130, actual: 125 },
-      ],
-      summary: [
-        {
-          title: 'Tổng quan',
-          content: 'Hoạt động mua hàng đạt hiệu quả tốt, tiết kiệm 15.2% so với kế hoạch',
-        },
-        {
-          title: 'Đề xuất',
-          content: 'Tiếp tục đa dạng hóa NCC và tối ưu quy trình mua hàng',
-        },
-      ],
+      totalSaving: 0,
+      savingAmount: 0,
+      procurementEfficiency: 0,
+      completionRate: 0,
+      savingDetails: [] as { category: string; description: string; savedAmount: number; percentage: number }[],
+      procurementPerformance: [] as { name: string; value: string; percentage: number }[],
+      planVsActual: [] as { period: string; planned: number; actual: number }[],
+      summary: [] as { title: string; content: string }[],
     });
   } catch (error) {
     console.error('Error fetching executive reports:', error);
@@ -414,42 +530,33 @@ export const getCriticalAlerts = async (
   reply: FastifyReply
 ) => {
   try {
+    const pendingBe = await prisma.budgetException.findMany({
+      where: { status: 'PENDING' },
+      include: {
+        purchaseRequest: {
+          select: { prNumber: true, projectName: true, itemName: true },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 20,
+    });
+
+    const critical = pendingBe.map((be) => ({
+      title: `PR ${be.purchaseRequest.prNumber} — vượt ngân sách`,
+      description:
+        be.purchaseRequest.itemName ||
+        `Vượt ${Number(be.overPercent)}% — chờ quyết định (PR vs giá mua NCC)`,
+      category: 'budget',
+      detectedAt: be.createdAt.toLocaleString('vi-VN'),
+      affectedProject: be.purchaseRequest.projectName || undefined,
+      impact: 'Cần xử lý ngoại lệ ngân sách',
+    }));
+
     reply.send({
-      critical: [
-        {
-          title: 'Dự án A vượt ngân sách 15%',
-          description: 'Dự án A đã sử dụng 115% ngân sách, cần xem xét ngay',
-          category: 'budget',
-          detectedAt: '2 giờ trước',
-          affectedProject: 'Dự án A',
-          impact: 'Rủi ro tài chính cao',
-        },
-        {
-          title: 'NCC chính thiết bị PCCC ngừng cung ứng',
-          description: 'NCC duy nhất cung cấp thiết bị PCCC thông báo ngừng cung ứng',
-          category: 'supplier',
-          detectedAt: '1 ngày trước',
-          impact: 'Rủi ro an toàn nghiêm trọng',
-        },
-      ],
-      high: [
-        {
-          title: 'Giá thép tăng 15%',
-          description: 'Xu hướng tăng giá tiếp tục',
-          category: 'budget',
-          detectedAt: '3 ngày trước',
-          affectedProject: 'Nhiều dự án',
-        },
-      ],
-      medium: [
-        {
-          title: 'Lead time kéo dài',
-          description: 'Thiết bị điện nhập khẩu bị chậm',
-          category: 'schedule',
-          detectedAt: '5 ngày trước',
-        },
-      ],
-      resolved: 12,
+      critical,
+      high: [] as typeof critical,
+      medium: [] as typeof critical,
+      resolved: 0,
     });
   } catch (error) {
     console.error('Error fetching critical alerts:', error);
@@ -464,71 +571,18 @@ export const getGovernancePolicy = async (
 ) => {
   try {
     reply.send({
-      approvalThresholds: [
-        {
-          category: 'Vật tư thông thường',
-          description: 'Giá trị mua vượt 200M cần BGĐ duyệt',
-          threshold: 200000000,
-        },
-        {
-          category: 'Thiết bị đặc biệt',
-          description: 'Giá trị mua vượt 100M cần BGĐ duyệt',
-          threshold: 100000000,
-        },
-        {
-          category: 'Dịch vụ',
-          description: 'Giá trị mua vượt 150M cần BGĐ duyệt',
-          threshold: 150000000,
-        },
-      ],
-      strategicPolicies: [
-        {
-          title: 'Ưu tiên NCC trong nước',
-          description: 'Ưu tiên lựa chọn NCC trong nước khi giá chênh lệch < 10%',
-          effectiveDate: '2024-01-01',
-          updatedAt: '2024-01-01',
-        },
-        {
-          title: 'Đa dạng hóa nguồn cung',
-          description: 'Không phụ thuộc quá 50% vào 1 NCC cho 1 danh mục',
-          effectiveDate: '2024-01-01',
-          updatedAt: '2024-01-01',
-        },
-      ],
-      priorityGuidelines: [
-        {
-          category: 'Thiết bị PCCC',
-          priority: 'Critical',
-          description: 'Liên quan đến an toàn, ưu tiên cao nhất',
-          sla: 7,
-        },
-        {
-          category: 'Vật tư trên đường găng',
-          priority: 'High',
-          description: 'Ảnh hưởng trực tiếp đến tiến độ',
-          sla: 10,
-        },
-        {
-          category: 'Vật tư thông thường',
-          priority: 'Normal',
-          description: 'Vật tư không ảnh hưởng đến tiến độ',
-          sla: 14,
-        },
-      ],
-      riskPolicies: [
-        {
-          title: 'Quản lý rủi ro NCC',
-          description: 'Đánh giá rủi ro NCC định kỳ và có kế hoạch dự phòng',
-        },
-        {
-          title: 'Giám sát ngân sách',
-          description: 'Cảnh báo khi dự án sử dụng > 90% ngân sách',
-        },
-      ],
+      approvalThresholds: [] as { category: string; description: string; threshold: number }[],
+      strategicPolicies: [] as { title: string; description: string; effectiveDate: string; updatedAt: string }[],
+      priorityGuidelines: [] as {
+        category: string;
+        priority: string;
+        description: string;
+        sla: number;
+      }[],
+      riskPolicies: [] as { title: string; description: string }[],
     });
   } catch (error) {
     console.error('Error fetching governance policy:', error);
     reply.status(500).send({ error: 'Failed to fetch governance policy' });
   }
 };
-

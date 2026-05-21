@@ -1,15 +1,48 @@
+import { useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { BarChart3, Eye, FileText, TrendingUp, TrendingDown } from 'lucide-react';
+import { BarChart3, Eye, FileText, TrendingUp, TrendingDown, AlertTriangle } from 'lucide-react';
 import { buyerService } from '../../services/buyerService';
+import { BuyerPageHero } from '../../components/BuyerPageHero';
+import {
+  buyerInteractiveTableClass,
+  buyerInteractiveTableBodyClass,
+  buyerOutletPageShellClass,
+  buyerOutletCenterMinHeightClass,
+  buyerTableAccentRailClass,
+  buyerTableCellWrapClass,
+  buyerTableDataRowVisual,
+  buyerTableFirstCellInnerClass,
+  buyerWorkspacePageStackClass,
+  buyerWorkspaceTableViewportClass,
+  buyerPanelCardClass,
+  buyerDataTableCardClass,
+  buyerDataTableCardHeaderClass,
+} from '../../constants/buyerLayout';
+import { DashboardV3ShimmerBlock, dashboardV3ErrorCardClass } from '../../components/dashboard/DashboardV3Chrome';
 
 const ProjectCostReference = () => {
   const { data: costsData, isLoading, error } = useQuery({
     queryKey: ['buyer-project-costs'],
     queryFn: () => buyerService.getProjectCostReference(),
-    staleTime: 60000, // 1 minute - View Only, less frequent updates
+    staleTime: 60000,
     gcTime: 10 * 60 * 1000,
     retry: 1,
   });
+
+  const projectsSource = costsData?.projects || [];
+
+  const projectStats = useMemo(() => {
+    const projects = projectsSource;
+    let over = 0;
+    let near = 0;
+    for (const p of projects) {
+      const budget = p.salesPOAmount ?? p.budget ?? 0;
+      if (p.actualCost > budget) over++;
+      else if (p.progress >= 80) near++;
+    }
+    const normal = Math.max(0, projects.length - over - near);
+    return { total: projects.length, over, near, normal };
+  }, [projectsSource]);
 
   const formatPrice = (price: number) => {
     return new Intl.NumberFormat('vi-VN', {
@@ -20,10 +53,11 @@ const ProjectCostReference = () => {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-slate-50 p-6">
-        <div className="animate-pulse space-y-4">
-          <div className="h-8 bg-slate-200 rounded w-64"></div>
-          <div className="h-96 bg-slate-200 rounded"></div>
+      <div className={buyerOutletPageShellClass}>
+        <div className={buyerWorkspacePageStackClass}>
+          <DashboardV3ShimmerBlock className="h-36 w-full shrink-0 rounded-[28px]" />
+          <DashboardV3ShimmerBlock className="h-24 w-full max-w-xl shrink-0 rounded-2xl" />
+          <DashboardV3ShimmerBlock className="min-h-[240px] shrink-0 rounded-[28px]" />
         </div>
       </div>
     );
@@ -31,166 +65,298 @@ const ProjectCostReference = () => {
 
   if (error) {
     return (
-      <div className="min-h-screen bg-slate-50 p-6">
-        <div className="bg-red-50 border border-red-200 rounded-soft p-4">
-          <p className="text-red-800 font-medium">Lỗi khi tải dữ liệu</p>
-          <p className="text-red-600 text-sm mt-1">{error instanceof Error ? error.message : 'Vui lòng thử lại sau'}</p>
+      <div className={buyerOutletPageShellClass}>
+        <div className={`${buyerWorkspacePageStackClass} ${buyerOutletCenterMinHeightClass} flex flex-col items-center justify-center py-16`}>
+          <div className={`max-w-md ${dashboardV3ErrorCardClass}`}>
+            <p className="font-medium text-red-800">Lỗi khi tải dữ liệu</p>
+            <p className="mt-1 text-sm text-red-600">
+              {error instanceof Error ? error.message : 'Vui lòng thử lại sau'}
+            </p>
+          </div>
         </div>
       </div>
     );
   }
 
+  const projects = projectsSource;
+
   return (
-    <div className="min-h-screen bg-slate-50 p-6 space-y-6">
-      {/* Header - View Only Notice */}
-      <div className="bg-blue-50 border-l-4 border-blue-500 rounded-soft p-4">
+    <div className={buyerOutletPageShellClass}>
+      <div className={`${buyerWorkspacePageStackClass} animate-fade-in-right fade-in-right-delay-0`}>
+      <BuyerPageHero
+        kicker="Buyer · Tham chiếu"
+        title="Tham chiếu chi phí dự án"
+        description="Xem ngân sách và tiến độ chi theo dự án / SO — chỉ đọc, dùng khi đối chiếu báo giá."
+        Icon={BarChart3}
+        tint="graphite"
+        regionLabel="Tham chiếu chi phí dự án"
+        rightSlot={
+          <div className="min-w-[5.5rem] rounded-xl border border-white/25 bg-white/10 px-2.5 py-2 shadow-sm backdrop-blur-sm">
+            <p className="text-[10px] font-semibold uppercase tracking-wide text-white/65">Dự án</p>
+            <p className="text-lg font-bold tabular-nums leading-tight text-white">{projectStats.total}</p>
+            <p className="text-[10px] leading-tight text-white/70">mã trong bảng</p>
+          </div>
+        }
+      />
+
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="animate-fade-in-right rounded-lg border border-slate-200/50 bg-white p-3.5 shadow-md transition-shadow fade-in-right-stagger-2 hover:shadow-md">
+          <div className="mb-2 flex items-center justify-between">
+            <div className="rounded-lg bg-indigo-100 p-1.5">
+              <FileText className="h-4 w-4 text-indigo-600" strokeWidth={2} />
+            </div>
+          </div>
+          <p className="mb-0.5 text-xl font-bold tabular-nums leading-tight text-slate-900">{projectStats.total}</p>
+          <p className="text-[11px] leading-snug text-slate-600">Tổng mã dự án</p>
+        </div>
+        <div className="animate-fade-in-right rounded-lg border border-slate-200/50 bg-white p-3.5 shadow-md transition-shadow fade-in-right-stagger-3 hover:shadow-md">
+          <div className="mb-2 flex items-center justify-between">
+            <div className="rounded-lg bg-emerald-100 p-1.5">
+              <TrendingDown className="h-4 w-4 text-emerald-600" strokeWidth={2} />
+            </div>
+          </div>
+          <p className="mb-0.5 text-xl font-bold tabular-nums leading-tight text-slate-900">{projectStats.normal}</p>
+          <p className="text-[11px] leading-snug text-slate-600">Dưới 80% ngân sách</p>
+        </div>
+        <div className="animate-fade-in-right rounded-lg border border-slate-200/50 bg-white p-3.5 shadow-md transition-shadow fade-in-right-stagger-4 hover:shadow-md">
+          <div className="mb-2 flex items-center justify-between">
+            <div className="rounded-lg bg-amber-100 p-1.5">
+              <TrendingUp className="h-4 w-4 text-amber-600" strokeWidth={2} />
+            </div>
+          </div>
+          <p className="mb-0.5 text-xl font-bold tabular-nums leading-tight text-slate-900">{projectStats.near}</p>
+          <p className="text-[11px] leading-snug text-slate-600">80–100% tiến độ</p>
+        </div>
+        <div className="animate-fade-in-right rounded-lg border border-slate-200/50 bg-white p-3.5 shadow-md transition-shadow fade-in-right-stagger-5 hover:shadow-md">
+          <div className="mb-2 flex items-center justify-between">
+            <div className="rounded-lg bg-rose-100 p-1.5">
+              <AlertTriangle className="h-4 w-4 text-rose-600" strokeWidth={2} />
+            </div>
+          </div>
+          <p className="mb-0.5 text-xl font-bold tabular-nums leading-tight text-slate-900">{projectStats.over}</p>
+          <p className="text-[11px] leading-snug text-slate-600">Vượt ngân sách</p>
+        </div>
+      </div>
+
+      <div className="animate-fade-in-right rounded-2xl border border-blue-200 bg-blue-50 p-4 shadow-sm fade-in-right-stagger-6 sm:p-5">
         <div className="flex items-start gap-3">
-          <Eye className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" strokeWidth={2} />
+          <Eye className="mt-0.5 h-5 w-5 shrink-0 text-blue-600" strokeWidth={2} />
           <div>
-            <h3 className="font-semibold text-blue-900 mb-1">Chế độ xem chỉ đọc (View Only)</h3>
-            <p className="text-sm text-blue-700">
+            <h3 className="mb-1 font-semibold text-blue-900">Chế độ xem chỉ đọc (View Only)</h3>
+            <p className="text-sm leading-snug text-blue-800/90">
               Buyer chỉ xem ngân sách dự án để tham chiếu khi xử lý báo giá. Không có quyền quyết định hoặc can thiệp tài chính.
             </p>
           </div>
         </div>
       </div>
 
-      {/* Projects List */}
-      <div className="bg-white rounded-soft shadow-soft border border-slate-200">
-        <div className="p-6 border-b border-slate-200">
-          <div className="flex items-center gap-2">
-            <BarChart3 className="w-5 h-5 text-blue-600" strokeWidth={2} />
-            <h2 className="text-xl font-bold text-slate-900">Tham chiếu ngân sách dự án</h2>
+      <div className={`animate-fade-in-right fade-in-right-stagger-6 ${buyerPanelCardClass}`}>
+        <div className="mb-4 flex min-w-0 items-start gap-2">
+          <div className="rounded-xl bg-gradient-to-br from-violet-100 to-indigo-100 p-2">
+            <BarChart3 className="h-4 w-4 text-indigo-600" strokeWidth={2} />
+          </div>
+          <div className="min-w-0">
+            <h2 className="text-base font-bold text-slate-900 sm:text-lg">Bảng ngân sách dự án</h2>
+            <p className="mt-0.5 text-sm leading-snug text-slate-600">
+              So sánh ngân sách (SO), chi thực tế (Payment DONE), còn lại và thanh tiến độ — cùng công thức bố cục với Tổng quan PR Requestor.
+            </p>
           </div>
         </div>
-        <div className="overflow-x-auto">
-          <table className="w-full">
-            <thead className="bg-slate-50 border-b-2 border-slate-200">
-              <tr>
-                <th className="px-6 py-4 text-left text-xs font-semibold text-slate-600 uppercase tracking-wider">
-                  Sales PO
-                </th>
-                <th className="px-6 py-4 text-left text-xs font-semibold text-slate-600 uppercase tracking-wider">
-                  Dự án
-                </th>
-                <th className="px-6 py-4 text-left text-xs font-semibold text-slate-600 uppercase tracking-wider">
-                  Sales PO Amount
-                </th>
-                <th className="px-6 py-4 text-left text-xs font-semibold text-slate-600 uppercase tracking-wider">
-                  Actual Cost (Payment DONE)
-                </th>
-                <th className="px-6 py-4 text-left text-xs font-semibold text-slate-600 uppercase tracking-wider">
-                  Remaining Budget
-                </th>
-                <th className="px-6 py-4 text-left text-xs font-semibold text-slate-600 uppercase tracking-wider">
-                  Tiến độ
-                </th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {costsData?.projects && costsData.projects.length > 0 ? (
-                costsData.projects.map((project: any, index: number) => {
-                const isOverBudget = project.actualCost > project.salesPOAmount;
-                const isNearBudget = project.progress >= 80;
-                
-                return (
-                  <tr
-                    key={project.id}
-                    className={`transition-colors duration-150 ${
-                      index % 2 === 0 ? 'bg-white' : 'bg-slate-50/50'
-                    } hover:bg-blue-50/50 ${
-                      isOverBudget ? 'bg-red-50/50' : isNearBudget ? 'bg-amber-50/50' : ''
-                    }`}
-                  >
-                    <td className="px-6 py-6 whitespace-nowrap">
-                      <span className="text-sm font-bold text-slate-900">{project.salesPONumber}</span>
-                    </td>
-                    <td className="px-6 py-6">
-                      <div>
-                        <p className="text-sm font-medium text-slate-900">{project.projectName}</p>
-                        <p className="text-xs text-slate-500">{project.projectCode}</p>
-                      </div>
-                    </td>
-                    <td className="px-6 py-6 whitespace-nowrap">
-                      <span className="text-sm font-bold text-slate-900">{formatPrice(project.salesPOAmount)}</span>
-                    </td>
-                    <td className="px-6 py-6 whitespace-nowrap">
-                      <div className="flex items-center gap-2">
-                        <span className={`text-sm font-bold ${
-                          isOverBudget ? 'text-red-600' : 'text-green-600'
-                        }`}>
-                          {formatPrice(project.actualCost)}
-                        </span>
-                        {isOverBudget ? (
-                          <TrendingUp className="w-4 h-4 text-red-600" strokeWidth={2} />
-                        ) : (
-                          <TrendingDown className="w-4 h-4 text-green-600" strokeWidth={2} />
-                        )}
-                      </div>
-                    </td>
-                    <td className="px-6 py-6 whitespace-nowrap">
-                      <span className={`text-sm font-bold ${
-                        project.remainingBudget < 0 ? 'text-red-600' : 'text-slate-900'
-                      }`}>
-                        {formatPrice(project.remainingBudget)}
-                      </span>
-                    </td>
-                    <td className="px-6 py-6">
-                      <div className="flex items-center gap-3">
-                        <div className="flex-1 bg-slate-200 rounded-full h-2 max-w-xs">
-                          <div
-                            className={`h-2 rounded-full transition-all ${
-                              isOverBudget
-                                ? 'bg-red-500'
-                                : isNearBudget
-                                ? 'bg-amber-500'
-                                : 'bg-green-500'
-                            }`}
-                            style={{ width: `${Math.min(project.progress, 100)}%` }}
-                          ></div>
-                        </div>
-                        <span className={`text-sm font-semibold ${
+
+        <div className={buyerDataTableCardClass}>
+          <div className={buyerDataTableCardHeaderClass}>
+            <h3 className="text-base font-bold text-slate-900 sm:text-lg">Chi tiết theo dự án</h3>
+          </div>
+          <div className={buyerWorkspaceTableViewportClass}>
+            <table className={`${buyerInteractiveTableClass} w-full min-w-[760px]`}>
+              <thead className="sticky top-0 z-10 border-b-2 border-slate-200 bg-slate-50">
+                <tr>
+                  <th className="bg-slate-50 px-3 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-600 sm:px-4 sm:py-4 md:px-6">
+                    Mã dự án
+                  </th>
+                  <th className="bg-slate-50 px-3 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-600 sm:px-4 sm:py-4 md:px-6">
+                    Dự án
+                  </th>
+                  <th className="bg-slate-50 px-3 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-600 sm:px-4 sm:py-4 md:px-6">
+                    Ngân sách
+                  </th>
+                  <th className="bg-slate-50 px-3 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-600 sm:px-4 sm:py-4 md:px-6">
+                    Actual Cost (Payment DONE)
+                  </th>
+                  <th className="bg-slate-50 px-3 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-600 sm:px-4 sm:py-4 md:px-6">
+                    Remaining Budget
+                  </th>
+                  <th className="bg-slate-50 px-3 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-600 sm:px-4 sm:py-4 md:px-6">
+                    Tiến độ
+                  </th>
+                </tr>
+              </thead>
+              <tbody className={buyerInteractiveTableBodyClass}>
+                {projects.length > 0 ? (
+                  projects.map((project: any, index: number) => {
+                    const isOverBudget = project.actualCost > (project.salesPOAmount ?? project.budget ?? 0);
+                    const isNearBudget = project.progress >= 80;
+
+                    return (
+                      <tr
+                        key={project.id}
+                        className={[
+                          'group',
+                          buyerTableDataRowVisual(index),
                           isOverBudget
-                            ? 'text-red-600'
+                            ? '[&>td]:!bg-red-50/55'
                             : isNearBudget
-                            ? 'text-amber-600'
-                            : 'text-green-600'
-                        }`}>
-                          {project.progress}%
-                        </span>
-                      </div>
+                              ? '[&>td]:!bg-amber-50/50'
+                              : '',
+                        ]
+                          .filter(Boolean)
+                          .join(' ')}
+                      >
+                        <td className="relative whitespace-nowrap px-3 py-4 sm:px-4 sm:py-5 md:px-6 md:py-6">
+                          <div aria-hidden className={buyerTableAccentRailClass} />
+                          <div className={`${buyerTableFirstCellInnerClass} ${buyerTableCellWrapClass}`}>
+                            <span className="text-sm font-bold text-slate-900">
+                              {project.salesPONumber ?? project.projectCode ?? '-'}
+                            </span>
+                          </div>
+                        </td>
+                        <td className="px-3 py-4 sm:px-4 sm:py-5 md:px-6 md:py-6">
+                          <div className={buyerTableCellWrapClass}>
+                            <p className="text-sm font-medium text-slate-900">{project.projectName}</p>
+                            <p className="text-xs text-slate-500">{project.projectCode}</p>
+                          </div>
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-4 sm:px-4 sm:py-5 md:px-6 md:py-6">
+                          <div className={buyerTableCellWrapClass}>
+                            <span className="text-sm font-bold text-slate-900">
+                              {formatPrice(project.salesPOAmount ?? project.budget ?? 0)}
+                            </span>
+                          </div>
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-4 sm:px-4 sm:py-5 md:px-6 md:py-6">
+                          <div className={buyerTableCellWrapClass}>
+                            <div className="flex items-center gap-2">
+                              <span
+                                className={`text-sm font-bold ${isOverBudget ? 'text-red-600' : 'text-green-600'}`}
+                              >
+                                {formatPrice(project.actualCost)}
+                              </span>
+                              {isOverBudget ? (
+                                <TrendingUp className="h-4 w-4 text-red-600" strokeWidth={2} />
+                              ) : (
+                                <TrendingDown className="h-4 w-4 text-green-600" strokeWidth={2} />
+                              )}
+                            </div>
+                          </div>
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-4 sm:px-4 sm:py-5 md:px-6 md:py-6">
+                          <div className={buyerTableCellWrapClass}>
+                            <span
+                              className={`text-sm font-bold ${
+                                project.remainingBudget < 0 ? 'text-red-600' : 'text-slate-900'
+                              }`}
+                            >
+                              {formatPrice(project.remainingBudget)}
+                            </span>
+                          </div>
+                        </td>
+                        <td className="px-3 py-4 sm:px-4 sm:py-5 md:px-6 md:py-6">
+                          <div className={buyerTableCellWrapClass}>
+                          <div className="flex min-w-[10rem] flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+                            <div className="h-2 max-w-xs flex-1 rounded-full bg-slate-200 overflow-hidden shadow-inner">
+                              <div
+                                className={`relative h-2 rounded-full transition-all duration-700 ease-out ${
+                                  isOverBudget 
+                                    ? 'bg-gradient-to-r from-rose-500 via-red-500 to-pink-600' 
+                                    : isNearBudget 
+                                      ? 'bg-gradient-to-r from-amber-500 via-yellow-400 to-orange-500' 
+                                      : 'bg-gradient-to-r from-emerald-500 via-teal-400 to-green-600'
+                                }`}
+                                style={{ width: `${Math.min(project.progress, 100)}%` }}
+                              >
+                                {/* Liquid Flow Animation */}
+                                {!isOverBudget && (
+                                  <div
+                                    className="absolute inset-0 animate-liquid-flow"
+                                    style={{
+                                      background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.4), transparent)',
+                                      backgroundSize: '200% 100%',
+                                    }}
+                                  />
+                                )}
+                                
+                                {/* Micro Bubbles */}
+                                {project.progress > 20 && !isOverBudget && (
+                                  <>
+                                    <div 
+                                      className="absolute left-[15%] top-0.5 h-0.5 w-0.5 animate-pulse rounded-full bg-white/40" 
+                                      style={{ animationDuration: '2.2s' }} 
+                                    />
+                                    <div 
+                                      className="absolute left-[45%] top-0.5 h-0.5 w-0.5 animate-pulse rounded-full bg-white/30" 
+                                      style={{ animationDuration: '2.8s' }} 
+                                    />
+                                    <div 
+                                      className="absolute left-[75%] top-0.5 h-0.5 w-0.5 animate-pulse rounded-full bg-white/35" 
+                                      style={{ animationDuration: '3.1s' }} 
+                                    />
+                                  </>
+                                )}
+                              </div>
+                            </div>
+                            <span
+                              className={`text-sm font-semibold ${
+                                isOverBudget ? 'text-red-600' : isNearBudget ? 'text-amber-600' : 'text-green-600'
+                              }`}
+                            >
+                              {project.progress}%
+                            </span>
+                          </div>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })
+                ) : (
+                  <tr>
+                    <td colSpan={6} className="px-4 py-8 text-center text-slate-500 sm:px-6">
+                      Chưa có dữ liệu ngân sách dự án
                     </td>
                   </tr>
-                );
-              })
-              ) : (
-                <tr>
-                  <td colSpan={6} className="px-6 py-8 text-center text-slate-500">
-                    Chưa có dữ liệu ngân sách dự án
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
 
-      {/* Legend */}
-      <div className="bg-white rounded-soft shadow-soft border border-slate-200 p-4">
-        <div className="flex items-center gap-6 text-sm">
+      <div className={`${buyerPanelCardClass}`}>
+        <h3 className="mb-3 text-sm font-bold text-slate-900">Chú thích tiến độ</h3>
+        <div className="flex flex-col gap-4 text-sm sm:flex-row sm:flex-wrap sm:items-center sm:gap-6">
           <div className="flex items-center gap-2">
-            <div className="w-4 h-4 bg-green-500 rounded"></div>
+            <div className="h-4 w-4 rounded bg-green-500" />
             <span className="text-slate-600">Dưới 80% ngân sách</span>
           </div>
           <div className="flex items-center gap-2">
-            <div className="w-4 h-4 bg-amber-500 rounded"></div>
-            <span className="text-slate-600">80-100% ngân sách</span>
+            <div className="h-4 w-4 rounded bg-amber-500" />
+            <span className="text-slate-600">80–100% ngân sách</span>
           </div>
           <div className="flex items-center gap-2">
-            <div className="w-4 h-4 bg-red-500 rounded"></div>
+            <div className="h-4 w-4 rounded bg-red-500" />
             <span className="text-slate-600">Vượt ngân sách</span>
           </div>
         </div>
+      </div>
+      
+      <style>{`
+        @keyframes liquid-flow {
+          from { transform: translateX(-200%); }
+          to { transform: translateX(300%); }
+        }
+        .animate-liquid-flow {
+          animation: liquid-flow 3s linear infinite;
+        }
+      `}</style>
       </div>
     </div>
   );

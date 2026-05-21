@@ -18,6 +18,11 @@ export interface AuthResponse {
         email: string;
         role: string;
         location: string | null;
+        /** Username người duyệt cấp 1 (DEPARTMENT_HEAD) — bắt buộc khi requestor gửi PR */
+        directManagerCode?: string | null;
+        fullName?: string;
+        jobTitle?: string;
+        phone?: string;
     };
     token: string;
 }

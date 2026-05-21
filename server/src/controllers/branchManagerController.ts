@@ -6,6 +6,25 @@ import { auditUpdate } from '../utils/audit';
 import { createNotification, NotificationTemplates, markNotificationAsResolved } from '../utils/notifications';
 import { getIO } from '../utils/getIO';
 import { z } from 'zod';
+import { prSalesPOSelect, serializePRSalesOrder } from '../utils/prSalesOrder';
+import {
+  BRANCH_APPROVED_STATUSES,
+  BRANCH_REJECTED_STATUSES,
+  BRANCH_RETURNED_STATUSES,
+  branchManagerApprovedByUserWhere,
+  branchManagerRejectedByUserWhere,
+  branchManagerReturnedByUserWhere,
+  normalizeApprovalQueueFilter,
+  periodStartDaysAgo,
+} from '../utils/prApprovalQueue';
+import { sumAllLinesSnapshot } from '../utils/departmentPrItemReview';
+import {
+  hasActivePurchasingAfterBranchDecisions,
+  itemEligibleForBranchLevelDecision,
+  itemEligibleForDepartmentOutcome,
+  sumPurchaseTotalAfterBranchDecisions,
+  type DepartmentItemOutcomeValue,
+} from '../utils/branchPrItemReview';
 
 // Get Branch Manager Dashboard
 export const getBranchManagerDashboard = async (
@@ -54,6 +73,7 @@ export const getBranchManagerDashboard = async (
           orderBy: { lineNo: 'asc' },
           take: 1,
         },
+        salesPO: { select: prSalesPOSelect },
       },
       orderBy: {
         createdAt: 'desc',
@@ -62,19 +82,6 @@ export const getBranchManagerDashboard = async (
 
     // No need to filter again since we already filtered in the query
     const branchPRs = pendingPRs;
-
-    // Debug log
-    console.log('Branch Manager Dashboard:', {
-      userId,
-      branchLocation,
-      totalPendingPRs: pendingPRs.length,
-      branchPRsCount: branchPRs.length,
-      pendingPRsStatuses: pendingPRs.map(pr => ({
-        prNumber: pr.prNumber,
-        status: pr.status,
-        requestorLocation: pr.requestor?.location,
-      })),
-    });
 
     // Get period (last 30 days)
     const periodStart = new Date();
@@ -131,6 +138,14 @@ export const getBranchManagerDashboard = async (
       return sum + (pr.totalAmount ? Number(pr.totalAmount) : 0);
     }, 0);
 
+    const productionValueThisMonth = approvedPRsThisMonth
+      .filter((pr) => pr.type === 'PRODUCTION')
+      .reduce((sum, pr) => sum + (pr.totalAmount ? Number(pr.totalAmount) : 0), 0);
+    const productionValueSharePercent =
+      totalPRValueThisMonth > 0
+        ? Math.round((productionValueThisMonth / totalPRValueThisMonth) * 1000) / 10
+        : 0;
+
     // Get rejected/returned PRs this period
     const rejectedPRs = await prisma.purchaseRequest.findMany({
       where: {
@@ -173,6 +188,7 @@ export const getBranchManagerDashboard = async (
           orderBy: { lineNo: 'asc' },
           take: 1,
         },
+        salesPO: { select: prSalesPOSelect },
       },
       take: 10,
     });
@@ -210,6 +226,48 @@ export const getBranchManagerDashboard = async (
       },
     });
 
+    const budgetVarianceAvgOverPercent =
+      budgetExceptions.length > 0
+        ? Math.round(
+            (budgetExceptions.reduce((s, b) => s + Number(b.overPercent), 0) / budgetExceptions.length) * 10,
+          ) / 10
+        : 0;
+
+    const prNestedWhere: { deletedAt: null; requestor?: { location: string } } = {
+      deletedAt: null,
+    };
+    if (branchLocation && branchLocation !== 'ALL') {
+      prNestedWhere.requestor = { location: branchLocation };
+    }
+
+    const branchManagerApprovals = await prisma.pRApproval.findMany({
+      where: {
+        approverId: userId,
+        action: 'APPROVE',
+        createdAt: { gte: periodStart },
+        purchaseRequest: { is: prNestedWhere },
+      },
+      select: {
+        createdAt: true,
+        purchaseRequest: { select: { createdAt: true } },
+      },
+    });
+
+    let avgBranchApprovalLeadTimeHours = 0;
+    if (branchManagerApprovals.length > 0) {
+      const sumHours = branchManagerApprovals.reduce((acc, row) => {
+        const ms = row.createdAt.getTime() - row.purchaseRequest.createdAt.getTime();
+        return acc + ms / (1000 * 60 * 60);
+      }, 0);
+      avgBranchApprovalLeadTimeHours = Math.round((sumHours / branchManagerApprovals.length) * 10) / 10;
+    }
+
+    const decidedLast30d = approvedPRs.length + rejectedPRs.length;
+    const approvalRateLast30d =
+      decidedLast30d > 0
+        ? Math.round((approvedPRs.length / decidedLast30d) * 1000) / 10
+        : 0;
+
     // Get recent pending PRs (5-7 PRs) for dashboard list
     const recentPendingPRs = branchPRs.slice(0, 7).map((pr) => {
       const firstItem = pr.items?.[0];
@@ -226,6 +284,7 @@ export const getBranchManagerDashboard = async (
         itemName: firstItem?.description || 'N/A',
         createdAt: pr.createdAt.toISOString(),
         purpose: pr.purpose || null,
+        salesOrder: serializePRSalesOrder(pr as any),
       };
     });
 
@@ -254,6 +313,10 @@ export const getBranchManagerDashboard = async (
       urgentPRs: urgentPRs.length,
       budgetExceptionsPending: budgetExceptions.length,
       totalPRValueThisMonth,
+      approvalRateLast30d,
+      avgBranchApprovalLeadTimeHours,
+      budgetVarianceAvgOverPercent,
+      productionValueSharePercent,
       prsByDepartment,
       recentPendingPRs,
       prsByType,
@@ -266,6 +329,7 @@ export const getBranchManagerDashboard = async (
           itemName: firstItem?.description || pr.itemName || 'N/A',
           requiredDate: pr.requiredDate,
           requestor: pr.requestor,
+          salesOrder: serializePRSalesOrder(pr as any),
         };
       }),
     });
@@ -295,15 +359,33 @@ export const getPendingPRs = async (
     });
 
     const branchLocation = user?.location || null;
+    const queue = normalizeApprovalQueueFilter((request.query as { queue?: string })?.queue);
 
-    // Build where clause - if location is set, filter by it, otherwise show all
-    // Only show PRs that have been approved by Department Head
+    const periodStart = periodStartDaysAgo(365);
     const whereClause: any = {
-      status: 'BRANCH_MANAGER_PENDING',
       deletedAt: null,
     };
 
-    // Only filter by location if branch manager has a specific location
+    if (queue === 'pending') {
+      whereClause.status = 'BRANCH_MANAGER_PENDING';
+    } else if (queue === 'approved') {
+      Object.assign(whereClause, branchManagerApprovedByUserWhere(userId, periodStart));
+    } else if (queue === 'rejected') {
+      Object.assign(whereClause, branchManagerRejectedByUserWhere(userId, periodStart));
+    } else if (queue === 'returned') {
+      Object.assign(whereClause, branchManagerReturnedByUserWhere(userId, periodStart));
+    } else {
+      whereClause.status = {
+        in: [
+          'BRANCH_MANAGER_PENDING',
+          ...BRANCH_APPROVED_STATUSES,
+          ...BRANCH_REJECTED_STATUSES,
+          ...BRANCH_RETURNED_STATUSES,
+        ],
+      };
+      whereClause.updatedAt = { gte: periodStart };
+    }
+
     if (branchLocation && branchLocation !== 'ALL') {
       whereClause.requestor = {
         location: branchLocation,
@@ -328,6 +410,7 @@ export const getPendingPRs = async (
           orderBy: { createdAt: 'desc' },
           take: 1,
         },
+        salesPO: { select: prSalesPOSelect },
       },
       orderBy: {
         createdAt: 'desc',
@@ -353,15 +436,29 @@ export const getPendingPRs = async (
 
     const mappedPRs = branchPRs.map((pr) => {
       const firstItem = pr.items[0];
+      const calculatedTotal = (pr.items || []).reduce((sum, item: any) => {
+        const qty = Number(item.qty) || 0;
+        const estimatedUnitPrice = Number(item.estimatedUnitPriceVnd) || 0;
+        const unitPrice = Number(item.unitPrice) || 0;
+        const effectiveUnitPrice = estimatedUnitPrice > 0 ? estimatedUnitPrice : unitPrice;
+        return sum + qty * effectiveUnitPrice;
+      }, 0);
+      const resolvedPrTotal = (() => {
+        const direct = Number(pr.totalAmount || 0);
+        if (direct > 0) return direct;
+        return calculatedTotal > 0 ? calculatedTotal : null;
+      })();
       return {
         id: pr.id,
         prNumber: pr.prNumber,
+        status: pr.status,
         department: pr.department,
-        totalAmount: pr.totalAmount ? Number(pr.totalAmount) : null,
+        totalAmount: resolvedPrTotal,
         currency: pr.currency,
         requestor: pr.requestor,
         // Summary fields for list display
         itemName: firstItem?.description || 'N/A',
+        itemCount: pr.items.length,
         quantity: firstItem ? Number(firstItem.qty) : 0,
         unit: firstItem?.unit || '',
         specifications: firstItem?.spec || null,
@@ -369,14 +466,38 @@ export const getPendingPRs = async (
         items: pr.items.map((item: any) => ({
           id: item.id,
           lineNo: item.lineNo,
+          status: item.status,
           description: item.description,
           partNo: item.partNo,
           spec: item.spec,
           manufacturer: item.manufacturer,
           qty: Number(item.qty),
           unit: item.unit,
-          unitPrice: item.unitPrice ? Number(item.unitPrice) : null,
-          amount: item.amount ? Number(item.amount) : null,
+          departmentItemOutcome: item.departmentItemOutcome ?? null,
+          departmentDecisionNote: item.departmentDecisionNote ?? null,
+          branchItemOutcome: item.branchItemOutcome ?? null,
+          branchDecisionNote: item.branchDecisionNote ?? null,
+          departmentRevisionSubmittedAt: item.departmentRevisionSubmittedAt
+            ? item.departmentRevisionSubmittedAt.toISOString()
+            : null,
+          unitPrice:
+            Number(item.estimatedUnitPriceVnd) > 0
+              ? Number(item.estimatedUnitPriceVnd)
+              : item.unitPrice
+                ? Number(item.unitPrice)
+                : null,
+          amount:
+            item.amount && Number(item.amount) > 0
+              ? Number(item.amount)
+              : (() => {
+                  const qty = Number(item.qty) || 0;
+                  const estimated = Number(item.estimatedUnitPriceVnd) || 0;
+                  const unit = Number(item.unitPrice) || 0;
+                  const effectiveUnitPrice = estimated > 0 ? estimated : unit;
+                  return effectiveUnitPrice > 0 ? qty * effectiveUnitPrice : null;
+                })(),
+          estimatedUnitPriceVnd:
+            Number(item.estimatedUnitPriceVnd) > 0 ? Number(item.estimatedUnitPriceVnd) : null,
           purpose: item.purpose,
           remark: item.remark,
         })),
@@ -384,6 +505,7 @@ export const getPendingPRs = async (
         purpose: pr.purpose,
         notes: pr.notes,
         createdAt: pr.createdAt.toISOString(),
+        salesOrder: serializePRSalesOrder(pr),
         lastApproval: pr.approvals[0] ? {
           action: pr.approvals[0].action,
           comment: pr.approvals[0].comment,
@@ -392,7 +514,7 @@ export const getPendingPRs = async (
       };
     });
 
-    const responseData = { prs: mappedPRs };
+    const responseData = { prs: mappedPRs, queue };
     const responseString = JSON.stringify(responseData);
 
     console.log('Sending response:', {
@@ -418,7 +540,7 @@ export const getPendingPRs = async (
   }
 };
 
-// Approve PR
+// Approve PR (optional partial: itemDecisions per NEED_PURCHASE line đã duyệt cấp phòng)
 export const approvePR = async (
   request: AuthenticatedRequest,
   reply: FastifyReply
@@ -430,10 +552,23 @@ export const approvePR = async (
     }
 
     const { prId } = request.params as { prId: string };
-    const { comment } = (request.body as { comment?: string }) || {};
+    const {
+      comment,
+      itemDecisions,
+    } = (request.body as {
+      comment?: string;
+      itemDecisions?: Array<{
+        itemId: string;
+        outcome: DepartmentItemOutcomeValue;
+        note?: string;
+      }>;
+    }) || {};
 
     const pr = await prisma.purchaseRequest.findUnique({
-      where: { id: prId },
+      where: { id: prId, deletedAt: null },
+      include: {
+        items: { where: { deletedAt: null }, orderBy: { lineNo: 'asc' } },
+      },
     });
 
     if (!pr) {
@@ -444,20 +579,109 @@ export const approvePR = async (
       return reply.code(400).send({ error: 'PR is not pending approval' });
     }
 
-    // Update PR status
-    await prisma.purchaseRequest.update({
-      where: { id: prId },
-      data: {
-        status: 'BUYER_LEADER_PENDING' as any,
-      },
+    const decisionInput = new Map<string, { outcome: DepartmentItemOutcomeValue; note?: string }>();
+    for (const row of itemDecisions || []) {
+      if (!row?.itemId || !row?.outcome) continue;
+      if (!['APPROVED', 'REJECTED', 'ON_HOLD', 'REVISION_REQUIRED'].includes(row.outcome)) {
+        return reply.code(400).send({ error: `Outcome không hợp lệ: ${row.outcome}` });
+      }
+      decisionInput.set(row.itemId, { outcome: row.outcome, note: row.note });
+    }
+
+    const decidedAt = new Date();
+    const rowsWithOutcome: Array<{
+      id: string;
+      status: string;
+      branchItemOutcome: DepartmentItemOutcomeValue;
+      branchDecisionNote: string | null;
+      departmentItemOutcome: DepartmentItemOutcomeValue | null;
+      amount?: unknown;
+      qty?: unknown;
+      unitPrice?: unknown;
+      estimatedUnitPriceVnd?: unknown;
+    }> = [];
+
+    for (const item of pr.items) {
+      const st = String((item as { status?: string }).status || 'NEW');
+      let outcome: DepartmentItemOutcomeValue;
+      let note: string | null = null;
+
+      if (!itemEligibleForDepartmentOutcome(st)) {
+        outcome = 'APPROVED';
+      } else if (!itemEligibleForBranchLevelDecision(item)) {
+        outcome = 'APPROVED';
+      } else {
+        const d = decisionInput.get(item.id);
+        outcome = d?.outcome ?? 'APPROVED';
+        note = d?.note?.trim() ? d.note.trim() : null;
+        if (outcome === 'REJECTED' || outcome === 'REVISION_REQUIRED') {
+          if (!note) {
+            return reply.code(400).send({
+              error: `Dòng "${(item as { description?: string }).description ?? item.id}" cần lý do khi từ chối hoặc yêu cầu chỉnh sửa.`,
+            });
+          }
+        }
+      }
+
+      rowsWithOutcome.push({
+        id: item.id,
+        status: st,
+        branchItemOutcome: outcome,
+        branchDecisionNote: note,
+        departmentItemOutcome: (item as { departmentItemOutcome?: DepartmentItemOutcomeValue | null })
+          .departmentItemOutcome ?? null,
+        amount: item.amount,
+        qty: item.qty,
+        unitPrice: item.unitPrice,
+        estimatedUnitPriceVnd: (item as { estimatedUnitPriceVnd?: unknown }).estimatedUnitPriceVnd,
+      });
+    }
+
+    const hasActive = hasActivePurchasingAfterBranchDecisions(rowsWithOutcome);
+    const newTotal = sumPurchaseTotalAfterBranchDecisions(rowsWithOutcome);
+    const nextStatus = hasActive ? ('BUYER_LEADER_PENDING' as const) : ('BRANCH_MANAGER_REJECTED' as const);
+
+    const snapshotExisting =
+      pr.totalAmountSnapshot != null ? Number(pr.totalAmountSnapshot) : null;
+    const snapshotValue =
+      snapshotExisting != null && Number.isFinite(snapshotExisting)
+        ? snapshotExisting
+        : sumAllLinesSnapshot(pr.items as Parameters<typeof sumAllLinesSnapshot>[0]);
+
+    await prisma.$transaction(async (tx) => {
+      for (const row of rowsWithOutcome) {
+        if (!itemEligibleForDepartmentOutcome(row.status)) continue;
+        if (!itemEligibleForBranchLevelDecision({
+          status: row.status,
+          departmentItemOutcome: row.departmentItemOutcome,
+        })) {
+          continue;
+        }
+        await tx.purchaseRequestItem.update({
+          where: { id: row.id },
+          data: {
+            branchItemOutcome: row.branchItemOutcome as any,
+            branchDecisionNote: row.branchDecisionNote,
+            branchDecidedById: userId,
+            branchDecidedAt: decidedAt,
+          },
+        });
+      }
+      await tx.purchaseRequest.update({
+        where: { id: prId },
+        data: {
+          status: nextStatus as any,
+          totalAmount: newTotal,
+          totalAmountSnapshot: snapshotValue,
+        },
+      });
     });
 
-    // Create PR Approval record
     await prisma.pRApproval.create({
       data: {
         purchaseRequestId: prId,
         approverId: userId,
-        action: 'APPROVE',
+        action: hasActive ? 'APPROVE' : 'REJECT',
         comment: comment || null,
         companyId: pr.companyId || null,
       },
@@ -478,68 +702,73 @@ export const approvePR = async (
       select: { id: true, role: true },
     });
 
-    // Send notification to REQUESTOR: PR được GĐ CN duyệt
     if (requestor) {
-      const template = NotificationTemplates.PR_BRANCH_MANAGER_APPROVED(pr.prNumber);
-      await createNotification(getIO(), {
-        userId: requestor.id,
-        role: requestor.role,
-        type: 'PR_BRANCH_MANAGER_APPROVED',
-        title: template.title,
-        message: template.message,
-        relatedId: prId,
-        relatedType: 'PR',
-        metadata: { prNumber: pr.prNumber },
-        companyId: pr.companyId,
+      if (hasActive) {
+        const template = NotificationTemplates.PR_BRANCH_MANAGER_APPROVED(pr.prNumber);
+        await createNotification(getIO(), {
+          userId: requestor.id,
+          role: requestor.role,
+          type: 'PR_BRANCH_MANAGER_APPROVED',
+          title: template.title,
+          message: template.message,
+          relatedId: prId,
+          relatedType: 'PR',
+          metadata: { prNumber: pr.prNumber },
+          companyId: pr.companyId,
+        });
+        await markNotificationAsResolved(prId, 'PR', 'PR_DEPARTMENT_HEAD_APPROVED');
+      } else {
+        const template = NotificationTemplates.PR_RETURNED(pr.prNumber, comment || 'Từ chối tại cấp chi nhánh');
+        await createNotification(getIO(), {
+          userId: requestor.id,
+          role: requestor.role,
+          type: 'PR_RETURNED',
+          title: 'PR bị từ chối',
+          message: `PR ${pr.prNumber} không còn dòng được duyệt tại cấp chi nhánh.`,
+          relatedId: prId,
+          relatedType: 'PR',
+          metadata: { prNumber: pr.prNumber, reason: comment || '' },
+          companyId: pr.companyId,
+        });
+      }
+    }
+
+    if (hasActive) {
+      const buyerLeaders = await prisma.user.findMany({
+        where: { role: 'BUYER_LEADER', deletedAt: null },
+        select: { id: true, role: true },
       });
 
-      // Mark old notifications as resolved
-      await markNotificationAsResolved(prId, 'PR', 'PR_DEPARTMENT_HEAD_APPROVED');
+      for (const leader of buyerLeaders) {
+        const template = NotificationTemplates.PR_READY_FOR_ASSIGNMENT(pr.prNumber);
+        await createNotification(getIO(), {
+          userId: leader.id,
+          role: leader.role,
+          type: 'PR_READY_FOR_ASSIGNMENT',
+          title: template.title,
+          message: template.message,
+          relatedId: prId,
+          relatedType: 'PR',
+          metadata: { prNumber: pr.prNumber },
+          companyId: pr.companyId,
+        });
+      }
     }
 
-    // Send notification to DEPARTMENT_HEAD: PR được GĐ CN duyệt (info only)
-    if (departmentHead && departmentHead.id !== requestor?.id) {
-      const template = NotificationTemplates.PR_OVER_BUDGET_INFO(pr.prNumber);
-      // This is just for info, not action required
-    }
-
-    // Send notification to BUYER_LEADER: PR sẵn sàng phân công
-    const buyerLeaders = await prisma.user.findMany({
-      where: {
-        role: 'BUYER_LEADER',
-        deletedAt: null,
-      },
-      select: { id: true, role: true },
-    });
-
-    for (const leader of buyerLeaders) {
-      const template = NotificationTemplates.PR_READY_FOR_ASSIGNMENT(pr.prNumber);
-      await createNotification(getIO(), {
-        userId: leader.id,
-        role: leader.role,
-        type: 'PR_READY_FOR_ASSIGNMENT',
-        title: template.title,
-        message: template.message,
-        relatedId: prId,
-        relatedType: 'PR',
-        metadata: { prNumber: pr.prNumber },
-        companyId: pr.companyId,
-      });
-    }
-
-    // Mark old notifications as resolved
     await markNotificationAsResolved(prId, 'PR', 'PR_PENDING_APPROVAL_BRANCH');
 
-    // Audit log
     await auditUpdate(
       'purchase_requests',
       prId,
-      { status: pr.status },
-      { status: 'BUYER_LEADER_PENDING' as any, approvedBy: userId },
+      { status: pr.status, totalAmount: pr.totalAmount },
+      { status: nextStatus as any, totalAmount: newTotal, approvedBy: userId },
       { userId, companyId: pr.companyId || undefined }
     );
 
-    reply.send({ message: 'PR approved successfully' });
+    reply.send({
+      message: hasActive ? 'PR approved successfully' : 'PR rejected — no purchasing lines approved',
+      status: nextStatus,
+    });
   } catch (error: any) {
     console.error('Approve PR error:', error);
     reply.code(500).send({
@@ -1097,23 +1326,25 @@ export const rejectBudgetException = async (
     });
 
     // Get PR info for notifications
-    const pr = await prisma.purchaseRequest.findUnique({
-      where: { id: exception.purchaseRequestId },
-      include: {
-        requestor: {
-          select: { id: true, role: true },
-        },
-        supplierSelections: {
-          where: { deletedAt: null },
-          take: 1,
-          include: {
-            buyerLeader: {
-              select: { id: true, role: true },
-            },
+    const prNotifyInclude = {
+      requestor: {
+        select: { id: true, role: true },
+      },
+      supplierSelections: {
+        take: 1,
+        orderBy: { createdAt: 'desc' as const },
+        include: {
+          buyerLeader: {
+            select: { id: true, role: true },
           },
         },
       },
-    });
+    } satisfies Prisma.PurchaseRequestInclude;
+
+    const pr = await prisma.purchaseRequest.findUnique({
+      where: { id: exception.purchaseRequestId },
+      include: prNotifyInclude,
+    }) as Prisma.PurchaseRequestGetPayload<{ include: typeof prNotifyInclude }> | null;
 
     // Send notification to REQUESTOR: PR vượt ngân sách bị từ chối
     if (pr?.requestor) {
@@ -1278,6 +1509,7 @@ export const getPRHistory = async (
           orderBy: { createdAt: 'desc' },
           take: 1,
         },
+        salesPO: { select: prSalesPOSelect },
       },
       orderBy: {
         updatedAt: 'desc',
@@ -1298,6 +1530,7 @@ export const getPRHistory = async (
       requestor: pr.requestor,
       department: pr.department || pr.requestor.location || 'N/A',
       processedAt: pr.updatedAt.toISOString(),
+      salesOrder: serializePRSalesOrder(pr),
       lastApproval: pr.approvals[0] ? {
         action: pr.approvals[0].action,
         comment: pr.approvals[0].comment,
@@ -1359,6 +1592,7 @@ export const getBranchOverview = async (
         id: true,
         prNumber: true,
         department: true,
+        status: true,
         totalAmount: true,
         currency: true,
         type: true,
@@ -1449,7 +1683,7 @@ export const getBranchOverview = async (
         createdAt: pr.createdAt.toISOString(),
       }))
       .sort((a, b) => b.totalAmount - a.totalAmount)
-      .slice(0, 5);
+      .slice(0, 30);
 
     // Ensure arrays are always returned, even if empty
     const response = {

@@ -32,13 +32,32 @@ async function createDefaultUsers() {
           role: Role.REQUESTOR,
           location: 'HCM',
           companyId: null,
+          /** Trùng username tài khoản DEPARTMENT_HEAD tạo bên dưới — cần để gửi duyệt PR */
+          directManagerCode: 'department_head',
         },
       });
-      console.log('✅ Đã tạo tài khoản: requestor (REQUESTOR)');
+      console.log('✅ Đã tạo tài khoản: requestor (REQUESTOR, QLTT=department_head)');
+    }
+
+    if (!requestor.directManagerCode?.trim()) {
+      requestor = await prisma.user.update({
+        where: { id: requestor.id },
+        data: { directManagerCode: 'department_head' },
+      });
+      console.log('✅ Đã cập nhật requestor: direct_manager_code → department_head (gửi duyệt PR)');
+    }
+
+    if ((requestor.location || '').trim().toUpperCase() !== 'HCM') {
+      requestor = await prisma.user.update({
+        where: { id: requestor.id },
+        data: { location: 'HCM' },
+      });
+      console.log('✅ Đã cập nhật requestor: location → HCM');
     }
 
     // ============================================
     // 2. BUYER (Nhân viên mua hàng)
+    //    Mặc định + thêm 2 buyer: duc, nguyen
     // ============================================
     const existingBuyer = await prisma.user.findFirst({
       where: { username: 'buyer', deletedAt: null },
@@ -59,6 +78,46 @@ async function createDefaultUsers() {
         },
       });
       console.log('✅ Đã tạo tài khoản: buyer (BUYER)');
+    }
+
+    // Buyer 2: duc
+    const existingBuyerDuc = await prisma.user.findFirst({
+      where: { username: 'duc', deletedAt: null },
+    });
+    if (existingBuyerDuc) {
+      console.log('ℹ️  Tài khoản duc (BUYER) đã tồn tại');
+    } else {
+      await prisma.user.create({
+        data: {
+          username: 'duc',
+          email: 'duc@rmg.vn',
+          passwordHash: hashedPassword,
+          role: Role.BUYER,
+          location: 'HCM',
+          companyId: null,
+        },
+      });
+      console.log('✅ Đã tạo tài khoản: duc (BUYER)');
+    }
+
+    // Buyer 3: nguyen
+    const existingBuyerNguyen = await prisma.user.findFirst({
+      where: { username: 'nguyen', deletedAt: null },
+    });
+    if (existingBuyerNguyen) {
+      console.log('ℹ️  Tài khoản nguyen (BUYER) đã tồn tại');
+    } else {
+      await prisma.user.create({
+        data: {
+          username: 'nguyen',
+          email: 'nguyen@rmg.vn',
+          passwordHash: hashedPassword,
+          role: Role.BUYER,
+          location: 'HCM',
+          companyId: null,
+        },
+      });
+      console.log('✅ Đã tạo tài khoản: nguyen (BUYER)');
     }
 
     // ============================================
@@ -83,6 +142,30 @@ async function createDefaultUsers() {
         },
       });
       console.log('✅ Đã tạo tài khoản: buyer_leader (BUYER_LEADER)');
+    }
+
+    // ============================================
+    // 3b. BUYER_MANAGER (Trưởng phòng Mua hàng)
+    // ============================================
+    const existingBuyerManager = await prisma.user.findFirst({
+      where: { username: 'buyer_manager', deletedAt: null },
+    });
+    let buyerManagerUser;
+    if (existingBuyerManager) {
+      buyerManagerUser = existingBuyerManager;
+      console.log('ℹ️  Tài khoản buyer_manager đã tồn tại');
+    } else {
+      buyerManagerUser = await prisma.user.create({
+        data: {
+          username: 'buyer_manager',
+          email: 'buyer_manager@rmg.vn',
+          passwordHash: hashedPassword,
+          role: Role.BUYER_MANAGER,
+          location: 'HCM',
+          companyId: null,
+        },
+      });
+      console.log('✅ Đã tạo tài khoản: buyer_manager (BUYER_MANAGER)');
     }
 
     // ============================================
@@ -138,7 +221,7 @@ async function createDefaultUsers() {
     }
 
     // ============================================
-    // 6. BOD (Tổng giám đốc / Ban giám đốc)
+    // 6. BGD (Tổng giám đốc)
     // ============================================
     const existingBGD = await prisma.user.findFirst({
       where: { username: 'bgd', deletedAt: null },
@@ -158,10 +241,57 @@ async function createDefaultUsers() {
           companyId: null,
         },
       });
-      console.log('✅ Đã tạo tài khoản: bgd (BGD / BOD)');
+      console.log('✅ Đã tạo tài khoản: bgd (BGD)');
     }
 
-    // SYSTEM_ADMIN role đã được xóa khỏi enum - không còn tạo user với role này
+    // ============================================
+    // 7. SALES (Quản lý Customer PO và dự án)
+    // ============================================
+    const existingSales = await prisma.user.findFirst({
+      where: { username: 'sales', deletedAt: null },
+    });
+    let salesUser;
+    if (existingSales) {
+      salesUser = existingSales;
+      console.log('ℹ️  Tài khoản sales đã tồn tại');
+    } else {
+      salesUser = await prisma.user.create({
+        data: {
+          username: 'sales',
+          fullName: 'Duc',
+          email: 'sales@rmg.vn',
+          passwordHash: hashedPassword,
+          role: Role.SALES,
+          location: 'HCM',
+          companyId: null,
+        },
+      });
+      console.log('✅ Đã tạo tài khoản: sales (SALES)');
+    }
+
+    // ============================================
+    // 8. WAREHOUSE (Quản lý tồn kho)
+    // ============================================
+    const existingWarehouse = await prisma.user.findFirst({
+      where: { username: 'warehouse', deletedAt: null },
+    });
+    let warehouseUser;
+    if (existingWarehouse) {
+      warehouseUser = existingWarehouse;
+      console.log('ℹ️  Tài khoản warehouse đã tồn tại');
+    } else {
+      warehouseUser = await prisma.user.create({
+        data: {
+          username: 'warehouse',
+          email: 'warehouse@rmg.vn',
+          passwordHash: hashedPassword,
+          role: Role.WAREHOUSE,
+          location: 'HCM',
+          companyId: null,
+        },
+      });
+      console.log('✅ Đã tạo tài khoản: warehouse (WAREHOUSE)');
+    }
 
     // ============================================
     // TỔNG HỢP VÀ MAPPING VỚI GIAO DIỆN
@@ -194,6 +324,14 @@ async function createDefaultUsers() {
     console.log(`   Component: BuyerLeaderDashboard.tsx`);
     console.log(`   Mô tả: Dashboard cho trưởng nhóm mua hàng\n`);
 
+    console.log('🔵 3b. BUYER_MANAGER (Trưởng phòng Mua hàng)');
+    console.log(`   Username: ${buyerManagerUser.username}`);
+    console.log(`   Email: ${buyerManagerUser.email}`);
+    console.log(`   Role: ${buyerManagerUser.role}`);
+    console.log(`   Giao diện: /dashboard/buyer-manager`);
+    console.log(`   Component: BuyerManagerDashboard.tsx`);
+    console.log(`   Mô tả: Tổng quan phòng mua, đội Buyer, giám sát PR\n`);
+
     console.log('🔵 4. DEPARTMENT_HEAD (Trưởng phòng và Trưởng nhóm)');
     console.log(`   Username: ${departmentHead.username}`);
     console.log(`   Email: ${departmentHead.email}`);
@@ -211,26 +349,41 @@ async function createDefaultUsers() {
     console.log(`   Component: BranchManagerDashboard.tsx`);
     console.log(`   Mô tả: Dashboard cho giám đốc chi nhánh\n`);
 
-    console.log('🔵 6. BOD (Tổng giám đốc / Ban giám đốc)');
+    console.log('🔵 6. BGD (Tổng giám đốc)');
     console.log(`   Username: ${bgd.username}`);
     console.log(`   Email: ${bgd.email}`);
     console.log(`   Role: ${bgd.role}`);
     console.log(`   Giao diện: /dashboard/bgd`);
     console.log(`   Component: BGDDashboard.tsx`);
-    console.log(`   Mô tả: Dashboard cho tổng giám đốc / ban giám đốc\n`);
+    console.log(`   Mô tả: Dashboard cho tổng giám đốc\n`);
 
-    // SYSTEM_ADMIN role đã được xóa khỏi enum - không còn tạo user với role này
+    console.log('🔵 7. SALES (Quản lý Customer PO)');
+    console.log(`   Username: ${salesUser.username}`);
+    console.log(`   Email: ${salesUser.email}`);
+    console.log(`   Role: ${salesUser.role}`);
+    console.log(`   Giao diện: /dashboard/sales`);
+    console.log(`   Mô tả: Dashboard cho Sales - quản lý PO khách hàng và dự án\n`);
+
+    console.log('🔵 8. WAREHOUSE (Quản lý tồn kho)');
+    console.log(`   Username: ${warehouseUser.username}`);
+    console.log(`   Email: ${warehouseUser.email}`);
+    console.log(`   Role: ${warehouseUser.role}`);
+    console.log(`   Giao diện: /dashboard/warehouse`);
+    console.log(`   Mô tả: Lưới tồn kho — Inventory Management\n`);
 
     console.log('='.repeat(70));
     console.log('\n📝 TỔNG HỢP:');
-    console.log(`   - Tổng số tài khoản đã tạo: 6`);
+    console.log(`   - Tổng số tài khoản cốt lõi: 9 (+ buyer duc/nguyen nếu tạo)`);
     console.log(`   - REQUESTOR: 1 tài khoản (requestor)`);
     console.log(`   - BUYER: 1 tài khoản (buyer)`);
     console.log(`   - BUYER_LEADER: 1 tài khoản (buyer_leader)`);
+    console.log(`   - BUYER_MANAGER: 1 tài khoản (buyer_manager)`);
     console.log(`   - DEPARTMENT_HEAD: 1 tài khoản (department_head)`);
     console.log(`   - BRANCH_MANAGER: 1 tài khoản (branch_manager)`);
-    console.log(`   - BGD (BOD): 1 tài khoản (bgd)`);
-    console.log(`\n⚠️  Lưu ý: ACCOUNTANT và WAREHOUSE sẽ được tạo sau\n`);
+    console.log(`   - BGD: 1 tài khoản (bgd)`);
+    console.log(`   - SALES: 1 tài khoản (sales)`);
+    console.log(`   - WAREHOUSE: 1 tài khoản (warehouse)`);
+    console.log(`\n⚠️  Lưu ý: Thêm BUYER duc/nguyen, ACCOUNTANT nếu cần — xem script\n`);
 
     console.log('🔐 Password mặc định cho TẤT CẢ tài khoản: ' + defaultPassword);
     console.log('\n✅ Hoàn thành tạo tài khoản!\n');

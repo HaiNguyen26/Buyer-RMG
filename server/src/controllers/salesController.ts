@@ -2,11 +2,18 @@ import { FastifyReply } from 'fastify';
 import { prisma, findManyWithFilters, findOneWithFilters } from '../config/database';
 import { AuthenticatedRequest } from '../middleware/auth';
 import { auditCreate, auditUpdate } from '../utils/audit';
+import {
+  allocateNextCounter,
+  peekNextCounter,
+  scanMaxSalesPOSuffix,
+  soSequenceKey,
+} from '../utils/documentSequence';
 import { z } from 'zod';
 
 // Validation schemas
 const createSalesPOSchema = z.object({
-  salesPONumber: z.string().min(1),
+  /** Gửi từ UI preview; server luôn cấp số mới trong DB để tránh trùng / race */
+  salesPONumber: z.string().min(1).optional(),
   customerId: z.string().uuid(),
   projectName: z.string().min(1),
   projectCode: z.string().optional(),
@@ -17,45 +24,25 @@ const createSalesPOSchema = z.object({
   poDescription: z.string().optional(),
   internalNotes: z.string().optional(),
   currency: z.string().default('VND'),
-  effectiveDate: z.string().datetime().optional(),
+  effectiveDate: z.string().optional(), // PO Date (ISO or YYYY-MM-DD)
   notes: z.string().optional(),
-  action: z.enum(['SAVE_DRAFT', 'ACTIVATE']).default('SAVE_DRAFT'),
+  action: z.enum(['SAVE_DRAFT', 'ACTIVATE']).default('ACTIVATE'),
+  // Section 3–5
+  projectManager: z.string().optional(),
+  salesUserId: z.string().uuid().optional().nullable(),
+  deliveryDeadline: z.string().optional(),
+  paymentTerms: z.string().optional(),
+  advancePercent: z.number().min(0).max(100).optional(),
+  projectDescription: z.string().optional(),
 });
 
 const updateSalesPOSchema = createSalesPOSchema.partial();
 
-// Helper function to generate Sales PO Number
-const generateSalesPONumber = async () => {
+const generateSalesPONumberPreview = async () => {
   const year = new Date().getFullYear();
-  const prefix = `SO-${year}-`;
-  
-  // Find all existing Sales POs with this prefix
-  const existingPOs = await prisma.salesPO.findMany({
-    where: { salesPONumber: { startsWith: prefix } },
-    select: { salesPONumber: true },
-  });
-  
-  // Extract sequence numbers and find the next available one
-  const existingSequences = existingPOs
-    .map(po => {
-      const match = po.salesPONumber.match(/-(\d{3})$/);
-      return match ? parseInt(match[1], 10) : 0;
-    })
-    .filter(num => num > 0)
-    .sort((a, b) => b - a);
-  
-  // Find the first available sequence number starting from 001
-  let nextSeq = 1;
-  for (const seq of existingSequences) {
-    if (seq === nextSeq) {
-      nextSeq++;
-    } else if (seq > nextSeq) {
-      break;
-    }
-  }
-  
-  const seq = String(nextSeq).padStart(3, '0');
-  return `${prefix}${seq}`;
+  const key = soSequenceKey(year);
+  const next = await peekNextCounter(prisma, key, () => scanMaxSalesPOSuffix(prisma, year));
+  return `SO-${year}-${String(next).padStart(3, '0')}`;
 };
 
 // Get Next Sales PO Number (preview)
@@ -67,7 +54,7 @@ export const getNextSalesPONumber = async (
     const userId = request.user?.userId;
     if (!userId) return reply.code(401).send({ error: 'Unauthorized' });
 
-    const salesPONumber = await generateSalesPONumber();
+    const salesPONumber = await generateSalesPONumberPreview();
     reply.send({ salesPONumber });
   } catch (error: any) {
     console.error('Get next Sales PO number error:', error);
@@ -239,33 +226,37 @@ export const getSalesDashboard = async (
   }
 };
 
-// Get Sales POs List
+// Get Sales POs List (SALES role: xem tất cả; role khác: chỉ POs của mình)
 export const getSalesPOs = async (
   request: AuthenticatedRequest,
   reply: FastifyReply
 ) => {
   try {
     const userId = request.user?.userId;
-    const { status, customerId, search } = request.query as any;
+    const role = request.user?.role;
+    const { status, customerId, search, dateFrom, dateTo } = request.query as any;
 
-    const where: any = {
-      salesUserId: userId,
-      deletedAt: null,
-    };
-
-    if (status) {
-      where.status = status;
+    const where: any = { deletedAt: null };
+    if (role !== 'SALES') {
+      where.salesUserId = userId;
     }
-
-    if (customerId) {
-      where.customerId = customerId;
+    if (status) where.status = status;
+    if (customerId) where.customerId = customerId;
+    if (dateFrom || dateTo) {
+      where.createdAt = {};
+      if (dateFrom) (where.createdAt as any).gte = new Date(dateFrom);
+      if (dateTo) {
+        const end = new Date(dateTo); end.setHours(23, 59, 59, 999);
+        (where.createdAt as any).lte = end;
+      }
     }
-
     if (search) {
       where.OR = [
         { salesPONumber: { contains: search, mode: 'insensitive' } },
+        { customerPONumber: { contains: search, mode: 'insensitive' } },
         { projectName: { contains: search, mode: 'insensitive' } },
         { projectCode: { contains: search, mode: 'insensitive' } },
+        { customer: { name: { contains: search, mode: 'insensitive' } } },
       ];
     }
 
@@ -273,13 +264,21 @@ export const getSalesPOs = async (
       where,
       include: {
         customer: true,
+        salesUser: { select: { id: true, username: true, fullName: true } },
         purchaseRequests: {
-          include: {
+          where: { deletedAt: null },
+          select: {
+            id: true,
+            items: {
+              where: { deletedAt: null },
+              select: { status: true },
+            },
             payments: {
               where: {
                 status: 'DONE',
                 deletedAt: null,
               },
+              select: { amount: true, status: true },
             },
           },
         },
@@ -291,17 +290,29 @@ export const getSalesPOs = async (
 
     const result = salesPOs.map((po) => {
       let actualCost = 0;
+      let totalItems = 0;
+      let itemsCompleted = 0;
+      const prCount = po.purchaseRequests.length;
       po.purchaseRequests.forEach((pr) => {
         pr.payments.forEach((payment) => {
           if (payment.status === 'DONE') {
             actualCost += Number(payment.amount);
           }
         });
+        pr.items.forEach((it) => {
+          totalItems += 1;
+          if (it.status === 'SUPPLIER_SELECTED') {
+            itemsCompleted += 1;
+          }
+        });
       });
-
+      const salesUser = (po as any).salesUser;
+      const itemProgressPercent =
+        totalItems === 0 ? 0 : Math.round((itemsCompleted / totalItems) * 100);
       return {
         id: po.id,
         salesPONumber: po.salesPONumber,
+        customerPONumber: po.customerPONumber,
         customer: {
           id: po.customer.id,
           name: po.customer.name,
@@ -317,6 +328,11 @@ export const getSalesPOs = async (
         remainingBudget: Number(po.amount) - actualCost,
         createdAt: po.createdAt,
         updatedAt: po.updatedAt,
+        salesOwner: salesUser ? (salesUser.fullName || salesUser.username) : null,
+        prCount,
+        totalItems,
+        itemsCompleted,
+        itemProgressPercent,
       };
     });
 
@@ -330,7 +346,7 @@ export const getSalesPOs = async (
   }
 };
 
-// Get Sales PO by ID
+// Get Sales PO by ID (SALES role: xem bất kỳ; role khác: chỉ PO của mình)
 export const getSalesPOById = async (
   request: AuthenticatedRequest,
   reply: FastifyReply
@@ -338,15 +354,17 @@ export const getSalesPOById = async (
   try {
     const { id } = request.params as { id: string };
     const userId = request.user?.userId;
+    const role = request.user?.role;
 
     const salesPO = await prisma.salesPO.findFirst({
       where: {
         id,
-        salesUserId: userId,
         deletedAt: null,
+        ...(role !== 'SALES' ? { salesUserId: userId } : {}),
       },
       include: {
         customer: true,
+        salesUser: { select: { id: true, username: true, fullName: true } },
         purchaseRequests: {
           include: {
             requestor: {
@@ -426,25 +444,41 @@ export const createSalesPO = async (
     }
 
     const data = validation.data;
+    const year = new Date().getFullYear();
 
-    const salesPO = await prisma.salesPO.create({
-      data: {
-        salesPONumber: data.salesPONumber,
-        customerId: data.customerId,
-        projectName: data.projectName,
-        projectCode: data.projectCode || data.customerPONumber,
-        amount: data.totalPOValue || data.amount,
-        currency: data.currency,
-        effectiveDate: data.effectiveDate ? new Date(data.effectiveDate) : new Date(),
-        status: data.action === 'ACTIVATE' ? 'ACTIVE' : 'DRAFT',
-        salesUserId: userId,
-        companyId: null, // TODO: Get from request context
-        notes: data.internalNotes || data.notes,
+    const salesPO = await prisma.$transaction(
+      async (tx) => {
+        const key = soSequenceKey(year);
+        const seq = await allocateNextCounter(tx, key, () => scanMaxSalesPOSuffix(tx, year));
+        const salesPONumber = `SO-${year}-${String(seq).padStart(3, '0')}`;
+        return tx.salesPO.create({
+          data: {
+            salesPONumber,
+            customerPONumber: data.customerPONumber || null,
+            customerId: data.customerId,
+            projectName: data.projectName,
+            projectCode: data.projectCode || null,
+            amount: data.totalPOValue ?? (data as any).amount,
+            currency: data.currency,
+            effectiveDate: data.effectiveDate ? new Date(data.effectiveDate) : new Date(),
+            status: data.action === 'ACTIVATE' ? 'ACTIVE' : 'DRAFT',
+            salesUserId: data.salesUserId ?? userId,
+            companyId: null,
+            notes: data.internalNotes || data.notes,
+            projectManager: data.projectManager || null,
+            deliveryDeadline: data.deliveryDeadline ? new Date(data.deliveryDeadline) : null,
+            paymentTerms: data.paymentTerms || null,
+            advancePercent: data.advancePercent ?? null,
+            projectDescription: data.projectDescription || null,
+          },
+          include: {
+            customer: true,
+            salesUser: { select: { id: true, username: true, fullName: true } },
+          },
+        });
       },
-      include: {
-        customer: true,
-      },
-    });
+      { maxWait: 10000, timeout: 30000 }
+    );
 
     await auditCreate(
       'sales_pos',
@@ -636,12 +670,13 @@ export const getSalesPODetail = async (
   try {
     const { id } = request.params as { id: string };
     const userId = request.user?.userId;
+    const role = request.user?.role;
 
     const salesPO = await prisma.salesPO.findFirst({
       where: {
         id,
-        salesUserId: userId,
         deletedAt: null,
+        ...(role !== 'SALES' ? { salesUserId: userId } : {}),
       },
       include: {
         customer: true,
@@ -714,6 +749,241 @@ export const getSalesPODetail = async (
     });
   } catch (error: any) {
     console.error('Get sales PO detail error:', error);
+    reply.code(500).send({
+      error: 'Internal server error',
+      message: error.message,
+    });
+  }
+};
+
+/** Full SO workspace: overview metrics, PR rows, cost lines, activity (Sales / owner). */
+export const getSalesPOWorkspace = async (
+  request: AuthenticatedRequest,
+  reply: FastifyReply
+) => {
+  try {
+    const { id } = request.params as { id: string };
+    const userId = request.user?.userId;
+    const role = request.user?.role;
+    if (!userId) {
+      return reply.code(401).send({ error: 'Unauthorized' });
+    }
+
+    const salesPO = await prisma.salesPO.findFirst({
+      where: {
+        id,
+        deletedAt: null,
+        ...(role !== 'SALES' ? { salesUserId: userId } : {}),
+      },
+      include: {
+        customer: true,
+        salesUser: {
+          select: { id: true, username: true, fullName: true, email: true },
+        },
+        purchaseRequests: {
+          where: { deletedAt: null },
+          include: {
+            requestor: {
+              select: { id: true, username: true, fullName: true, email: true },
+            },
+            items: {
+              where: { deletedAt: null },
+              select: {
+                id: true,
+                lineNo: true,
+                description: true,
+                partNo: true,
+                qty: true,
+                unit: true,
+                unitPrice: true,
+                amount: true,
+                status: true,
+              },
+              orderBy: { lineNo: 'asc' },
+            },
+            assignments: {
+              where: { deletedAt: null },
+              orderBy: { createdAt: 'desc' },
+              take: 1,
+              include: {
+                buyer: { select: { id: true, username: true, fullName: true } },
+              },
+            },
+            supplier: { select: { id: true, name: true } },
+            payments: { where: { deletedAt: null }, orderBy: { createdAt: 'desc' } },
+          },
+          orderBy: { createdAt: 'desc' },
+        },
+      },
+    });
+
+    if (!salesPO) {
+      return reply.code(404).send({ error: 'Sales PO not found' });
+    }
+
+    let totalCost = 0;
+    let totalItems = 0;
+    let itemsCompleted = 0;
+
+    const purchaseRows = salesPO.purchaseRequests.map((pr) => {
+      let prCost = 0;
+      pr.payments.forEach((p) => {
+        if (p.status === 'DONE') {
+          const a = Number(p.amount);
+          prCost += a;
+          totalCost += a;
+        }
+      });
+      const itCount = pr.items.length;
+      const itDone = pr.items.filter((i) => i.status === 'SUPPLIER_SELECTED').length;
+      totalItems += itCount;
+      itemsCompleted += itDone;
+      const prProgress = itCount === 0 ? 0 : Math.round((itDone / itCount) * 100);
+      const assign = pr.assignments[0];
+      const buyerLabel = assign?.buyer
+        ? assign.buyer.fullName || assign.buyer.username
+        : '—';
+
+      return {
+        id: pr.id,
+        prNumber: pr.prNumber,
+        createdAt: pr.createdAt,
+        requestorName: pr.requestor?.fullName || pr.requestor?.username || '—',
+        itemCount: itCount,
+        status: pr.status,
+        buyerName: buyerLabel,
+        progressPercent: prProgress,
+        actualCost: prCost,
+      };
+    });
+
+    const itemProgressPercent =
+      totalItems === 0 ? 0 : Math.round((itemsCompleted / totalItems) * 100);
+    const waitingPercent = totalItems === 0 ? 100 : Math.max(0, 100 - itemProgressPercent);
+
+    const costLines: Array<{
+      prNumber: string;
+      part: string;
+      qty: string;
+      cost: number;
+      source: string;
+      currency: string;
+    }> = [];
+
+    for (const pr of salesPO.purchaseRequests) {
+      for (const it of pr.items) {
+        const qtyNum = Number(it.qty);
+        const amt =
+          it.amount != null
+            ? Number(it.amount)
+            : it.unitPrice != null
+              ? qtyNum * Number(it.unitPrice)
+              : 0;
+        const isStockLike =
+          (it.unitPrice != null && Number(it.unitPrice) === 0) ||
+          (it.amount != null && Number(it.amount) === 0);
+        costLines.push({
+          prNumber: pr.prNumber,
+          part: it.partNo ? `${it.partNo} — ${it.description}` : it.description,
+          qty: `${qtyNum}${it.unit ? ` ${it.unit}` : ''}`,
+          cost: amt,
+          source: isStockLike ? 'Stock' : 'Purchase',
+          currency: salesPO.currency,
+        });
+      }
+    }
+
+    const activities: Array<{ at: string; message: string; kind: string }> = [];
+
+    activities.push({
+      at: salesPO.createdAt.toISOString(),
+      kind: 'so',
+      message: `SO ${salesPO.salesPONumber} được tạo`,
+    });
+
+    for (const pr of salesPO.purchaseRequests) {
+      activities.push({
+        at: pr.createdAt.toISOString(),
+        kind: 'pr',
+        message: `PR ${pr.prNumber} đã tạo`,
+      });
+      const asn = pr.assignments[0];
+      if (asn) {
+        const bn = asn.buyer.fullName || asn.buyer.username;
+        activities.push({
+          at: asn.createdAt.toISOString(),
+          kind: 'assign',
+          message: `PR ${pr.prNumber} — giao Buyer ${bn}`,
+        });
+      }
+      if (pr.supplier) {
+        activities.push({
+          at: pr.updatedAt.toISOString(),
+          kind: 'supplier',
+          message: `PR ${pr.prNumber} — NCC: ${pr.supplier.name}`,
+        });
+      }
+      const donePayments = pr.payments.filter((p) => p.status === 'DONE');
+      for (const p of donePayments) {
+        activities.push({
+          at: (p.updatedAt || p.createdAt).toISOString(),
+          kind: 'payment',
+          message: `PR ${pr.prNumber} — thanh toán ${Number(p.amount).toLocaleString('vi-VN')} ${salesPO.currency}`,
+        });
+      }
+    }
+
+    activities.sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime());
+
+    const contract = Number(salesPO.amount);
+    const budgetUsagePercent =
+      contract > 0 ? Math.min(100, Math.round((totalCost / contract) * 100)) : 0;
+
+    const now = new Date();
+    const deadline = salesPO.deliveryDeadline ? new Date(salesPO.deliveryDeadline) : null;
+    const isDelayed =
+      deadline != null && deadline < now && salesPO.status !== 'CLOSED';
+
+    reply.send({
+      salesPO: {
+        id: salesPO.id,
+        salesPONumber: salesPO.salesPONumber,
+        customerPONumber: salesPO.customerPONumber,
+        projectName: salesPO.projectName,
+        projectCode: salesPO.projectCode,
+        status: salesPO.status,
+        amount: contract,
+        currency: salesPO.currency,
+        effectiveDate: salesPO.effectiveDate,
+        deliveryDeadline: salesPO.deliveryDeadline,
+        notes: salesPO.notes,
+        projectDescription: salesPO.projectDescription,
+        customer: salesPO.customer,
+        salesOwner: salesPO.salesUser
+          ? {
+              id: salesPO.salesUser.id,
+              name: salesPO.salesUser.fullName || salesPO.salesUser.username,
+              email: salesPO.salesUser.email,
+            }
+          : null,
+      },
+      overview: {
+        totalPR: salesPO.purchaseRequests.length,
+        totalItems,
+        itemsCompleted,
+        itemProgressPercent,
+        waitingPercent,
+        totalCost,
+        contractValue: contract,
+        budgetUsagePercent,
+        isDelayed,
+      },
+      purchaseRequests: purchaseRows,
+      costLines,
+      activityLog: activities,
+    });
+  } catch (error: any) {
+    console.error('Get sales PO workspace error:', error);
     reply.code(500).send({
       error: 'Internal server error',
       message: error.message,

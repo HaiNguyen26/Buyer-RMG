@@ -10,6 +10,7 @@ import {
   closeSalesPO,
   reopenSalesPO,
   getSalesPODetail,
+  getSalesPOWorkspace,
   getCostOverview,
   exportReports,
 } from '../controllers/salesController';
@@ -25,6 +26,7 @@ export default async function salesRoutes(fastify: FastifyInstance) {
   fastify.get('/sales-pos', getSalesPOs);
   fastify.get('/sales-pos/next-number', getNextSalesPONumber);
   fastify.get('/sales-pos/:id', getSalesPOById);
+  fastify.get('/sales-pos/:id/workspace', getSalesPOWorkspace);
   fastify.post('/sales-pos', createSalesPO);
   fastify.put('/sales-pos/:id', updateSalesPO);
   fastify.post('/sales-pos/:id/close', closeSalesPO);

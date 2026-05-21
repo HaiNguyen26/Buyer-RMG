@@ -26,6 +26,29 @@ export interface BuyerManagerDashboardData {
     avgLeadTime: number;
     avgPriceTrend: number;
     buyerEfficiency: number;
+    totalPRValue?: number;
+    overBudgetRate?: number;
+    riskyPOCount?: number;
+    completionRate?: number;
+    prsReceived?: number;
+    prsWithActivePo?: number;
+    strategicSupplierCount?: number;
+    problematicSupplierCount?: number;
+    overloadedBuyerCount?: number;
+    idleBuyerCount?: number;
+    workloadOverloadThreshold?: number;
+    workloadIdleThreshold?: number;
+    prValueBranchApproved?: number;
+    prValueBuyerProcessing?: number;
+    monthlySpendPct?: number;
+    leadTimeFunnel?: Array<{
+      key: string;
+      label: string;
+      days: number;
+      isBottleneck?: boolean;
+    }>;
+    riskHeatLevel?: 'low' | 'medium' | 'high';
+    overBudgetPRCount?: number;
   };
   buyerPerformance: Array<{
     name: string;
@@ -41,6 +64,8 @@ export interface BuyerManagerDashboardData {
 }
 
 // Team Management - Buyer Team
+export type BuyerWorkloadBand = 'overload' | 'normal' | 'idle';
+
 export interface BuyerTeamMember {
   id: string;
   name: string;
@@ -49,7 +74,11 @@ export interface BuyerTeamMember {
   role: 'BUYER' | 'BUYER_LEADER';
   purchaseTypes: Array<'DOMESTIC' | 'OVERSEA' | 'SERVICE'>; // Loại mua chuyên biệt
   activePRs: number; // Số PR đang xử lý
-  avgLeadTime: number; // Lead time trung bình (ngày)
+  /** Ngày TB xử lý PR đang mở (từ createdAt → nay) — đồng bộ API avgProcessingTime / avgLeadTimeDays */
+  avgLeadTime: number;
+  /** % tải so với capacity (API team-management) */
+  workloadPercent?: number;
+  workloadBand?: BuyerWorkloadBand;
   overBudgetRate: number; // Tỷ lệ over-budget (%)
   // KPI Metrics
   onTimeRate: number; // % PR đúng hạn
@@ -67,6 +96,8 @@ export interface TeamManagementData {
   buyers: number;
   avgEfficiency: number;
   totalWorkload: number;
+  /** Capacity PR/buyer dùng tính workloadPercent (mặc định 10) */
+  workloadCapacityPerBuyer?: number;
   members: BuyerTeamMember[];
 }
 
@@ -289,6 +320,24 @@ export const buyerManagerService = {
   getAllPRs: async (status?: string): Promise<any> => {
     const params = status ? { status } : {};
     const response = await api.get('/prs', { params });
+    return response.data;
+  },
+
+  // PO Approval — Trưởng phòng Mua hàng
+  getPOsPendingApproval: async (params?: { queue?: string }) => {
+    const response = await api.get('/po/pending-approval', { params });
+    return response.data;
+  },
+  getPODetailForApproval: async (poId: string) => {
+    const response = await api.get(`/po/${poId}/review`);
+    return response.data;
+  },
+  approvePO: async (poId: string) => {
+    const response = await api.post(`/po/${poId}/approve`);
+    return response.data;
+  },
+  rejectPO: async (poId: string, reason: string) => {
+    const response = await api.post(`/po/${poId}/reject`, { reason });
     return response.data;
   },
 };

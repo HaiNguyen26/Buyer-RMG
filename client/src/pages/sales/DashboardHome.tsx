@@ -59,9 +59,9 @@ const DashboardHome = () => {
   return (
     <div className="p-6 space-y-6 relative" style={{ backgroundColor: 'transparent' }}>
       {/* Header */}
-      <div className="slide-right-title">
-        <h1 className="text-3xl font-bold text-slate-900">Sales Dashboard</h1>
-        <p className="text-slate-600 mt-1 font-normal">Tổng quan nhanh về Sales PO và ngân sách</p>
+      <div className="page-banner page-banner-tint-slate slide-right-title">
+        <h1 className="page-banner-title">Sales Dashboard</h1>
+        <p className="page-banner-desc">Tổng quan nhanh về Sales PO và ngân sách</p>
       </div>
 
       {/* 4 Chỉ số vàng */}
@@ -314,7 +314,7 @@ const DashboardHome = () => {
                             : 'bg-slate-100 text-slate-800'
                         }`}
                       >
-                        {po.status === 'ACTIVE' ? 'Active' : 'Closed'}
+                        {po.status === 'ACTIVE' ? 'Đang hoạt động' : 'Đã đóng'}
                       </span>
                     </td>
                   </tr>

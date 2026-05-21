@@ -1,6 +1,8 @@
 import { useQuery } from '@tanstack/react-query';
-import { Bell, ClipboardCheck, MessageSquare, Clock, AlertCircle } from 'lucide-react';
+import { Bell, ClipboardCheck, MessageSquare, Clock } from 'lucide-react';
 import { branchManagerService } from '../../services/branchManagerService';
+import { BranchManagerPageHero } from '../../components/BranchManagerPageHero';
+import { branchManagerPageStackClass, branchManagerPanelCardClass } from '../../constants/branchManagerLayout';
 
 const Notifications = () => {
   const { data: notificationsData, isLoading, error } = useQuery({
@@ -39,7 +41,7 @@ const Notifications = () => {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-slate-50 p-6">
+      <div className="flex min-h-0 w-full min-w-0 flex-1 flex-col py-6">
         <div className="animate-pulse space-y-4">
           <div className="h-8 bg-slate-200 rounded w-64"></div>
           <div className="space-y-3">
@@ -54,7 +56,7 @@ const Notifications = () => {
 
   if (error) {
     return (
-      <div className="min-h-screen bg-slate-50 p-6">
+      <div className="flex min-h-0 w-full min-w-0 flex-1 flex-col py-6">
         <div className="bg-red-50 border border-red-200 rounded-soft p-4">
           <p className="text-red-800 font-medium">Lỗi khi tải dữ liệu</p>
           <p className="text-red-600 text-sm mt-1">{error instanceof Error ? error.message : 'Vui lòng thử lại sau'}</p>
@@ -66,27 +68,33 @@ const Notifications = () => {
   const unreadCount = notificationsData?.notifications.filter((n: any) => !n.read).length || 0;
 
   return (
-    <div className="min-h-screen bg-slate-50 p-6 space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900">Notifications</h1>
-          <p className="text-sm text-slate-500 mt-1">Nhận thông báo cần hành động</p>
-        </div>
-        {unreadCount > 0 && (
-          <div className="px-4 py-2 bg-blue-100 text-blue-700 rounded-soft-lg font-semibold">
-            {unreadCount} thông báo chưa đọc
-          </div>
-        )}
+    <div className={`flex min-h-0 w-full min-w-0 flex-1 flex-col ${branchManagerPageStackClass}`}>
+      <div className="shrink-0 pb-2">
+        <BranchManagerPageHero
+          kicker="Giám đốc chi nhánh · Thông báo"
+          title="Thông báo"
+          description="Nhận thông báo cần hành động — PR mới, PR trả, PR khẩn."
+          Icon={Bell}
+          tint="ocean"
+          regionLabel="Thông báo"
+          rightSlot={
+            unreadCount > 0 ? (
+              <div className="rounded-xl border border-white/25 bg-white/15 px-3 py-2 text-center shadow-sm backdrop-blur-sm">
+                <p className="text-[10px] font-semibold uppercase tracking-wide text-white/70">Chưa đọc</p>
+                <p className="text-lg font-bold tabular-nums text-white">{unreadCount}</p>
+              </div>
+            ) : null
+          }
+        />
       </div>
 
       {/* Notifications List */}
-      <div className="space-y-3">
+      <div className="flex min-w-0 flex-col gap-3">
         {notificationsData?.notifications && notificationsData.notifications.length > 0 ? (
           notificationsData.notifications.map((notification: any) => (
             <div
               key={notification.id}
-              className={`bg-white rounded-soft shadow-soft p-4 card-hover transition-all ${
+              className={`${branchManagerPanelCardClass} !p-4 card-hover transition-all ${
                 !notification.read ? 'ring-2 ring-blue-200' : ''
               } ${getNotificationColor(notification.type)}`}
             >
@@ -127,7 +135,7 @@ const Notifications = () => {
             </div>
           ))
         ) : (
-          <div className="bg-white rounded-soft shadow-soft border border-slate-200 p-8 text-center">
+          <div className={`${branchManagerPanelCardClass} py-10 text-center`}>
             <Bell className="w-12 h-12 text-slate-400 mx-auto mb-4" strokeWidth={2} />
             <p className="text-slate-600 font-normal">Không có thông báo nào</p>
           </div>

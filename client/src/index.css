@@ -1,6 +1,33 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800;900&display=swap');
 
 @import "tailwindcss";
+
+/* Donut tỷ trọng NCC (Compare Award): Tailwind v4 build có thể không lấy animation từ tailwind.config.js — định nghĩa tại đây để chắc chắn có xoáy một vòng. */
+@keyframes ncc-share-donut-spin-once {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@layer utilities {
+  .animate-ncc-share-donut-spin-once {
+    animation: ncc-share-donut-spin-once 1.35s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+    transform-origin: center;
+    will-change: transform;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-ncc-share-donut-spin-once {
+    animation: none;
+    transform: rotate(0deg);
+    will-change: auto;
+  }
+}
 
 @layer base {
   * {
@@ -9,15 +36,20 @@
     box-sizing: border-box;
   }
   
-  html, body {
+  /**
+   * overflow-x: hidden từng làm position:sticky trên header dashboard không bám viewport
+   * khi cuộn document. clip cắt tràn ngang tương tự nhưng không tạo scrollport kiểu đó (CSS Overflow 3).
+   */
+  html,
+  body {
     width: 100%;
     height: 100%;
-    overflow-x: hidden;
+    overflow-x: clip;
   }
   
   body {
     @apply bg-white text-slate-900;
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'San Francisco', system-ui, sans-serif;
+    font-family: 'Plus Jakarta Sans', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'San Francisco', system-ui, sans-serif;
     font-weight: 400;
   }
   
@@ -49,6 +81,398 @@
     @apply font-bold text-slate-900;
     font-weight: 700;
     letter-spacing: -0.02em;
+  }
+}
+
+/* Banner trang — glassmorphism + gradient hiện đại (đồng bộ app) */
+@layer components {
+  /* Trưởng phòng — khung bảng ~6 dòng Breathable (~484px cao); tren man thap clamp theo `dvh` de khong bi flex + overflow-hidden cat noi dung */
+  .department-head-table-scroll-viewport {
+    min-width: 0;
+    width: 100%;
+    max-width: 100%;
+    min-height: max(248px, min(484px, 65dvh));
+    max-height: max(248px, min(484px, 65dvh));
+    overflow-x: auto;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* Theo phien ban PRApproval: scrollbar-hide tach rieng — bang xuat kho dung scrollbar mong de thay cuon ngang/doc */
+  .department-head-table-scroll-viewport--scrollbars-thin {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(148 163 184 / 0.85) transparent;
+  }
+
+  .department-head-table-scroll-viewport--scrollbars-thin::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  .department-head-table-scroll-viewport--scrollbars-thin::-webkit-scrollbar-thumb {
+    border-radius: 9999px;
+    background-color: rgb(148 163 184 / 0.72);
+  }
+
+  .department-head-table-scroll-viewport--scrollbars-thin::-webkit-scrollbar-track {
+    background-color: transparent;
+  }
+
+  /**
+   * Buyer workspace — cùng mô típ Dept Head (~65dvh clamp) nhưng ~10 × 72px + thead (~3rem);
+   * không dùng 92vh (nuốt cả chiều cao viewport → footer thẻ dính mép dưới).
+   */
+  .buyer-workspace-table-scroll-viewport {
+    min-width: 0;
+    width: 100%;
+    max-width: 100%;
+    min-height: max(248px, min(calc(3rem + 72px * 10), 56dvh));
+    max-height: max(248px, min(calc(3rem + 72px * 10), 56dvh));
+    overflow-x: auto;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .buyer-workspace-table-scroll-viewport--thin {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(148 163 184 / 0.85) transparent;
+  }
+
+  .buyer-workspace-table-scroll-viewport--thin::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  .buyer-workspace-table-scroll-viewport--thin::-webkit-scrollbar-thumb {
+    border-radius: 9999px;
+    background-color: rgb(148 163 184 / 0.72);
+  }
+
+  .buyer-workspace-table-scroll-viewport--thin::-webkit-scrollbar-track {
+    background-color: transparent;
+  }
+
+  /**
+   * RFQ chi tiết — tối đa ~10 dòng (72px) + thead; không ép min-height → ít dòng thì khung co theo bảng.
+   */
+  .buyer-rfq-items-table-viewport {
+    min-width: 0;
+    width: 100%;
+    max-width: 100%;
+    min-height: 0;
+    max-height: max(12rem, min(calc(3rem + 72px * 10), 56dvh));
+    overflow-x: auto;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .page-banner {
+    @apply relative isolate overflow-hidden rounded-2xl px-4 py-3 sm:px-5 sm:py-3.5;
+    border: 1px solid rgba(255, 255, 255, 0.72);
+    backdrop-filter: blur(22px) saturate(175%);
+    -webkit-backdrop-filter: blur(22px) saturate(175%);
+    box-shadow:
+      0 12px 40px -16px rgba(15, 23, 42, 0.14),
+      0 6px 20px -10px rgba(99, 102, 241, 0.1),
+      inset 0 1px 1px 0 rgba(255, 255, 255, 0.88),
+      inset 0 0 0 1px rgba(255, 255, 255, 0.32);
+    background: linear-gradient(
+      135deg,
+      rgba(255, 255, 255, 0.82) 0%,
+      rgba(241, 245, 255, 0.72) 42%,
+      rgba(224, 242, 254, 0.58) 100%
+    );
+  }
+
+  .page-banner::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: linear-gradient(
+      118deg,
+      rgba(255, 255, 255, 0.58) 0%,
+      rgba(255, 255, 255, 0) 40%,
+      rgba(139, 92, 246, 0.09) 72%,
+      rgba(59, 130, 246, 0.11) 100%
+    );
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .page-banner::after {
+    content: '';
+    position: absolute;
+    width: 120%;
+    height: 55%;
+    left: -12%;
+    top: -42%;
+    border-radius: 50%;
+    background: radial-gradient(
+      ellipse 80% 60% at 50% 50%,
+      rgba(255, 255, 255, 0.5) 0%,
+      transparent 68%
+    );
+    pointer-events: none;
+    z-index: 0;
+    opacity: 0.75;
+  }
+
+  /* Tông phụ — gradient kính màu (dùng kèm .page-banner) */
+  .page-banner-tint-sky {
+    background: linear-gradient(
+      135deg,
+      rgba(255, 255, 255, 0.78) 0%,
+      rgba(224, 242, 254, 0.68) 40%,
+      rgba(191, 219, 254, 0.55) 100%
+    );
+  }
+  .page-banner-tint-blue {
+    background: linear-gradient(
+      135deg,
+      rgba(255, 255, 255, 0.8) 0%,
+      rgba(239, 246, 255, 0.65) 45%,
+      rgba(219, 234, 254, 0.58) 100%
+    );
+  }
+  .page-banner-tint-indigo {
+    background: linear-gradient(
+      135deg,
+      rgba(255, 255, 255, 0.78) 0%,
+      rgba(238, 242, 255, 0.68) 42%,
+      rgba(224, 231, 255, 0.58) 100%
+    );
+  }
+  .page-banner-tint-warm {
+    background: linear-gradient(
+      135deg,
+      rgba(255, 253, 248, 0.85) 0%,
+      rgba(254, 243, 199, 0.55) 45%,
+      rgba(254, 215, 170, 0.48) 100%
+    );
+  }
+  .page-banner-tint-rose {
+    background: linear-gradient(
+      135deg,
+      rgba(255, 255, 255, 0.8) 0%,
+      rgba(255, 241, 242, 0.62) 40%,
+      rgba(254, 215, 170, 0.45) 100%
+    );
+  }
+  .page-banner-tint-teal {
+    background: linear-gradient(
+      135deg,
+      rgba(255, 255, 255, 0.8) 0%,
+      rgba(204, 251, 241, 0.58) 42%,
+      rgba(186, 230, 253, 0.52) 100%
+    );
+  }
+  .page-banner-tint-slate {
+    background: linear-gradient(
+      135deg,
+      rgba(255, 255, 255, 0.86) 0%,
+      rgba(248, 250, 252, 0.72) 50%,
+      rgba(241, 245, 249, 0.62) 100%
+    );
+  }
+  .page-banner-tint-frost {
+    background: linear-gradient(
+      135deg,
+      rgba(255, 255, 255, 0.72) 0%,
+      rgba(248, 250, 252, 0.55) 55%,
+      rgba(241, 245, 249, 0.48) 100%
+    );
+  }
+
+  .page-banner-title {
+    @apply relative z-[1] text-lg font-bold tracking-tight text-slate-900 sm:text-xl;
+  }
+
+  .page-banner-desc {
+    @apply relative z-[1] mt-0.5 max-w-2xl text-xs leading-snug text-slate-600 sm:text-sm;
+  }
+
+  .page-banner-kicker {
+    @apply relative z-[1] text-[10px] font-semibold uppercase tracking-wider text-slate-500 sm:text-xs;
+  }
+
+  .page-banner-icon-box {
+    @apply relative z-[1] flex h-10 w-10 shrink-0 items-center justify-center rounded-xl sm:h-11 sm:w-11;
+    border: 1px solid rgba(255, 255, 255, 0.55);
+    backdrop-filter: blur(10px) saturate(150%);
+    -webkit-backdrop-filter: blur(10px) saturate(150%);
+    box-shadow:
+      0 6px 18px -6px rgba(15, 23, 42, 0.16),
+      inset 0 1px 0 rgba(255, 255, 255, 0.75);
+    background: linear-gradient(
+      155deg,
+      rgba(255, 255, 255, 0.92) 0%,
+      rgba(248, 250, 252, 0.72) 100%
+    );
+  }
+
+  /* Banner tối — kính gradient đậm (chữ trắng) */
+  .page-banner-dark {
+    @apply relative isolate overflow-hidden rounded-2xl px-4 py-3 text-white sm:px-5 sm:py-3.5;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    backdrop-filter: blur(18px) saturate(160%);
+    -webkit-backdrop-filter: blur(18px) saturate(160%);
+    box-shadow:
+      0 20px 50px -14px rgba(30, 27, 75, 0.55),
+      0 10px 28px -12px rgba(79, 70, 229, 0.35),
+      inset 0 1px 0 rgba(255, 255, 255, 0.22),
+      inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+    background: linear-gradient(
+      135deg,
+      rgba(55, 48, 163, 0.92) 0%,
+      rgba(79, 70, 229, 0.9) 38%,
+      rgba(124, 58, 237, 0.86) 100%
+    );
+  }
+
+  .page-banner-dark::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: linear-gradient(
+      125deg,
+      rgba(255, 255, 255, 0.22) 0%,
+      rgba(255, 255, 255, 0) 38%,
+      rgba(167, 139, 250, 0.25) 100%
+    );
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .page-banner-dark::after {
+    content: '';
+    position: absolute;
+    width: 100%;
+    height: 70%;
+    right: -25%;
+    top: -35%;
+    border-radius: 50%;
+    background: radial-gradient(
+      circle at 30% 40%,
+      rgba(255, 255, 255, 0.18) 0%,
+      transparent 62%
+    );
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .page-banner-dark-title {
+    @apply relative z-[1] text-lg font-bold tracking-tight text-white sm:text-xl;
+  }
+
+  .page-banner-dark-desc {
+    @apply relative z-[1] mt-0.5 text-xs leading-snug text-white/90 sm:text-sm;
+  }
+
+  .page-banner-dark-kicker {
+    @apply relative z-[1] text-[10px] font-semibold uppercase tracking-wider text-white/75 sm:text-xs;
+  }
+
+  .page-banner-dark-tint-ocean {
+    background: linear-gradient(
+      135deg,
+      rgba(30, 58, 138, 0.94) 0%,
+      rgba(37, 99, 235, 0.9) 45%,
+      rgba(96, 165, 250, 0.82) 100%
+    );
+  }
+
+  .page-banner-dark-tint-azure {
+    background: linear-gradient(
+      135deg,
+      rgba(29, 78, 216, 0.94) 0%,
+      rgba(37, 99, 235, 0.9) 50%,
+      rgba(79, 70, 229, 0.88) 100%
+    );
+  }
+
+  .page-banner-dark-tint-violet {
+    background: linear-gradient(
+      135deg,
+      rgba(67, 56, 202, 0.94) 0%,
+      rgba(109, 40, 217, 0.9) 48%,
+      rgba(147, 51, 234, 0.86) 100%
+    );
+  }
+
+  .page-banner-dark-tint-graphite {
+    background: linear-gradient(
+      135deg,
+      rgba(15, 23, 42, 0.94) 0%,
+      rgba(30, 41, 59, 0.92) 45%,
+      rgba(51, 65, 85, 0.88) 100%
+    );
+  }
+
+  /** Cảnh báo / vượt ngân sách — đỏ hồng → cam (chữ trắng) */
+  .page-banner-dark-tint-rose {
+    background: linear-gradient(
+      135deg,
+      rgba(136, 19, 55, 0.94) 0%,
+      rgba(190, 24, 93, 0.9) 48%,
+      rgba(194, 65, 12, 0.86) 100%
+    );
+  }
+
+  /** Duyệt PO / mua hàng — emerald → teal */
+  .page-banner-dark-tint-emerald {
+    background: linear-gradient(
+      135deg,
+      rgba(6, 78, 59, 0.94) 0%,
+      rgba(5, 150, 105, 0.9) 45%,
+      rgba(13, 148, 136, 0.86) 100%
+    );
+  }
+
+  /** RFQ / vận hành — cyan → electric blue */
+  .page-banner-dark-tint-cyan {
+    background: linear-gradient(
+      135deg,
+      rgba(14, 116, 144, 0.94) 0%,
+      rgba(8, 145, 178, 0.91) 42%,
+      rgba(37, 99, 235, 0.88) 100%
+    );
+  }
+
+  /**
+   * Không bóng đổ ra ngoài — trên main nền xám, bóng mặc định của .page-banner-dark
+   * tạo vệt tối giữa banner và khối filter/card phía dưới.
+   */
+  .page-banner-dark-no-outer-shadow {
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.22),
+      inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  }
+
+  /* Icon trang trí góc phải — nhỏ gọn, đồng bộ mọi trang */
+  .page-banner-deco-icon {
+    @apply pointer-events-none absolute z-[1] flex items-center justify-center text-white opacity-15 sm:opacity-20;
+    @apply right-2 top-1/2 h-14 w-14 -translate-y-1/2 sm:right-3 sm:h-[4.25rem] sm:w-[4.25rem];
+  }
+
+  /**
+   * Vùng chứa mọi trang con trong dashboard: rộng bằng main, min-w-0 để flex không tràn,
+   * fade-in nhẹ khi đổi route (key=pathname trên wrapper trong từng *Dashboard.tsx).
+   */
+  .dashboard-outlet {
+    @apply flex w-full min-w-0 max-w-full flex-col;
+    opacity: 0;
+    transform: translateX(24px);
+    animation: fadeInRight 0.42s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .dashboard-outlet {
+      opacity: 1;
+      transform: none;
+      animation: none;
+    }
   }
 }
 
@@ -99,202 +523,92 @@
       0 2px 4px -1px rgba(0, 0, 0, 0.06);
   }
 
-  /* Theme Transitions - 150ms ease-out */
-  .transition-theme {
-    transition: all 150ms ease-out;
-  }
-
-  .transition-colors-theme {
-    transition: background-color 150ms ease-out, border-color 150ms ease-out, color 150ms ease-out;
-  }
-
-  /* Micro-interactions - Hover States */
-  .hover-lift {
-    transition: all 150ms ease-out;
-  }
-
-  .hover-lift:hover {
-    transform: translateY(-2px);
-    box-shadow: 
-      0 4px 6px -1px rgba(0, 0, 0, 0.1),
-      0 2px 4px -1px rgba(0, 0, 0, 0.06);
-  }
-
-  .hover-scale {
-    transition: transform 150ms ease-out;
-  }
-
-  .hover-scale:hover {
-    transform: scale(1.02);
-  }
-
-  /* Glow Effect - Chỉ dùng cho nút Duyệt */
-  .button-glow {
-    transition: all 150ms ease-out;
-  }
-
-  .button-glow:hover {
-    box-shadow: 
-      0 0 20px rgba(34, 197, 94, 0.4),
-      0 0 40px rgba(34, 197, 94, 0.2),
-      0 4px 6px -1px rgba(0, 0, 0, 0.1);
-  }
-
-  /* Glow Effect Indigo - Cho nút Xác nhận phân công */
-  .button-glow-indigo {
-    transition: all 150ms ease-out;
-  }
-
-  .button-glow-indigo:hover {
-    box-shadow: 
-      0 0 20px rgba(99, 102, 241, 0.4),
-      0 0 40px rgba(99, 102, 241, 0.2),
-      0 4px 6px -1px rgba(0, 0, 0, 0.1);
-  }
-
-  /* Animate-in Effects */
-  @keyframes slideUp {
+  /* Fade In Right — Buyer & Buyer Leader (easeOutExpo, translateX 40px → 0) */
+  @keyframes fadeInRight {
     from {
       opacity: 0;
-      transform: translateY(10px);
+      transform: translateX(40px);
     }
     to {
       opacity: 1;
-      transform: translateY(0);
+      /* `none` — không giữ transform sau animation (translateX(0) vẫn phá position:sticky trên bảng). */
+      transform: none;
     }
   }
 
-  @keyframes fadeIn {
-    from {
-      opacity: 0;
-    }
-    to {
-      opacity: 1;
-    }
-  }
-
-  .animate-slide-up {
-    animation: slideUp 0.3s ease-out;
-  }
-
-  .animate-fade-in {
-    animation: fadeIn 0.3s ease-out;
-  }
-
-  /* Modal Slide Up Fade In Animation */
-  @keyframes slideUpFadeIn {
-    from {
-      opacity: 0;
-      transform: translateY(40px);
-    }
-    to {
-      opacity: 1;
-      transform: translateY(0);
-    }
-  }
-
-  .modal-enter {
+  .animate-fade-in-right {
     opacity: 0;
-    transform: translateY(40px);
-    animation: slideUpFadeIn 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-    animation-delay: 0.01s;
+    transform: translateX(40px);
+    animation: fadeInRight 0.45s cubic-bezier(0.16, 1, 0.3, 1) forwards;
   }
 
-  /* Slide Right Animation - From right to left (20px - reduced to prevent horizontal scroll) */
-  @keyframes slideRight {
-    from {
-      opacity: 0;
-      transform: translateX(20px);
-    }
-    to {
-      opacity: 1;
-      transform: translateX(0);
-    }
+  /* Hàng đầu tiên: hiện ngay */
+  .fade-in-right-delay-0 { animation-delay: 0ms; }
+  /* Hàng thứ hai: trễ 200ms; các ô thống kê +100ms mỗi ô */
+  .fade-in-right-delay-200 { animation-delay: 200ms; }
+  .fade-in-right-stagger-1 { animation-delay: 200ms; }
+  .fade-in-right-stagger-2 { animation-delay: 300ms; }
+  .fade-in-right-stagger-3 { animation-delay: 400ms; }
+  .fade-in-right-stagger-4 { animation-delay: 500ms; }
+  .fade-in-right-stagger-5 { animation-delay: 600ms; }
+  .fade-in-right-stagger-6 { animation-delay: 700ms; }
+  .fade-in-right-stagger-7 { animation-delay: 800ms; }
+  .fade-in-right-stagger-8 { animation-delay: 900ms; }
+
+  /*
+   * Stagger từ phải vào — dùng chung cho slide-right-* (trước đây class có trong JSX nhưng chưa có CSS).
+   * delay mặc định cho .slide-right-item: 0 — ưu tiên animation-delay inline trên từng hàng.
+   */
+  .slide-right-title,
+  .slide-right-content,
+  .slide-right-card-1,
+  .slide-right-card-2,
+  .slide-right-card-3,
+  .slide-right-card-4,
+  .slide-right-item {
+    opacity: 0;
+    animation: fadeInRight 0.52s cubic-bezier(0.16, 1, 0.3, 1) forwards;
   }
 
-  /* Staggered Animation Classes */
   .slide-right-title {
-    opacity: 0;
-    transform: translateX(20px);
-    animation: slideRight 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-    animation-delay: 0.05s;
+    animation-delay: 0ms;
   }
 
-  .slide-right-card-1 {
-    opacity: 0;
-    transform: translateX(20px);
-    animation: slideRight 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-    animation-delay: 0.1s;
-  }
-
-  .slide-right-card-2 {
-    opacity: 0;
-    transform: translateX(20px);
-    animation: slideRight 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-    animation-delay: 0.15s;
-  }
-
-  .slide-right-card-3 {
-    opacity: 0;
-    transform: translateX(20px);
-    animation: slideRight 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-    animation-delay: 0.2s;
-  }
-
-  .slide-right-card-4 {
-    opacity: 0;
-    transform: translateX(20px);
-    animation: slideRight 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-    animation-delay: 0.25s;
-  }
+  .slide-right-card-1 { animation-delay: 70ms; }
+  .slide-right-card-2 { animation-delay: 130ms; }
+  .slide-right-card-3 { animation-delay: 190ms; }
+  .slide-right-card-4 { animation-delay: 250ms; }
 
   .slide-right-content {
-    opacity: 0;
-    transform: translateX(20px);
-    animation: slideRight 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-    animation-delay: 0.3s;
+    animation-delay: 90ms;
   }
 
   .slide-right-item {
-    opacity: 0;
-    transform: translateX(20px);
-    animation: slideRight 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    animation-delay: 0ms;
   }
 
-  @keyframes blurIn {
+  /* Enterprise Premium — staggered fade (So sánh báo giá) */
+  @keyframes premiumFade {
     from {
       opacity: 0;
-      filter: blur(8px);
+      transform: translateY(12px);
     }
     to {
       opacity: 1;
-      filter: blur(0);
+      transform: translateY(0);
     }
   }
-  .animate-blur-in {
-    animation: blurIn 0.6s ease-out forwards;
+  .animate-premium-fade {
+    opacity: 0;
+    transform: translateY(12px);
+    animation: premiumFade 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
   }
-
-  /* Table Row Hover */
-  .table-row-hover {
-    transition: background-color 150ms ease-out;
-  }
-
-  .table-row-hover:hover {
-    background-color: rgba(248, 250, 252, 0.8);
-  }
-
-  /* Card Hover Effect */
-  .card-hover {
-    transition: all 150ms ease-out;
-  }
-
-  .card-hover:hover {
-    transform: translateY(-2px);
-    box-shadow: 
-      0 10px 15px -3px rgba(0, 0, 0, 0.1),
-      0 4px 6px -2px rgba(0, 0, 0, 0.05);
-  }
+  .stagger-0 { animation-delay: 0ms; }
+  .stagger-1 { animation-delay: 60ms; }
+  .stagger-2 { animation-delay: 120ms; }
+  .stagger-3 { animation-delay: 180ms; }
+  .stagger-4 { animation-delay: 240ms; }
+  .stagger-5 { animation-delay: 300ms; }
 
   /* Number Display - Large and Bold */
   .number-large {
@@ -327,5 +641,275 @@
 
   .scrollbar-hide::-webkit-scrollbar {
     display: none;
+  }
+
+  /** Góc giao scrollbar (WebKit) khi ẩn thanh — tránh ô vuông tối ở đáy khối cuộn dashboard. */
+  .scrollbar-hide::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+
+  /* Thanh cuộn ngang mỏng, ít lồi — dùng cho bảng RFQ so sánh báo giá */
+  .scrollbar-thin-x {
+    scrollbar-width: thin;
+    scrollbar-color: #cbd5e1 #f1f5f9;
+  }
+  .scrollbar-thin-x::-webkit-scrollbar {
+    height: 6px;
+  }
+  .scrollbar-thin-x::-webkit-scrollbar-track {
+    background: #f1f5f9;
+    border-radius: 3px;
+  }
+  .scrollbar-thin-x::-webkit-scrollbar-thumb {
+    background: #cbd5e1;
+    border-radius: 3px;
+  }
+  .scrollbar-thin-x::-webkit-scrollbar-thumb:hover {
+    background: #94a3b8;
+  }
+
+  /* Hide scrollbar for sidebar navigation */
+  aside > nav {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  aside > nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* Hide scrollbar for main content - target elements with overflow-y-auto class */
+  main.overflow-y-auto,
+  div.overflow-y-auto:not(.modal-content):not(.table-container):not([class*="modal"]):not([class*="table"]) {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  main.overflow-y-auto::-webkit-scrollbar,
+  div.overflow-y-auto:not(.modal-content):not(.table-container):not([class*="modal"]):not([class*="table"])::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* Sidebar Styling */
+  .sidebar-gradient {
+    background: linear-gradient(195deg, #0f172a 0%, #1e293b 100%);
+  }
+
+  /* Glassmorphism for Profile Card */
+  .profile-card-glass {
+    background: rgba(15, 23, 42, 0.6);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+  }
+
+  /* Neon Glow for Logo */
+  .logo-neon {
+    filter: drop-shadow(0 0 20px rgba(220, 38, 38, 0.4));
+  }
+
+  /* Header Glassmorphism */
+  .header-glass {
+    backdrop-filter: blur(15px);
+    -webkit-backdrop-filter: blur(15px);
+    background: rgba(255, 255, 255, 0.85);
+  }
+
+  /* Search Input Inner Shadow */
+  .search-input-inner {
+    box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.06);
+  }
+
+  .search-input-inner:focus {
+    box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.06), 0 0 0 3px rgba(59, 130, 246, 0.1);
+  }
+
+  /* Avatar Glow Effect */
+  .avatar-glow {
+    box-shadow: 0 0 20px rgba(59, 130, 246, 0.4);
+    position: relative;
+  }
+
+  .avatar-glow::after {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    right: 0;
+    width: 10px;
+    height: 10px;
+    background: #22c55e;
+    border: 2px solid white;
+    border-radius: 50%;
+    box-shadow: 0 0 8px rgba(34, 197, 94, 0.6);
+  }
+
+  /* Tabular Nums for Clock */
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+    font-family: 'Plus Jakarta Sans', 'SF Mono', 'Monaco', 'Inconsolata', 'Fira Code', monospace;
+  }
+
+  /* Deep Navy Clock Background */
+  .clock-deep-navy {
+    background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+  }
+
+  /* Nav Item Mechanical Feedback */
+  .nav-item {
+    position: relative;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .nav-item:hover {
+    padding-left: 1rem;
+  }
+
+  .nav-item::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 3px;
+    height: 0;
+    background: #3b82f6;
+    border-radius: 0 2px 2px 0;
+    transition: height 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .nav-item:hover::before,
+  .nav-item.active::before {
+    height: 60%;
+  }
+
+  .nav-item.active {
+    padding-left: 1rem;
+  }
+
+  /* Soft Accents for Icons */
+  .nav-icon {
+    opacity: 0.6;
+    transition: opacity 0.2s ease;
+  }
+
+  .nav-item:hover .nav-icon,
+  .nav-item.active .nav-icon {
+    opacity: 1;
+  }
+
+  /**
+   * Modal dùng chung (AppModal) — overlay mờ + panel vào mượt
+   */
+  @keyframes app-modal-backdrop-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
+  @keyframes app-modal-panel-in {
+    from {
+      opacity: 0;
+      transform: scale(0.96) translateY(12px);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1) translateY(0);
+    }
+  }
+
+  .app-modal-backdrop-enter {
+    animation: app-modal-backdrop-in 0.24s ease-out forwards;
+  }
+
+  .app-modal-panel-enter {
+    animation: app-modal-panel-in 0.34s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+
+  /**
+   * Modal / popup full màn hình (một lớp fixed + panel con) — dùng đồng bộ toàn app.
+   * - modal-popup-overlay: gắn vào div `fixed inset-0` có nền mờ
+   * - modal-popup-panel: gắn vào khối nội dung trắng (dialog)
+   */
+  .modal-popup-overlay {
+    animation: app-modal-backdrop-in 0.28s ease-out forwards;
+  }
+
+  .modal-popup-panel {
+    animation: app-modal-panel-in 0.34s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+
+  /** Tên lịch sử trong JSX — trước đây không gắn keyframes */
+  .modal-enter {
+    animation: app-modal-panel-in 0.34s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+
+  /** Fade chung (trang + vài overlay dùng `animate-fade-in`) */
+  .animate-fade-in {
+    opacity: 0;
+    animation: app-modal-backdrop-in 0.32s ease-out forwards;
+  }
+
+  /** Toast góc màn hình */
+  @keyframes toast-popup-in {
+    from {
+      opacity: 0;
+      transform: translateX(14px);
+    }
+    to {
+      opacity: 1;
+      transform: translateX(0);
+    }
+  }
+
+  .toast-popup-enter {
+    animation: toast-popup-in 0.36s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+
+  /** Popover / dropdown panel (bổ sung cho `animate-slideUpFadeIn` của Tailwind) */
+  .popover-popup-enter {
+    animation: app-modal-panel-in 0.28s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+
+  /**
+   * Buyer Leader - Assignments History card lift
+   * Dùng transition dài + điểm bắt đầu gần trạng thái hover để tránh cảm giác "giật".
+   */
+  .assignment-history-lift-card {
+    transform: none;
+    will-change: box-shadow, border-color;
+    pointer-events: auto;
+    transition:
+      box-shadow 420ms cubic-bezier(0.22, 1, 0.36, 1),
+      border-color 320ms ease;
+    box-shadow: 0 6px 20px -18px rgba(15, 23, 42, 0.28);
+  }
+
+  .assignment-history-lift-card * {
+    pointer-events: auto;
+  }
+
+  .assignment-history-lift-card:hover {
+    transform: none;
+    box-shadow: 0 16px 32px -20px rgba(15, 23, 42, 0.28);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .app-modal-backdrop-enter,
+    .app-modal-panel-enter,
+    .modal-popup-overlay,
+    .modal-popup-panel,
+    .modal-enter,
+    .animate-fade-in,
+    .toast-popup-enter,
+    .popover-popup-enter,
+    .assignment-history-lift-card {
+      animation: none;
+      opacity: 1;
+      transform: none;
+      transition: none;
+    }
   }
 }

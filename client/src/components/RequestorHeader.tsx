@@ -1,6 +1,8 @@
 import { useState, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
 import { useCurrentUser, useLogout } from '../hooks/useAuth';
+import { notificationService } from '../services/notificationService';
 import { Plus, Search, Bell, ChevronDown, LogOut, User } from 'lucide-react';
 import RealTimeClock from './RealTimeClock';
 
@@ -68,8 +70,13 @@ const RequestorHeader = ({
     return 'Chào buổi tối';
   };
 
-  // Mock notification count - sẽ được thay thế bằng data thực tế
-  const notificationCount = 3;
+  const { data: unreadData } = useQuery({
+    queryKey: ['notifications-unread-count'],
+    queryFn: () => notificationService.getUnreadCount(),
+    refetchInterval: 30_000,
+    refetchOnWindowFocus: true,
+  });
+  const notificationCount = typeof unreadData?.count === 'number' ? unreadData.count : 0;
 
   return (
     <header 

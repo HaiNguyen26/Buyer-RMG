@@ -2,8 +2,10 @@ import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { salesService } from '../../services/salesService';
 import { FileBarChart, Download, FileSpreadsheet, FileText } from 'lucide-react';
+import { useToast } from '../../contexts/ToastContext';
 
 const Reports = () => {
+  const { showError } = useToast();
   const [reportType, setReportType] = useState<'sales-po' | 'project' | 'customer'>('sales-po');
   const [exportFormat, setExportFormat] = useState<'excel' | 'pdf'>('excel');
 
@@ -20,7 +22,7 @@ const Reports = () => {
       document.body.removeChild(a);
     } catch (error) {
       console.error('Export error:', error);
-      alert('Lỗi khi xuất báo cáo');
+      showError('Lỗi khi xuất báo cáo');
     }
   };
 

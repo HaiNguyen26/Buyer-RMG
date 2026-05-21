@@ -124,7 +124,7 @@ const ProjectDetail = () => {
                   : 'bg-slate-100 text-slate-800'
               }`}
             >
-              {data.salesPO.status === 'ACTIVE' ? 'Active' : 'Closed'}
+              {data.salesPO.status === 'ACTIVE' ? 'Đang hoạt động' : 'Đã đóng'}
             </span>
           </div>
         </div>
@@ -162,18 +162,57 @@ const ProjectDetail = () => {
               {data.financialSummary.progressPercent}%
             </p>
           </div>
-          <div className="w-full bg-slate-200 rounded-full h-3">
+          <div className="w-full bg-slate-200 rounded-full h-3 overflow-hidden shadow-inner">
             <div
-              className={`h-3 rounded-full transition-all ${
+              className={`relative h-3 rounded-full transition-all duration-700 ease-out ${
                 parseFloat(data.financialSummary.progressPercent) >= 100
-                  ? 'bg-red-500'
+                  ? 'bg-gradient-to-r from-rose-500 via-red-500 to-pink-600'
                   : parseFloat(data.financialSummary.progressPercent) >= 90
-                  ? 'bg-amber-500'
-                  : 'bg-emerald-500'
+                  ? 'bg-gradient-to-r from-amber-500 via-yellow-400 to-orange-500'
+                  : 'bg-gradient-to-r from-emerald-500 via-teal-400 to-green-600'
               }`}
               style={{ width: `${Math.min(parseFloat(data.financialSummary.progressPercent), 100)}%` }}
-            ></div>
+            >
+              {/* Liquid Flow Animation */}
+              {parseFloat(data.financialSummary.progressPercent) < 100 && (
+                <div
+                  className="absolute inset-0 animate-liquid-flow"
+                  style={{
+                    background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.4), transparent)',
+                    backgroundSize: '200% 100%',
+                  }}
+                />
+              )}
+              
+              {/* Micro Bubbles */}
+              {parseFloat(data.financialSummary.progressPercent) > 20 && parseFloat(data.financialSummary.progressPercent) < 100 && (
+                <>
+                  <div 
+                    className="absolute left-[15%] top-0.5 h-1 w-1 animate-pulse rounded-full bg-white/40" 
+                    style={{ animationDuration: '2.2s' }} 
+                  />
+                  <div 
+                    className="absolute left-[45%] top-1 h-0.5 w-0.5 animate-pulse rounded-full bg-white/30" 
+                    style={{ animationDuration: '2.8s' }} 
+                  />
+                  <div 
+                    className="absolute left-[75%] top-0.5 h-1 w-1 animate-pulse rounded-full bg-white/35" 
+                    style={{ animationDuration: '3.1s' }} 
+                  />
+                </>
+              )}
+            </div>
           </div>
+          
+          <style>{`
+            @keyframes liquid-flow {
+              from { transform: translateX(-200%); }
+              to { transform: translateX(300%); }
+            }
+            .animate-liquid-flow {
+              animation: liquid-flow 3s linear infinite;
+            }
+          `}</style>
         </div>
       </div>
 

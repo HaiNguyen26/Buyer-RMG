@@ -46,18 +46,23 @@ const CriticalAlerts = () => {
   };
 
   return (
-    <div className="p-8 space-y-8 animate-fade-in">
+    <div className="p-8 space-y-8 animate-fade-in bg-gradient-to-b from-rose-50/20 to-white">
       {/* Header */}
-      <div>
-        <h1 className="text-3xl font-bold text-slate-800 mb-2">Critical Alerts</h1>
-        <p className="text-slate-600">Không bỏ sót vấn đề lớn</p>
+      <div className="flex items-center gap-4 p-5 rounded-2xl bg-gradient-to-r from-rose-50 to-amber-50 border border-rose-100/80 shadow-sm">
+        <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-gradient-to-br from-rose-500 to-amber-500 text-white shadow-md">
+          <AlertTriangle className="w-6 h-6" />
+        </div>
+        <div>
+          <h1 className="text-2xl font-bold text-slate-800 mb-0.5">Cảnh báo nghiêm trọng</h1>
+          <p className="text-slate-600 text-sm">Không bỏ sót vấn đề lớn</p>
+        </div>
       </div>
 
       {/* Summary Cards */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-        <div className="glass rounded-soft p-6">
+        <div className="glass rounded-2xl p-6 border border-slate-200/80 shadow-sm">
           <div className="flex items-center gap-3 mb-4">
-            <div className="w-10 h-10 rounded-lg bg-red-50 flex items-center justify-center">
+            <div className="w-10 h-10 rounded-xl bg-red-100 flex items-center justify-center">
               <AlertTriangle className="w-5 h-5 text-red-600" />
             </div>
             <div className="text-sm text-slate-600">Nghiêm trọng</div>

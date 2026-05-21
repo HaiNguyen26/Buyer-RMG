@@ -7,6 +7,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { salesService } from '../../services/salesService';
 import { useCurrentUser } from '../../hooks/useAuth';
 import { ArrowLeft, Building2, CheckCircle2, Save, Send, Sparkles, User, FolderKanban, DollarSign, FileText, TrendingUp, X } from 'lucide-react';
+import CustomSelect from '../../components/CustomSelect';
 
 const createSalesPOSchema = z.object({
   customerId: z.string().uuid('Vui lòng chọn khách hàng'),
@@ -17,7 +18,6 @@ const createSalesPOSchema = z.object({
   tax: z.number().min(0, 'Thuế không được âm').optional(),
   poDescription: z.string().optional(),
   internalNotes: z.string().optional(),
-  currency: z.string().min(1, 'Vui lòng chọn tiền tệ'),
   department: z.string().optional(),
 });
 
@@ -59,13 +59,21 @@ const CreateSalesPO = () => {
   } = useForm<CreateSalesPOForm>({
     resolver: zodResolver(createSalesPOSchema),
     defaultValues: {
-      currency: 'VND',
       department: 'SALES',
     },
   });
 
   const totalPOValue = watch('totalPOValue') || 0;
   const tax = watch('tax') || 0;
+
+  const formatMoneyPreview = (n: number) =>
+    n > 0
+      ? new Intl.NumberFormat('vi-VN', {
+          style: 'currency',
+          currency: 'VND',
+          maximumFractionDigits: 0,
+        }).format(n)
+      : '';
   const totalValueAfterTax = useMemo(() => {
     return totalPOValue + (totalPOValue * tax / 100);
   }, [totalPOValue, tax]);
@@ -78,7 +86,7 @@ const CreateSalesPO = () => {
         projectName: data.projectName,
         projectCode: data.customerPONumber,
         amount: data.totalPOValue,
-        currency: data.currency,
+        currency: 'VND',
         effectiveDate: new Date().toISOString(),
         notes: data.internalNotes,
       }),
@@ -99,7 +107,7 @@ const CreateSalesPO = () => {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50/30 to-indigo-50/40 pb-24">
-      <div className="p-6 space-y-6 animate-fade-in max-w-[98%] mx-auto">
+      <div className="w-full min-w-0 space-y-6 py-2 animate-fade-in sm:py-4">
         {/* Back Button */}
         <div className="flex items-center gap-4 animate-slide-up">
           <button
@@ -179,12 +187,12 @@ const CreateSalesPO = () => {
 
                 <div>
                   <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">Department (Sales)</label>
-                  <select
+                  <CustomSelect
                     {...register('department')}
                     className="w-full px-4 py-3 border border-slate-200 rounded-xl bg-slate-50/80 text-slate-700 font-medium focus:outline-none"
                   >
                     <option value="SALES">Sales</option>
-                  </select>
+                  </CustomSelect>
                 </div>
               </div>
 
@@ -200,29 +208,9 @@ const CreateSalesPO = () => {
                 </div>
 
                 <div>
-                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">
-                    Currency <span className="text-rose-500">*</span>
-                  </label>
-                  <select
-                    {...register('currency')}
-                    className={`w-full px-4 py-3 border rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500 transition-all ${
-                      errors.currency ? 'border-red-500' : 'border-slate-300 hover:border-slate-400'
-                    }`}
-                  >
-                    <option value="VND">VND</option>
-                    <option value="USD">USD</option>
-                    <option value="EUR">EUR</option>
-                    <option value="JPY">JPY</option>
-                  </select>
-                  {errors.currency && (
-                    <p className="text-sm text-red-500 mt-1">{errors.currency.message}</p>
-                  )}
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">PO Status</label>
+                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">Trạng thái PO</label>
                   <input
-                    value="Draft"
+                    value="Nháp"
                     readOnly
                     className="w-full px-4 py-3 border border-slate-200 rounded-xl bg-slate-50/80 text-slate-700 font-medium"
                   />
@@ -250,7 +238,7 @@ const CreateSalesPO = () => {
                 <label className="block text-xs font-semibold text-amber-700 uppercase tracking-wider mb-2">
                   Customer <span className="text-rose-500">*</span>
                 </label>
-                <select
+                <CustomSelect
                   {...register('customerId')}
                   className={`w-full px-4 py-3.5 border-2 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-500/30 focus:border-amber-500 font-medium transition-all ${
                     errors.customerId ? 'border-rose-400 bg-rose-50/50' : 'border-amber-300 bg-white hover:border-amber-400'
@@ -262,7 +250,7 @@ const CreateSalesPO = () => {
                       {customer.name} {customer.code ? `(${customer.code})` : ''}
                     </option>
                   ))}
-                </select>
+                </CustomSelect>
                 {errors.customerId && (
                   <p className="text-xs text-rose-500 mt-1.5 font-medium">{errors.customerId.message}</p>
                 )}
@@ -319,7 +307,7 @@ const CreateSalesPO = () => {
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div>
                 <label className="block text-xs font-semibold text-emerald-700 uppercase tracking-wider mb-2">
-                  Total PO Value <span className="text-rose-500">*</span>
+                  Giá trị PO (VND) <span className="text-rose-500">*</span>
                 </label>
                 <input
                   type="number"
@@ -347,12 +335,17 @@ const CreateSalesPO = () => {
               </div>
 
               <div>
-                <label className="block text-xs font-semibold text-emerald-700 uppercase tracking-wider mb-2">Total Value After Tax (auto)</label>
+                <label className="block text-xs font-semibold text-emerald-700 uppercase tracking-wider mb-2">
+                  Total Value After Tax (auto)
+                </label>
                 <input
-                  value={totalValueAfterTax.toLocaleString('vi-VN')}
+                  value={totalValueAfterTax > 0 ? totalValueAfterTax.toLocaleString('vi-VN') : ''}
                   readOnly
                   className="w-full px-4 py-3.5 border-2 border-dashed border-emerald-300 rounded-xl bg-emerald-50/50 text-emerald-900 font-bold"
                 />
+                {totalValueAfterTax > 0 && (
+                  <p className="text-xs text-slate-500 mt-1.5 tabular-nums">{formatMoneyPreview(totalValueAfterTax)}</p>
+                )}
               </div>
             </div>
           </div>
@@ -432,12 +425,12 @@ const CreateSalesPO = () => {
 
       {/* SECTION 7 – ACTION BAR (STICKY FOOTER) */}
       <div className="fixed bottom-0 left-[240px] right-0 z-50 bg-gradient-to-t from-slate-50 via-slate-50/95 to-transparent pt-4">
-        <div className="mx-auto max-w-[98%] px-6 pb-5">
+        <div className="w-full min-w-0 px-0 pb-5 sm:px-2">
           <div className="bg-white/95 backdrop-blur-xl rounded-2xl border border-slate-200/80 shadow-2xl px-6 py-4 flex items-center justify-between">
             <div className="flex items-center gap-3">
               <div className="w-3 h-3 rounded-full bg-amber-400 animate-pulse"></div>
               <div className="text-sm text-slate-600">
-                <span className="font-bold text-slate-900">Draft</span>
+                <span className="font-bold text-slate-900">Nháp</span>
                 <span className="mx-2 text-slate-300">•</span>
                 Lưu nháp hoặc kích hoạt PO
               </div>
@@ -458,7 +451,7 @@ const CreateSalesPO = () => {
                 className="flex items-center gap-2 px-5 py-2.5 bg-slate-900 text-white rounded-xl hover:bg-slate-800 transition-all shadow-lg hover:shadow-xl disabled:opacity-50 disabled:cursor-not-allowed font-medium"
               >
                 <Save className="w-4 h-4" strokeWidth={2} />
-                {createMutation.isPending ? 'Đang lưu...' : 'Save Draft'}
+                {createMutation.isPending ? 'Đang lưu...' : 'Lưu nháp'}
               </button>
               <button
                 type="button"

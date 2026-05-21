@@ -1,8 +1,31 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { requestorService } from '../../services/requestorService';
 import { Plus, Edit, Eye, Filter, Search, X, Building2, User, Calendar, DollarSign, Package, Info, FileText, FileEdit, Clock, CheckCircle2, XCircle, ArrowLeftRight, Send, ShoppingCart, FileCheck, UserCheck, Wallet, CheckCircle, XOctagon, AlertCircle } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
+import { DepartmentPageHero } from '../../components/DepartmentPageHero';
+import {
+  departmentHeadListTableScrollClass,
+  departmentHeadTableTbodyElevatedClass,
+  departmentHeadTableDataRowClasses,
+  departmentHeadInteractiveTableClass,
+  departmentHeadTableAccentRailClass,
+  departmentHeadTableFirstCellInnerClass,
+  departmentHeadTableCellContentWrapClass,
+  departmentHeadTableCellContentWrapFlexClass,
+  departmentHeadTableActionClusterClass,
+} from '../../constants/departmentHeadLayout';
+import {
+  saasTableRootClass,
+  saasTableHeadCellClass,
+  saasTableNumericStrongClass,
+  saasTableCodeCellClass,
+  saasPrStatusBadgeClass,
+  saasPrStatusLabel,
+  saasTableIconBtnView,
+  saasTableIconBtnEdit,
+} from '../../constants/saasDataTable';
 
 const formatCurrency = (amount: number | null, currency: string = 'VND') => {
   if (!amount) return 'Chưa có';
@@ -57,6 +80,26 @@ const MyPurchaseRequests = () => {
     setIsDetailModalOpen(false);
     setSelectedPRId(null);
   };
+
+  useEffect(() => {
+    if (!isDetailModalOpen) return;
+    const prevBody = document.body.style.overflow;
+    const prevHtml = document.documentElement.style.overflow;
+    document.body.style.overflow = 'hidden';
+    document.documentElement.style.overflow = 'hidden';
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setIsDetailModalOpen(false);
+        setSelectedPRId(null);
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.body.style.overflow = prevBody;
+      document.documentElement.style.overflow = prevHtml;
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [isDetailModalOpen]);
 
   const getStatusInfo = (status: string) => {
     const statusMap: { [key: string]: { label: string; color: string; icon: any } } = {
@@ -212,6 +255,10 @@ const MyPurchaseRequests = () => {
     return status === 'DRAFT' || status === 'NEED_MORE_INFO' || status === 'MANAGER_RETURNED' || status === 'DEPARTMENT_HEAD_RETURNED' || status === 'BRANCH_MANAGER_RETURNED';
   };
 
+  const pageShellClass = 'w-full min-h-full min-w-0 bg-[#f1f5f9]';
+  const pageContentClass = 'mx-auto w-full max-w-none min-w-0 space-y-6 px-1 pt-3 pb-4 sm:px-1.5 sm:pt-4 sm:pb-5 md:px-3';
+  const cardClass = 'rounded-2xl border border-slate-200 bg-white ring-1 ring-slate-900/5 shadow-[0_16px_28px_-22px_rgba(15,23,42,0.35)]';
+
   const prs = prsData?.prs || [];
 
   const filteredPRs = prs.filter((pr: any) => {
@@ -243,25 +290,28 @@ const MyPurchaseRequests = () => {
   }
 
   return (
-    <div className="h-full overflow-y-auto">
-      <div className="space-y-6">
-        {/* Header */}
-        <div className="flex items-center justify-between">
-          <div>
-            <h2 className="text-2xl font-bold text-slate-900">My Purchase Requests</h2>
-            <p className="text-slate-600 mt-1">Quản lý PR do chính bạn tạo</p>
-          </div>
-          <button
-            onClick={() => navigate('/dashboard/department-head/my-prs/create')}
-            className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
-          >
-            <Plus className="w-5 h-5" />
-            Tạo PR mới
-          </button>
-        </div>
+    <div className={pageShellClass}>
+      <div className={pageContentClass}>
+        <DepartmentPageHero
+          kicker="Trưởng phòng · Mua hàng"
+          title="My Purchase Requests"
+          description="Quản lý PR do chính bạn tạo"
+          Icon={FileText}
+          tint="ocean"
+          regionLabel="My Purchase Requests"
+          rightSlot={
+            <button
+              onClick={() => navigate('/dashboard/department-head/my-prs/create')}
+              className="inline-flex items-center gap-2 rounded-xl border border-white/35 bg-white/15 px-4 py-2 text-sm font-semibold text-white backdrop-blur-sm transition-colors hover:bg-white/25"
+            >
+              <Plus className="h-5 w-5" />
+              Tạo PR mới
+            </button>
+          }
+        />
 
         {/* Filters */}
-        <div className="flex items-center gap-4">
+        <div className={`${cardClass} flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:gap-4`}>
           <div className="flex-1 relative">
             <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-slate-400 w-5 h-5" />
             <input
@@ -290,20 +340,21 @@ const MyPurchaseRequests = () => {
         </div>
 
         {/* PR List */}
-        <div className="bg-white/80 backdrop-blur-sm rounded-soft-lg shadow-soft-md border border-slate-200/50 overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead className="bg-gradient-to-r from-slate-50 to-slate-100 border-b border-slate-200">
+        <div className="overflow-visible rounded-2xl shadow-[0_16px_30px_-20px_rgba(15,23,42,0.3)]">
+          <div className={`${cardClass} overflow-hidden`}>
+            <div className={departmentHeadListTableScrollClass}>
+            <table className={`${departmentHeadInteractiveTableClass} ${saasTableRootClass}`}>
+              <thead className="sticky top-0 z-20 border-b border-slate-200 bg-gradient-to-r from-slate-50 to-slate-100 shadow-[inset_0_-1px_0_0_rgb(226_232_240)]">
                 <tr>
-                  <th className="px-6 py-3 text-left text-xs font-semibold text-slate-700 uppercase">Mã PR</th>
-                  <th className="px-6 py-3 text-left text-xs font-semibold text-slate-700 uppercase">Phòng ban</th>
-                  <th className="px-6 py-3 text-left text-xs font-semibold text-slate-700 uppercase">Tổng tiền</th>
-                  <th className="px-6 py-3 text-left text-xs font-semibold text-slate-700 uppercase">Trạng thái</th>
-                  <th className="px-6 py-3 text-left text-xs font-semibold text-slate-700 uppercase">Ngày tạo</th>
-                  <th className="px-6 py-3 text-left text-xs font-semibold text-slate-700 uppercase">Hành động</th>
+                  <th className={`px-6 py-3 text-left ${saasTableHeadCellClass}`}>Mã PR</th>
+                  <th className={`px-6 py-3 text-left ${saasTableHeadCellClass}`}>Phòng ban</th>
+                  <th className={`px-6 py-3 text-left ${saasTableHeadCellClass}`}>Tổng tiền</th>
+                  <th className={`px-6 py-3 text-left ${saasTableHeadCellClass}`}>Trạng thái</th>
+                  <th className={`px-6 py-3 text-left ${saasTableHeadCellClass}`}>Ngày tạo</th>
+                  <th className={`px-6 py-3 text-left ${saasTableHeadCellClass}`}>Hành động</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-200">
+              <tbody className={departmentHeadTableTbodyElevatedClass}>
                 {filteredPRs.length === 0 ? (
                   <tr>
                     <td colSpan={6} className="px-6 py-12 text-center">
@@ -311,50 +362,78 @@ const MyPurchaseRequests = () => {
                     </td>
                   </tr>
                 ) : (
-                  filteredPRs.map((pr: any) => (
-                    <tr key={pr.id} className="hover:bg-slate-50">
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <span className="font-medium text-slate-900">{pr.prNumber}</span>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-slate-600">{pr.department || 'N/A'}</td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        {pr.totalAmount ? (
-                          <span className="font-medium text-slate-900">
-                            {pr.totalAmount.toLocaleString('vi-VN')} {pr.currency || 'VND'}
-                          </span>
-                        ) : (
-                          <span className="text-slate-400">Chưa có</span>
-                        )}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <span className={`px-2 py-1 rounded-full text-xs font-medium ${getStatusColor(pr.status)}`}>
-                          {getStatusLabel(pr.status)}
-                        </span>
+                  filteredPRs.map((pr: any, idx: number) => (
+                    <tr key={pr.id} className={departmentHeadTableDataRowClasses(idx)}>
+                      <td className="relative px-6 py-4 whitespace-nowrap">
+                        <div aria-hidden className={departmentHeadTableAccentRailClass} />
+                        <div
+                          className={`${departmentHeadTableFirstCellInnerClass} ${departmentHeadTableCellContentWrapClass}`}
+                        >
+                          <span className={saasTableCodeCellClass}>{pr.prNumber}</span>
+                        </div>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-slate-600">
-                        {new Date(pr.createdAt).toLocaleDateString('vi-VN')}
+                        <div className={departmentHeadTableCellContentWrapClass}>
+                          <span>{pr.department || 'N/A'}</span>
+                        </div>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap">
-                        <div className="flex items-center gap-2">
-                          <button
-                            onClick={(e) => handleViewPRDetails(pr.id, e)}
-                            className="p-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors-theme"
-                            title="Xem chi tiết"
-                          >
-                            <Eye className="w-5 h-5" />
-                          </button>
-                          {canEdit(pr.status) && (
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                navigate(`/dashboard/department-head/my-prs/${pr.id}/edit`);
-                              }}
-                              className="p-2 text-amber-600 hover:bg-amber-50 rounded-lg transition-colors-theme"
-                              title="Chỉnh sửa"
-                            >
-                              <Edit className="w-5 h-5" />
-                            </button>
+                        <div className={departmentHeadTableCellContentWrapClass}>
+                          {pr.totalAmount ? (
+                            <span className={saasTableNumericStrongClass}>
+                              {pr.totalAmount.toLocaleString('vi-VN')} {pr.currency || 'VND'}
+                            </span>
+                          ) : (
+                            <span className="text-slate-400">Chưa có</span>
                           )}
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className={departmentHeadTableCellContentWrapClass}>
+                          <span
+                            className={saasPrStatusBadgeClass(pr.status)}
+                            title={getStatusLabel(pr.status)}
+                          >
+                            {saasPrStatusLabel(pr.status)}
+                          </span>
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-slate-600 tabular-nums">
+                        <div className={departmentHeadTableCellContentWrapClass}>
+                          <span className="tabular-nums">
+                            {new Date(pr.createdAt).toLocaleDateString('vi-VN')}
+                          </span>
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div
+                          className={`${departmentHeadTableCellContentWrapFlexClass} ml-auto justify-end`}
+                        >
+                          <div className={departmentHeadTableActionClusterClass}>
+                            <button
+                              type="button"
+                              onClick={(e) => handleViewPRDetails(pr.id, e)}
+                              className={saasTableIconBtnView}
+                              title="Xem chi tiết"
+                              aria-label="Xem chi tiết"
+                            >
+                              <Eye className="h-4 w-4" strokeWidth={2} />
+                            </button>
+                            {canEdit(pr.status) && (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  navigate(`/dashboard/department-head/my-prs/${pr.id}/edit`);
+                                }}
+                                className={saasTableIconBtnEdit}
+                                title="Chỉnh sửa"
+                                aria-label="Chỉnh sửa"
+                              >
+                                <Edit className="h-4 w-4" strokeWidth={2} />
+                              </button>
+                            )}
+                          </div>
                         </div>
                       </td>
                     </tr>
@@ -362,18 +441,27 @@ const MyPurchaseRequests = () => {
                 )}
               </tbody>
             </table>
+            </div>
           </div>
         </div>
       </div>
 
-      {/* PR Details Modal */}
-      {isDetailModalOpen && selectedPRId && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm animate-fadeIn" onClick={handleCloseDetailModal}>
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col animate-slideUpFadeIn overflow-hidden" onClick={(e) => e.stopPropagation()}>
+      {/* PR Details Modal — fullscreen portal, không cắt bởi layout dashboard */}
+      {isDetailModalOpen &&
+        selectedPRId &&
+        createPortal(
+          <div
+            className="fixed inset-0 z-[100] flex h-[100dvh] max-h-[100dvh] w-full flex-col overflow-hidden bg-white"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="dh-mpr-detail-modal-title"
+          >
             {/* Modal Header */}
-            <div className="flex-shrink-0 flex items-center justify-between p-6 border-b border-slate-200 bg-gradient-to-r from-blue-50 to-slate-50 rounded-t-2xl">
+            <div className="sticky top-0 z-10 flex shrink-0 items-center justify-between border-b border-slate-200 bg-gradient-to-r from-sky-50 via-white to-indigo-50 px-4 pb-4 pt-[max(0.75rem,env(safe-area-inset-top,0px))] sm:px-6 sm:pb-5 sm:pt-5">
               <div>
-                <h2 className="text-xl font-bold text-slate-900">Chi tiết Purchase Request</h2>
+                <h2 id="dh-mpr-detail-modal-title" className="text-xl font-bold text-slate-900">
+                  Chi tiết Purchase Request
+                </h2>
                 {prDetails && (
                   <p className="text-sm text-slate-600 mt-1">
                     Mã PR: <span className="font-semibold text-blue-600">{prDetails.prNumber}</span>
@@ -382,7 +470,7 @@ const MyPurchaseRequests = () => {
               </div>
               <button
                 onClick={handleCloseDetailModal}
-                className="p-2 hover:bg-slate-200 rounded-xl transition-colors"
+                className="rounded-xl p-2 text-slate-500 transition-colors hover:bg-slate-200 hover:text-slate-700"
                 type="button"
               >
                 <X className="w-5 h-5 text-slate-600" strokeWidth={2} />
@@ -390,7 +478,7 @@ const MyPurchaseRequests = () => {
             </div>
 
             {/* Modal Body - PR Details */}
-            <div className="flex-1 min-h-0 overflow-y-auto p-6 scrollbar-hide">
+            <div className="min-h-0 flex-1 overflow-y-auto px-4 scrollbar-hide pb-4 pt-2 sm:px-6 sm:pb-6 sm:pt-3">
               {isLoadingPRDetails ? (
                 <div className="flex items-center justify-center py-12">
                   <div className="text-center">
@@ -537,7 +625,7 @@ const MyPurchaseRequests = () => {
             </div>
 
             {/* Modal Footer */}
-            <div className="flex-shrink-0 flex items-center justify-end gap-3 p-6 border-t border-slate-200 bg-slate-50 rounded-b-2xl">
+            <div className="flex shrink-0 flex-wrap items-center justify-end gap-3 border-t border-slate-200 bg-slate-50 px-4 py-4 pb-[max(1rem,env(safe-area-inset-bottom,0px))] pt-4 sm:px-6 sm:py-5">
               {prDetails && canEdit(prDetails.status) && (
                 <button
                   onClick={() => {
@@ -557,13 +645,14 @@ const MyPurchaseRequests = () => {
                 Đóng
               </button>
             </div>
-          </div>
-        </div>
-      )}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 };
 
 export default MyPurchaseRequests;
+
 
 

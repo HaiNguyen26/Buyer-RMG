@@ -49,29 +49,31 @@ const GovernancePolicy = () => {
           </button>
         </div>
         <div className="space-y-3">
-          {governanceData?.approvalThresholds?.map((threshold: any, idx: number) => (
-            <div key={idx} className="flex items-center justify-between p-4 bg-slate-50 rounded-lg">
-              <div className="flex-1">
-                <div className="font-medium text-slate-800 mb-1">{threshold.category}</div>
-                <div className="text-sm text-slate-600">{threshold.description}</div>
-              </div>
-              <div className="text-right mr-4">
-                <div className="text-lg font-bold text-purple-600">
-                  {threshold.threshold.toLocaleString()} VNĐ
+          {governanceData?.approvalThresholds && governanceData.approvalThresholds.length > 0 ? (
+            governanceData.approvalThresholds.map((threshold: any, idx: number) => (
+              <div key={idx} className="flex items-center justify-between p-4 bg-slate-50 rounded-lg">
+                <div className="flex-1">
+                  <div className="font-medium text-slate-800 mb-1">{threshold.category}</div>
+                  <div className="text-sm text-slate-600">{threshold.description}</div>
                 </div>
-                <div className="text-xs text-slate-600">Ngưỡng</div>
+                <div className="text-right mr-4">
+                  <div className="text-lg font-bold text-purple-600">
+                    {threshold.threshold.toLocaleString()} VNĐ
+                  </div>
+                  <div className="text-xs text-slate-600">Ngưỡng</div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button className="p-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors">
+                    <Edit2 className="w-4 h-4" />
+                  </button>
+                  <button className="p-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors">
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
               </div>
-              <div className="flex items-center gap-2">
-                <button className="p-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors">
-                  <Edit2 className="w-4 h-4" />
-                </button>
-                <button className="p-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors">
-                  <Trash2 className="w-4 h-4" />
-                </button>
-              </div>
-            </div>
-          )) || (
-            <div className="text-center text-slate-500 py-8">Chưa có ngưỡng nào</div>
+            ))
+          ) : (
+            <div className="text-center text-slate-500 py-8">Chưa có ngưỡng nào — cấu hình từ dữ liệu thật khi sẵn sàng</div>
           )}
         </div>
       </div>
@@ -94,27 +96,29 @@ const GovernancePolicy = () => {
           </button>
         </div>
         <div className="space-y-3">
-          {governanceData?.strategicPolicies?.map((policy: any, idx: number) => (
-            <div key={idx} className="p-4 bg-slate-50 rounded-lg">
-              <div className="flex items-start justify-between">
-                <div className="flex-1">
-                  <div className="font-semibold text-slate-800 mb-1">{policy.title}</div>
-                  <div className="text-sm text-slate-600 mb-2">{policy.description}</div>
-                  <div className="text-xs text-slate-500">
-                    Áp dụng từ: {policy.effectiveDate} | Cập nhật: {policy.updatedAt}
+          {governanceData?.strategicPolicies && governanceData.strategicPolicies.length > 0 ? (
+            governanceData.strategicPolicies.map((policy: any, idx: number) => (
+              <div key={idx} className="p-4 bg-slate-50 rounded-lg">
+                <div className="flex items-start justify-between">
+                  <div className="flex-1">
+                    <div className="font-semibold text-slate-800 mb-1">{policy.title}</div>
+                    <div className="text-sm text-slate-600 mb-2">{policy.description}</div>
+                    <div className="text-xs text-slate-500">
+                      Áp dụng từ: {policy.effectiveDate} | Cập nhật: {policy.updatedAt}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 ml-4">
+                    <button className="p-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors">
+                      <Edit2 className="w-4 h-4" />
+                    </button>
+                    <button className="p-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors">
+                      <Trash2 className="w-4 h-4" />
+                    </button>
                   </div>
                 </div>
-                <div className="flex items-center gap-2 ml-4">
-                  <button className="p-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors">
-                    <Edit2 className="w-4 h-4" />
-                  </button>
-                  <button className="p-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors">
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                </div>
               </div>
-            </div>
-          )) || (
+            ))
+          ) : (
             <div className="text-center text-slate-500 py-8">Chưa có chính sách nào</div>
           )}
         </div>
@@ -133,52 +137,54 @@ const GovernancePolicy = () => {
           </button>
         </div>
         <div className="space-y-3">
-          {governanceData?.priorityGuidelines?.map((guideline: any, idx: number) => (
-            <div
-              key={idx}
-              className={`p-4 rounded-lg border-2 ${
-                guideline.priority === 'Critical'
-                  ? 'bg-red-50 border-red-200'
-                  : guideline.priority === 'High'
-                  ? 'bg-amber-50 border-amber-200'
-                  : guideline.priority === 'Medium'
-                  ? 'bg-blue-50 border-blue-200'
-                  : 'bg-green-50 border-green-200'
-              }`}
-            >
-              <div className="flex items-start justify-between">
-                <div className="flex items-start gap-3 flex-1">
-                  <div className={`w-8 h-8 rounded-full flex items-center justify-center font-semibold text-white ${
-                    guideline.priority === 'Critical'
-                      ? 'bg-red-600'
-                      : guideline.priority === 'High'
-                      ? 'bg-amber-600'
-                      : guideline.priority === 'Medium'
-                      ? 'bg-blue-600'
-                      : 'bg-green-600'
-                  }`}>
-                    {idx + 1}
-                  </div>
-                  <div className="flex-1">
-                    <div className="font-semibold text-slate-800 mb-1">{guideline.category}</div>
-                    <div className="text-sm text-slate-600 mb-2">{guideline.description}</div>
-                    <div className="flex items-center gap-4 text-xs text-slate-500">
-                      <span>Ưu tiên: {guideline.priority}</span>
-                      <span>SLA: {guideline.sla} ngày</span>
+          {governanceData?.priorityGuidelines && governanceData.priorityGuidelines.length > 0 ? (
+            governanceData.priorityGuidelines.map((guideline: any, idx: number) => (
+              <div
+                key={idx}
+                className={`p-4 rounded-lg border-2 ${
+                  guideline.priority === 'Critical'
+                    ? 'bg-red-50 border-red-200'
+                    : guideline.priority === 'High'
+                    ? 'bg-amber-50 border-amber-200'
+                    : guideline.priority === 'Medium'
+                    ? 'bg-blue-50 border-blue-200'
+                    : 'bg-green-50 border-green-200'
+                }`}
+              >
+                <div className="flex items-start justify-between">
+                  <div className="flex items-start gap-3 flex-1">
+                    <div className={`w-8 h-8 rounded-full flex items-center justify-center font-semibold text-white ${
+                      guideline.priority === 'Critical'
+                        ? 'bg-red-600'
+                        : guideline.priority === 'High'
+                        ? 'bg-amber-600'
+                        : guideline.priority === 'Medium'
+                        ? 'bg-blue-600'
+                        : 'bg-green-600'
+                    }`}>
+                      {idx + 1}
+                    </div>
+                    <div className="flex-1">
+                      <div className="font-semibold text-slate-800 mb-1">{guideline.category}</div>
+                      <div className="text-sm text-slate-600 mb-2">{guideline.description}</div>
+                      <div className="flex items-center gap-4 text-xs text-slate-500">
+                        <span>Ưu tiên: {guideline.priority}</span>
+                        <span>SLA: {guideline.sla} ngày</span>
+                      </div>
                     </div>
                   </div>
-                </div>
-                <div className="flex items-center gap-2 ml-4">
-                  <button className="p-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors">
-                    <Edit2 className="w-4 h-4" />
-                  </button>
-                  <button className="p-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors">
-                    <Trash2 className="w-4 h-4" />
-                  </button>
+                  <div className="flex items-center gap-2 ml-4">
+                    <button className="p-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors">
+                      <Edit2 className="w-4 h-4" />
+                    </button>
+                    <button className="p-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors">
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
                 </div>
               </div>
-            </div>
-          )) || (
+            ))
+          ) : (
             <div className="text-center text-slate-500 py-8">Chưa có định hướng ưu tiên</div>
           )}
         </div>
@@ -188,21 +194,23 @@ const GovernancePolicy = () => {
       <div className="glass rounded-soft p-6">
         <h3 className="text-lg font-semibold text-slate-800 mb-4">Chính sách quản lý rủi ro</h3>
         <div className="space-y-3">
-          {governanceData?.riskPolicies?.map((policy: any, idx: number) => (
-            <div key={idx} className="p-4 bg-slate-50 rounded-lg">
-              <div className="flex items-start justify-between">
-                <div className="flex-1">
-                  <div className="font-semibold text-slate-800 mb-1">{policy.title}</div>
-                  <div className="text-sm text-slate-600">{policy.description}</div>
-                </div>
-                <div className="flex items-center gap-2 ml-4">
-                  <button className="p-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors">
-                    <Edit2 className="w-4 h-4" />
-                  </button>
+          {governanceData?.riskPolicies && governanceData.riskPolicies.length > 0 ? (
+            governanceData.riskPolicies.map((policy: any, idx: number) => (
+              <div key={idx} className="p-4 bg-slate-50 rounded-lg">
+                <div className="flex items-start justify-between">
+                  <div className="flex-1">
+                    <div className="font-semibold text-slate-800 mb-1">{policy.title}</div>
+                    <div className="text-sm text-slate-600">{policy.description}</div>
+                  </div>
+                  <div className="flex items-center gap-2 ml-4">
+                    <button className="p-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors">
+                      <Edit2 className="w-4 h-4" />
+                    </button>
+                  </div>
                 </div>
               </div>
-            </div>
-          )) || (
+            ))
+          ) : (
             <div className="text-center text-slate-500 py-8">Chưa có chính sách quản lý rủi ro</div>
           )}
         </div>

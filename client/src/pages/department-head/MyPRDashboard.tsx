@@ -3,9 +3,13 @@ import { useNavigate } from 'react-router-dom';
 import { requestorService } from '../../services/requestorService';
 import { FileText, AlertCircle, CheckCircle, Clock, Plus, Sparkles, ShoppingCart, ArrowRight, Eye, Edit } from 'lucide-react';
 import { useCurrentUser } from '../../hooks/useAuth';
+import { useCreatePRConfirm } from '../../hooks/useCreatePRConfirm';
+import { DepartmentPageHero } from '../../components/DepartmentPageHero';
+import { departmentHeadPageStackClass, departmentHeadPanelCardClass } from '../../constants/departmentHeadLayout';
 
 const MyPRDashboard = () => {
   const navigate = useNavigate();
+  const { requestCreatePR, createPRConfirmModal } = useCreatePRConfirm();
   const { data: user } = useCurrentUser();
   const { data: dashboardData, isLoading, error } = useQuery({
     queryKey: ['requestor-dashboard'],
@@ -39,28 +43,31 @@ const MyPRDashboard = () => {
   const { totalPRs = 0, prsByStatus = {}, prsNeedMoreInfo = [], recentPRs = [] } = dashboardData || {};
 
   return (
-    <div className="h-full overflow-y-auto">
-      <div className="space-y-6">
-        {/* Welcome Banner */}
-        <div className="bg-gradient-to-r from-blue-600 to-blue-700 rounded-soft-lg shadow-soft-md p-6 text-white">
-          <div className="flex items-center justify-between">
-            <div>
-              <h2 className="text-2xl font-bold mb-2">My PR Dashboard</h2>
-              <p className="text-blue-100">Tổng quan PR do chính bạn tạo</p>
-            </div>
-            <button
-              onClick={() => navigate('/dashboard/department-head/my-prs/create')}
-              className="flex items-center gap-2 px-4 py-2 bg-white text-blue-600 rounded-lg hover:bg-blue-50 transition-colors font-medium"
-            >
-              <Plus className="w-5 h-5" />
-              Tạo PR mới
-            </button>
-          </div>
+    <div className="h-full min-w-0 w-full max-w-none overflow-y-auto overflow-x-hidden scrollbar-hide">
+      <div className={`w-full min-w-0 max-w-none ${departmentHeadPageStackClass}`}>
+        <div className="shrink-0 pb-2">
+          <DepartmentPageHero
+            kicker="Trưởng phòng · PR của tôi"
+            title="My PR Dashboard"
+            description="Tổng quan PR do chính bạn tạo"
+            Icon={FileText}
+            tint="ocean"
+            regionLabel="My PR Dashboard"
+            rightSlot={
+              <button
+                type="button"
+                onClick={() => requestCreatePR('/dashboard/department-head/my-prs/create')}
+                className="inline-flex shrink-0 items-center gap-2 rounded-xl border border-white/35 bg-white/15 px-4 py-2 text-sm font-semibold text-white backdrop-blur-sm transition-colors hover:bg-white/25"
+              >
+                <Plus className="h-5 w-5" />
+                Tạo PR mới
+              </button>
+            }
+          />
         </div>
 
-        {/* Summary Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-          <div className="bg-white/80 backdrop-blur-sm rounded-soft-lg shadow-soft-md border border-slate-200/50 p-6">
+        <div className="grid min-w-0 grid-cols-1 gap-3 sm:gap-4 md:grid-cols-2 lg:grid-cols-4">
+          <div className={`min-w-0 ${departmentHeadPanelCardClass} !p-4 sm:!p-6`}>
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm text-slate-600 mb-1">Tổng PR</p>
@@ -72,7 +79,7 @@ const MyPRDashboard = () => {
             </div>
           </div>
 
-          <div className="bg-white/80 backdrop-blur-sm rounded-soft-lg shadow-soft-md border border-slate-200/50 p-6">
+          <div className={`min-w-0 ${departmentHeadPanelCardClass} !p-4 sm:!p-6`}>
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm text-slate-600 mb-1">Chờ duyệt</p>
@@ -86,7 +93,7 @@ const MyPRDashboard = () => {
             </div>
           </div>
 
-          <div className="bg-white/80 backdrop-blur-sm rounded-soft-lg shadow-soft-md border border-slate-200/50 p-6">
+          <div className={`min-w-0 ${departmentHeadPanelCardClass} !p-4 sm:!p-6`}>
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm text-slate-600 mb-1">Cần bổ sung</p>
@@ -98,7 +105,7 @@ const MyPRDashboard = () => {
             </div>
           </div>
 
-          <div className="bg-white/80 backdrop-blur-sm rounded-soft-lg shadow-soft-md border border-slate-200/50 p-6">
+          <div className={`min-w-0 ${departmentHeadPanelCardClass} !p-4 sm:!p-6`}>
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm text-slate-600 mb-1">Đã duyệt</p>
@@ -115,20 +122,20 @@ const MyPRDashboard = () => {
 
         {/* Recent PRs */}
         {recentPRs.length > 0 && (
-          <div className="bg-white/80 backdrop-blur-sm rounded-soft-lg shadow-soft-md border border-slate-200/50 p-6">
+          <div className={`min-w-0 ${departmentHeadPanelCardClass} !p-4 sm:!p-6`}>
             <h3 className="text-lg font-semibold text-slate-900 mb-4">PR gần đây</h3>
             <div className="space-y-3">
               {recentPRs.slice(0, 5).map((pr: any) => (
                 <div
                   key={pr.id}
                   onClick={() => navigate(`/dashboard/department-head/my-prs/${pr.id}`)}
-                  className="flex items-center justify-between p-4 bg-slate-50 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer"
+                  className="flex flex-col gap-2 rounded-lg bg-slate-50 p-4 transition-colors hover:bg-slate-100 cursor-pointer sm:flex-row sm:items-center sm:justify-between"
                 >
-                  <div className="flex-1">
+                  <div className="min-w-0 flex-1">
                     <p className="font-medium text-slate-900">{pr.prNumber}</p>
                     <p className="text-sm text-slate-600">{pr.itemName || 'Chưa có mô tả'}</p>
                   </div>
-                  <div className="text-right">
+                  <div className="w-full shrink-0 text-left sm:w-auto sm:text-right">
                     <p className="font-semibold text-slate-900">
                       {pr.totalAmount ? `${pr.totalAmount.toLocaleString('vi-VN')} ${pr.currency}` : 'Chưa có'}
                     </p>
@@ -147,6 +154,7 @@ const MyPRDashboard = () => {
           </div>
         )}
       </div>
+      {createPRConfirmModal}
     </div>
   );
 };

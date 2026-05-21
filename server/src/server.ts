@@ -34,14 +34,10 @@ fastify.register(cors, {
     credentials: true
 });
 
-// Register compression with threshold to avoid premature close on small responses
+// Compression disabled globally to prevent "stream closed prematurely" errors.
+// In production, use Nginx/reverse proxy for response compression.
 fastify.register(compress, {
-    global: true,
-    encodings: ['gzip', 'deflate'],
-    threshold: 1024, // Only compress responses larger than 1KB
-    zlibOptions: {
-        level: 6, // Moderate compression level
-    },
+    global: false, // Disabled globally — routes with compress:true can opt-in individually
 });
 
 // Register multipart for file uploads
@@ -72,6 +68,7 @@ fastify.register(import('./routes/supplierRoutes'), { prefix: '/api' });
 fastify.register(import('./routes/notificationRoutes'), { prefix: '/api/notifications' });
 fastify.register(import('./routes/systemAdminRoutes'), { prefix: '/api/system-admin' });
 fastify.register(import('./routes/organizationRoutes'), { prefix: '/api/organization' });
+fastify.register(import('./routes/warehouseRoutes'), { prefix: '/api/warehouse' });
 
 // Start server
 const start = async () => {

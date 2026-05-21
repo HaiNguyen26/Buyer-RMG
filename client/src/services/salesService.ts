@@ -21,6 +21,7 @@ api.interceptors.request.use((config) => {
 export interface SalesPO {
   id: string;
   salesPONumber: string;
+  customerPONumber?: string;
   customer: {
     id: string;
     name: string;
@@ -31,11 +32,68 @@ export interface SalesPO {
   amount: number;
   currency: string;
   effectiveDate: string;
-  status: 'ACTIVE' | 'CLOSED';
+  status: 'ACTIVE' | 'CLOSED' | 'DRAFT';
   actualCost?: number;
   remainingBudget?: number;
   createdAt: string;
   updatedAt: string;
+  salesOwner?: string | null;
+  /** Số PR gắn SO */
+  prCount?: number;
+  totalItems?: number;
+  itemsCompleted?: number;
+  /** % dòng item đã chốt NCC (SUPPLIER_SELECTED) */
+  itemProgressPercent?: number;
+}
+
+export interface SalesPOWorkspace {
+  salesPO: {
+    id: string;
+    salesPONumber: string;
+    customerPONumber?: string | null;
+    projectName?: string | null;
+    projectCode?: string | null;
+    status: string;
+    amount: number;
+    currency: string;
+    effectiveDate: string;
+    deliveryDeadline?: string | null;
+    notes?: string | null;
+    projectDescription?: string | null;
+    customer: { id: string; name: string; code?: string | null };
+    salesOwner: { id: string; name: string; email?: string | null } | null;
+  };
+  overview: {
+    totalPR: number;
+    totalItems: number;
+    itemsCompleted: number;
+    itemProgressPercent: number;
+    waitingPercent: number;
+    totalCost: number;
+    contractValue: number;
+    budgetUsagePercent: number;
+    isDelayed: boolean;
+  };
+  purchaseRequests: Array<{
+    id: string;
+    prNumber: string;
+    createdAt: string;
+    requestorName: string;
+    itemCount: number;
+    status: string;
+    buyerName: string;
+    progressPercent: number;
+    actualCost: number;
+  }>;
+  costLines: Array<{
+    prNumber: string;
+    part: string;
+    qty: string;
+    cost: number;
+    source: string;
+    currency: string;
+  }>;
+  activityLog: Array<{ at: string; message: string; kind: string }>;
 }
 
 export interface DashboardData {
@@ -96,9 +154,11 @@ export const salesService = {
 
   // Sales PO Management
   getSalesPOs: async (params?: {
-    status?: 'ACTIVE' | 'CLOSED';
+    status?: 'ACTIVE' | 'CLOSED' | 'DRAFT';
     customerId?: string;
     search?: string;
+    dateFrom?: string;
+    dateTo?: string;
   }): Promise<{ salesPOs: SalesPO[] }> => {
     const response = await api.get<{ salesPOs: SalesPO[] }>('/sales/sales-pos', { params });
     return response.data;
@@ -116,13 +176,21 @@ export const salesService = {
 
   createSalesPO: async (data: {
     salesPONumber: string;
+    customerPONumber?: string;
     customerId: string;
-    projectName?: string;
+    projectName: string;
     projectCode?: string;
-    amount: number;
+    totalPOValue: number;
     currency?: string;
-    effectiveDate: string;
+    effectiveDate?: string;
     notes?: string;
+    action?: 'SAVE_DRAFT' | 'ACTIVATE';
+    projectManager?: string;
+    salesUserId?: string | null;
+    deliveryDeadline?: string;
+    paymentTerms?: string;
+    advancePercent?: number;
+    projectDescription?: string;
   }): Promise<SalesPO> => {
     const response = await api.post<SalesPO>('/sales/sales-pos', data);
     return response.data;
@@ -161,6 +229,11 @@ export const salesService = {
     return response.data;
   },
 
+  getSalesPOWorkspace: async (id: string): Promise<SalesPOWorkspace> => {
+    const response = await api.get<SalesPOWorkspace>(`/sales/sales-pos/${id}/workspace`);
+    return response.data;
+  },
+
   // Cost Overview
   getCostOverview: async (params?: {
     startDate?: string;
@@ -188,6 +261,12 @@ export const salesService = {
       responseType: format === 'excel' ? 'blob' : 'blob',
     });
     return response.data;
+  },
+
+  /** Danh sách khách hàng (API /api/customers) — dùng cho form Sales PO */
+  listCustomers: async (): Promise<Array<{ id: string; name: string; code: string | null }>> => {
+    const { data } = await api.get<{ customers: Array<{ id: string; name: string; code: string | null }> }>('/customers');
+    return data.customers ?? [];
   },
 };
 

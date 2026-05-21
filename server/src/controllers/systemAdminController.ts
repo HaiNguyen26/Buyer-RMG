@@ -1,4 +1,5 @@
 import { FastifyReply } from 'fastify';
+import { Role } from '@prisma/client';
 import { prisma } from '../config/database';
 import { AuthenticatedRequest } from '../middleware/auth';
 import { z } from 'zod';
@@ -222,6 +223,82 @@ const employeeUpdateSchema = z.object({
   jobTitle: z.string().optional().nullable(),
 });
 
+/** DTO danh sách nhân viên — chỉ tên hiển thị, không trả mã CN/PB/QLTT ra UI */
+type UserEmployeeRow = {
+  id: string;
+  username: string;
+  fullName: string | null;
+  email: string;
+  role: string;
+  location: string | null;
+  department: string | null;
+  jobTitle: string | null;
+  directManagerCode: string | null;
+  createdAt: Date;
+  deletedAt: Date | null;
+};
+
+async function mapUsersToEmployeeDtos(users: UserEmployeeRow[]) {
+  if (users.length === 0) return [];
+
+  const locKeys = [...new Set(users.map((u) => u.location).filter(Boolean))] as string[];
+  const deptKeys = [...new Set(users.map((u) => u.department).filter(Boolean))] as string[];
+  const mgrKeys = [...new Set(users.map((u) => u.directManagerCode).filter(Boolean))] as string[];
+
+  const [branches, departments, managers] = await Promise.all([
+    locKeys.length
+      ? prisma.branch.findMany({
+          where: { branchCode: { in: locKeys }, deletedAt: null },
+          select: { branchCode: true, branchName: true },
+        })
+      : Promise.resolve([]),
+    deptKeys.length
+      ? prisma.department.findMany({
+          where: { departmentCode: { in: deptKeys }, deletedAt: null },
+          select: { departmentCode: true, departmentName: true },
+        })
+      : Promise.resolve([]),
+    mgrKeys.length
+      ? prisma.user.findMany({
+          where: { username: { in: mgrKeys }, deletedAt: null },
+          select: { username: true, fullName: true },
+        })
+      : Promise.resolve([]),
+  ]);
+
+  const branchNameByCode = Object.fromEntries(branches.map((b) => [b.branchCode, b.branchName]));
+  const deptNameByCode = Object.fromEntries(
+    departments.map((d) => [d.departmentCode, d.departmentName])
+  );
+  const managerDisplayByCode = Object.fromEntries(
+    managers.map((m) => [m.username, (m.fullName && m.fullName.trim()) || m.username])
+  );
+
+  return users.map((user) => {
+    const loc = user.location?.trim() || '';
+    const dept = user.department?.trim() || '';
+    const mgr = user.directManagerCode?.trim() || '';
+
+    const branchDisplay = loc ? branchNameByCode[loc] || loc : '—';
+    const departmentDisplay = dept ? deptNameByCode[dept] || '—' : '—';
+    const directManagerDisplay = mgr ? managerDisplayByCode[mgr] || '—' : '—';
+
+    return {
+      id: user.id,
+      employeeCode: user.username,
+      fullName: user.fullName || user.username,
+      email: user.email,
+      branchName: branchDisplay,
+      departmentName: departmentDisplay,
+      jobTitle: user.jobTitle || null,
+      directManagerName: directManagerDisplay,
+      systemRoles: [user.role],
+      isBranchDirector: user.role === 'BRANCH_DIRECTOR',
+      status: (user.deletedAt ? 'INACTIVE' : 'ACTIVE') as 'ACTIVE' | 'INACTIVE',
+    };
+  });
+}
+
 export const getEmployees = async (
   request: AuthenticatedRequest,
   reply: FastifyReply
@@ -280,24 +357,14 @@ export const getEmployees = async (
         location: true,
         department: true,
         jobTitle: true,
+        directManagerCode: true,
         createdAt: true,
         deletedAt: true,
       },
       orderBy: { createdAt: 'desc' },
     });
 
-    // Map users to employee format
-    const employees = users.map((user) => ({
-      id: user.id,
-      employeeCode: user.username,
-      fullName: user.fullName || user.username, // Use fullName if available, fallback to username
-      email: user.email,
-      branchCode: user.location || '',
-      departmentCode: user.department || '',
-      jobTitle: user.jobTitle || null,
-      systemRoles: [user.role], // User has single role, but system expects array
-      status: user.deletedAt ? 'INACTIVE' : 'ACTIVE',
-    }));
+    const employees = await mapUsersToEmployeeDtos(users);
 
     return reply.send({ employees });
   } catch (error: any) {
@@ -350,23 +417,16 @@ export const updateEmployee = async (
         location: true,
         department: true,
         jobTitle: true,
+        directManagerCode: true,
+        createdAt: true,
         deletedAt: true,
       },
     });
 
     await auditUpdate('users', id, {}, body, { userId });
 
-    return reply.send({
-      id: updatedUser.id,
-      employeeCode: updatedUser.username,
-      fullName: updatedUser.fullName || updatedUser.username,
-      email: updatedUser.email,
-      branchCode: updatedUser.location || '',
-      departmentCode: updatedUser.department || '',
-      jobTitle: updatedUser.jobTitle || null,
-      systemRoles: [updatedUser.role],
-      status: updatedUser.deletedAt ? 'INACTIVE' : 'ACTIVE',
-    });
+    const [dto] = await mapUsersToEmployeeDtos([updatedUser]);
+    return reply.send(dto);
   } catch (error: any) {
     console.error('Update Employee error:', error);
     return reply.code(500).send({
@@ -419,23 +479,16 @@ export const updateEmployeeRoles = async (
         location: true,
         department: true,
         jobTitle: true,
+        directManagerCode: true,
+        createdAt: true,
         deletedAt: true,
       },
     });
 
     await auditUpdate('users', id, {}, { roles: body.roles }, { userId });
 
-    return reply.send({
-      id: updatedUser.id,
-      employeeCode: updatedUser.username,
-      fullName: updatedUser.fullName || updatedUser.username,
-      email: updatedUser.email,
-      branchCode: updatedUser.location || '',
-      departmentCode: updatedUser.department || '',
-      jobTitle: updatedUser.jobTitle || null,
-      systemRoles: body.roles,
-      status: updatedUser.deletedAt ? 'INACTIVE' : 'ACTIVE',
-    });
+    const [dto] = await mapUsersToEmployeeDtos([updatedUser]);
+    return reply.send({ ...dto, systemRoles: body.roles.length ? body.roles : dto.systemRoles });
   } catch (error: any) {
     console.error('Update Employee Roles error:', error);
     return reply.code(500).send({
@@ -471,29 +524,74 @@ export const toggleEmployeeStatus = async (
     const { id } = request.params as { id: string };
     const body = toggleEmployeeStatusSchema.parse(request.body);
 
+    const target = await prisma.user.findFirst({
+      where: { id },
+      select: { username: true, role: true },
+    });
+
+    if (!target) {
+      return reply.code(404).send({ error: 'User not found' });
+    }
+
+    if (body.status === 'INACTIVE') {
+      if (target.username === 'system_admin') {
+        return reply.code(400).send({
+          error:
+            'Không thể tắt trạng thái tài khoản system_admin qua giao diện. Chạy: npm run restore:system-admin (thư mục server) nếu cần khôi phục.',
+        });
+      }
+      if (target.role === Role.SYSTEM_ADMIN) {
+        const otherActiveAdmins = await prisma.user.count({
+          where: {
+            role: Role.SYSTEM_ADMIN,
+            deletedAt: null,
+            id: { not: id },
+          },
+        });
+        if (otherActiveAdmins === 0) {
+          return reply.code(400).send({
+            error:
+              'Không thể tắt SYSTEM_ADMIN cuối cùng đang hoạt động. Tạo thêm một tài khoản SYSTEM_ADMIN trước.',
+          });
+        }
+      }
+    }
+
     // Soft delete for INACTIVE, restore for ACTIVE
     const updateData: any = {
       deletedAt: body.status === 'INACTIVE' ? new Date() : null,
     };
 
-    const updatedUser = await prisma.user.update({
+    await prisma.user.update({
       where: { id },
       data: updateData,
     });
 
     await auditUpdate('users', id, {}, { status: body.status }, { userId });
 
-    return reply.send({
-      id: updatedUser.id,
-      employeeCode: updatedUser.username,
-      fullName: updatedUser.username,
-      email: updatedUser.email,
-      branchCode: updatedUser.location || '',
-      departmentCode: updatedUser.department || '',
-      jobTitle: null,
-      systemRoles: [updatedUser.role],
-      status: updatedUser.deletedAt ? 'INACTIVE' : 'ACTIVE',
+    const refreshed = await prisma.user.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        username: true,
+        fullName: true,
+        email: true,
+        role: true,
+        location: true,
+        department: true,
+        jobTitle: true,
+        directManagerCode: true,
+        createdAt: true,
+        deletedAt: true,
+      },
     });
+
+    if (!refreshed) {
+      return reply.code(404).send({ error: 'User not found' });
+    }
+
+    const [dto] = await mapUsersToEmployeeDtos([refreshed]);
+    return reply.send(dto);
   } catch (error: any) {
     console.error('Toggle Employee Status error:', error);
     return reply.code(500).send({
@@ -1455,8 +1553,7 @@ export const uploadExcel = async (
       return reply.code(400).send({ error: 'Invalid import type' });
     }
 
-    // TODO: Implement Excel parsing logic
-    // For now, return mock data
+    // TODO: Implement Excel parsing logic from uploaded file
     const buffer = await data.toBuffer();
     const fileName = data.filename || 'import.xlsx';
 
@@ -1479,13 +1576,12 @@ export const uploadExcel = async (
       },
     });
 
-    // TODO: Process Excel file and import data
-    // This would require Excel parsing library (e.g., exceljs)
+    // TODO: Process Excel file and import data (excel parser integration)
 
     return reply.send({
       success: 0,
       failed: 0,
-      message: 'Import functionality will be implemented with Excel parsing library',
+      message: 'Import functionality is not implemented yet',
       importId: importHistory.id,
     });
   } catch (error: any) {
@@ -1527,13 +1623,12 @@ export const previewExcel = async (
     }
 
     // TODO: Implement Excel preview parsing
-    // For now, return mock data
 
     return reply.send({
       totalRows: 0,
       preview: [],
       errors: [],
-      message: 'Preview functionality will be implemented with Excel parsing library',
+      message: 'Preview functionality is not implemented yet',
     });
   } catch (error: any) {
     console.error('Preview Excel error:', error);

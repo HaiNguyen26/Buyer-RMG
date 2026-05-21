@@ -166,4 +166,22 @@ export function emitBadgeUpdate(io: SocketIOServer, userId: string, badges: {
   io.to(`user:${userId}`).emit('badge:update', badges);
 }
 
+export type WarehouseGrnSocketPayload = {
+  poId: string;
+  grnId: string;
+  grnNumber: string;
+  poStatus: string;
+  allComplete: boolean;
+  prStatus?: string;
+};
+
+/** Notify warehouse UI to refetch GRN history / incoming PO / dashboard. */
+export function emitWarehouseGrnUpdate(
+  io: SocketIOServer,
+  payload: WarehouseGrnSocketPayload
+) {
+  const body = { ...payload, timestamp: new Date().toISOString() };
+  io.to('role:WAREHOUSE').emit('warehouse:grn', body);
+  io.to('role:SYSTEM_ADMIN').emit('warehouse:grn', body);
+}
 

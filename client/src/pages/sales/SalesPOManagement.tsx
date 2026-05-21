@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { salesService } from '../../services/salesService';
 import { Plus, Search, Filter, Edit, Lock, Unlock, Eye } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
+import CustomSelect from '../../components/CustomSelect';
 
 const SalesPOManagement = () => {
   const navigate = useNavigate();
@@ -73,15 +74,15 @@ const SalesPOManagement = () => {
         </div>
         <div className="flex items-center gap-2">
           <Filter className="w-5 h-5 text-slate-400" />
-          <select
+          <CustomSelect
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value as any)}
             className="px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#3B82F6] focus:border-transparent"
           >
             <option value="ALL">Tất cả</option>
-            <option value="ACTIVE">Active</option>
-            <option value="CLOSED">Closed</option>
-          </select>
+            <option value="ACTIVE">Đang hoạt động</option>
+            <option value="CLOSED">Đã đóng</option>
+          </CustomSelect>
         </div>
       </div>
 
@@ -162,7 +163,7 @@ const SalesPOManagement = () => {
                               : 'bg-slate-100 text-slate-800'
                           }`}
                         >
-                          {po.status === 'ACTIVE' ? 'Active' : 'Closed'}
+                          {po.status === 'ACTIVE' ? 'Đang hoạt động' : 'Đã đóng'}
                         </span>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm">

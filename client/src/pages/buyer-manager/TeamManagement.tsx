@@ -1,8 +1,74 @@
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Users, Search, Filter, Eye, RefreshCw, TrendingUp, TrendingDown, AlertTriangle, CheckCircle, Clock, DollarSign, ArrowRightLeft, Package, Globe, Home, ShoppingBag, BarChart3, FileText, X, Save } from 'lucide-react';
+import {
+  Users,
+  Search,
+  Filter,
+  Eye,
+  RefreshCw,
+  TrendingUp,
+  AlertTriangle,
+  CheckCircle,
+  Clock,
+  DollarSign,
+  ArrowRightLeft,
+  Package,
+  Globe,
+  Home,
+  ShoppingBag,
+  BarChart3,
+  ClipboardList,
+  Crown,
+  FileText,
+  UserRound,
+  X,
+  Save,
+  Mail,
+  ChevronRight,
+  LayoutDashboard,
+} from 'lucide-react';
 import { buyerManagerService } from '../../services/buyerManagerService';
-import type { BuyerTeamMember } from '../../services/buyerManagerService';
+import type { BuyerTeamMember, BuyerWorkloadBand } from '../../services/buyerManagerService';
+import { useToast } from '../../contexts/ToastContext';
+import CustomSelect from '../../components/CustomSelect';
+import { CountUpNumber } from '../../components/dashboard/CountUpNumber';
+import { StatCard } from '../../components/buyer-manager/StatCard';
+import { RequestorPageHero } from '../../components/RequestorPageHero';
+import {
+  dashboardPageContentInsetBottomWorkspaceClass,
+  dashboardPageContentInsetXClass,
+} from '../../constants/dashboardLayout';
+import {
+  requestorPageStackClass,
+  requestorPanelCardClass,
+  requestorDataTableCardClass,
+  requestorDataTableCardHeaderClass,
+} from '../../constants/requestorLayout';
+
+/** Đồng bộ Buyer `DashboardHome` StatCard bento — `h-full` để hàng grid đều cao. */
+const teamStatCardEnterClass =
+  'h-full animate-fade-in-right motion-reduce:animate-none motion-reduce:!translate-x-0 motion-reduce:!opacity-100';
+
+function memberInitials(name: string) {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length >= 2) {
+    return `${parts[0][0] ?? ''}${parts[parts.length - 1][0] ?? ''}`.toUpperCase();
+  }
+  return name.trim().slice(0, 2).toUpperCase() || '?';
+}
+
+function inferWorkloadBand(pct: number): BuyerWorkloadBand {
+  if (pct > 90) return 'overload';
+  if (pct < 40) return 'idle';
+  return 'normal';
+}
+
+function rowHeatmapClass(band: BuyerWorkloadBand | undefined) {
+  if (band === 'overload') return 'border-l-4 border-rose-600 bg-rose-50/35';
+  if (band === 'idle') return 'border-l-4 border-emerald-600 bg-emerald-50/30';
+  return 'border-l-4 border-slate-500 bg-slate-50/25';
+}
 
 const TeamManagement = () => {
   const queryClient = useQueryClient();
@@ -20,8 +86,7 @@ const TeamManagement = () => {
     queryFn: async () => {
       try {
         return await buyerManagerService.getTeamManagement();
-      } catch (err) {
-        console.error('Error fetching team management data:', err);
+      } catch {
         // Return default structure to prevent crash
         return {
           totalMembers: 0,
@@ -29,6 +94,7 @@ const TeamManagement = () => {
           buyers: 0,
           avgEfficiency: 0,
           totalWorkload: 0,
+          workloadCapacityPerBuyer: 10,
           members: [],
         };
       }
@@ -69,30 +135,61 @@ const TeamManagement = () => {
   // Filter members - with safe handling and data mapping
   const rawMembers = (teamData?.members && Array.isArray(teamData.members)) ? teamData.members : [];
   
-  // Map raw data to ensure it has required fields
+  const workloadCapacity = teamData?.workloadCapacityPerBuyer ?? 10;
+
+  const normalizeWorkload = (raw: unknown): BuyerTeamMember['workload'] => {
+    const u = String(raw ?? '')
+      .toUpperCase()
+      .replace(/\s+/g, '_');
+    if (u === 'OVERLOADED' || u === 'OVERLOAD') return 'OVERLOADED';
+    if (u === 'HIGH') return 'HIGH';
+    if (u === 'LOW') return 'LOW';
+    if (u === 'NORMAL') return 'NORMAL';
+    return 'NORMAL';
+  };
+
   const members: BuyerTeamMember[] = rawMembers.map((member: any, index: number) => {
-    // Ensure member has an id - use existing id, userId, or generate from index
     const memberId = member.id || member.userId || member.user?.id || `temp-${index}`;
-    
+    const activePRs = member.activePRs ?? member.activePRsCount ?? 0;
+    const avgLead =
+      member.avgLeadTime ??
+      member.avgLeadTimeDays ??
+      member.avgProcessingTime ??
+      member.averageLeadTime ??
+      0;
+    const workloadPercentRaw =
+      typeof member.workloadPercent === 'number'
+        ? member.workloadPercent
+        : Math.min(100, Math.round((activePRs / workloadCapacity) * 1000) / 10);
+    const workloadBand: BuyerWorkloadBand =
+      member.workloadBand === 'overload' || member.workloadBand === 'idle' || member.workloadBand === 'normal'
+        ? member.workloadBand
+        : inferWorkloadBand(workloadPercentRaw);
+
     return {
       id: memberId,
       name: member.name || member.fullName || member.user?.name || member.username || 'N/A',
       email: member.email || member.user?.email || '',
       username: member.username || member.user?.username || '',
-      role: member.role || member.user?.role || 'BUYER',
-      purchaseTypes: Array.isArray(member.purchaseTypes) ? member.purchaseTypes : 
-                     (member.purchaseType ? [member.purchaseType] : ['DOMESTIC']),
-      activePRs: member.activePRs || member.activePRsCount || 0,
-      avgLeadTime: member.avgLeadTime || member.averageLeadTime || 0,
-      overBudgetRate: member.overBudgetRate || member.overBudgetPercentage || 0,
-      onTimeRate: member.onTimeRate || member.onTimePercentage || 0,
-      overBudgetPRRate: member.overBudgetPRRate || member.overBudgetPRPercentage || 0,
-      reworkRate: member.reworkRate || member.reworkPercentage || 0,
-      avgPriceVsEstimate: member.avgPriceVsEstimate || member.averagePriceVsEstimate || 100,
-      totalPRsCompleted: member.totalPRsCompleted || member.completedPRsCount || 0,
-      totalPRsInProgress: member.totalPRsInProgress || member.inProgressPRsCount || 0,
-      workload: member.workload || 'NORMAL',
-    } as BuyerTeamMember;
+      role: (member.role || member.user?.role || 'BUYER') as BuyerTeamMember['role'],
+      purchaseTypes: Array.isArray(member.purchaseTypes)
+        ? member.purchaseTypes
+        : member.purchaseType
+          ? [member.purchaseType]
+          : ['DOMESTIC'],
+      activePRs,
+      avgLeadTime: avgLead,
+      workloadPercent: workloadPercentRaw,
+      workloadBand,
+      overBudgetRate: member.overBudgetRate ?? member.overBudgetPercentage ?? 0,
+      onTimeRate: member.onTimeRate ?? member.onTimePercentage ?? 0,
+      overBudgetPRRate: member.overBudgetPRRate ?? member.overBudgetPRPercentage ?? 0,
+      reworkRate: member.reworkRate ?? member.reworkPercentage ?? 0,
+      avgPriceVsEstimate: member.avgPriceVsEstimate ?? member.averagePriceVsEstimate ?? 100,
+      totalPRsCompleted: member.totalPRsCompleted ?? member.completedPRsCount ?? 0,
+      totalPRsInProgress: member.totalPRsInProgress ?? member.inProgressPRsCount ?? activePRs,
+      workload: normalizeWorkload(member.workload),
+    };
   });
   
   const filteredMembers = members.filter((member: BuyerTeamMember) => {
@@ -119,29 +216,13 @@ const TeamManagement = () => {
     return matchesSearch && matchesPurchaseType && matchesWorkload;
   });
 
-  // Debug: Log raw data structure if table is empty but stats show members
-  if (rawMembers.length > 0 && filteredMembers.length === 0) {
-    console.log('Raw members from API:', rawMembers);
-    console.log('Mapped members:', members);
-    console.log('Filtered members:', filteredMembers);
-    console.log('Search query:', searchQuery);
-    console.log('Purchase type filter:', purchaseTypeFilter);
-    console.log('Workload filter:', workloadFilter);
-  }
-  
-  // Debug: Log mapped members structure
-  if (members.length > 0 && filteredMembers.length === 0) {
-    console.log('Raw members from API:', rawMembers);
-    console.log('Mapped members (first):', members[0]);
-  }
-
   // Get workload badge
   const getWorkloadBadge = (workload: string) => {
     const workloadMap: Record<string, { label: string; color: string; bgColor: string }> = {
-      LOW: { label: 'Thấp', color: 'text-blue-700', bgColor: 'bg-blue-100' },
-      NORMAL: { label: 'Bình thường', color: 'text-green-700', bgColor: 'bg-green-100' },
-      HIGH: { label: 'Cao', color: 'text-orange-700', bgColor: 'bg-orange-100' },
-      OVERLOADED: { label: 'Quá tải', color: 'text-red-700', bgColor: 'bg-red-100' },
+      LOW: { label: 'Thấp', color: 'text-emerald-800', bgColor: 'bg-emerald-100' },
+      NORMAL: { label: 'Bình thường', color: 'text-slate-800', bgColor: 'bg-slate-100' },
+      HIGH: { label: 'Cao', color: 'text-amber-800', bgColor: 'bg-amber-100' },
+      OVERLOADED: { label: 'Quá tải', color: 'text-rose-800', bgColor: 'bg-rose-100' },
     };
     const info = workloadMap[workload] || { label: workload, color: 'text-slate-700', bgColor: 'bg-slate-100' };
     return (
@@ -180,31 +261,29 @@ const TeamManagement = () => {
   };
 
 
-  // Always show UI even while loading - prevent blank screen
   if (isLoading && !teamData) {
     return (
-      <div className="h-full flex items-center justify-center bg-slate-50">
+      <div className="flex min-h-[50vh] items-center justify-center py-16">
         <div className="text-center">
-          <div className="w-12 h-12 border-4 border-[#2563EB] border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-          <p className="text-slate-600">Đang tải dữ liệu...</p>
+          <div className="mx-auto mb-4 h-12 w-12 animate-spin rounded-full border-4 border-blue-600 border-t-transparent" />
+          <p className="text-slate-600">Đang tải...</p>
         </div>
       </div>
     );
   }
 
-  // Show error state but still allow viewing
   if (error && !teamData) {
     return (
-      <div className="h-full flex items-center justify-center p-6">
-        <div className="bg-red-50 border border-red-200 rounded-xl p-6 max-w-md">
-          <AlertTriangle className="w-12 h-12 text-red-600 mx-auto mb-4" />
-          <p className="text-red-800 font-medium text-center mb-2">Lỗi khi tải dữ liệu</p>
-          <p className="text-red-600 text-sm mt-2 text-center mb-4">
+      <div className="flex min-h-[50vh] items-center justify-center p-6">
+        <div className="max-w-md rounded-xl border border-red-200 bg-red-50 p-4">
+          <p className="font-medium text-red-800">Lỗi khi tải dữ liệu</p>
+          <p className="mt-1 text-sm text-red-600">
             {error instanceof Error ? error.message : 'Vui lòng thử lại sau'}
           </p>
           <button
+            type="button"
             onClick={() => refetch()}
-            className="w-full px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors font-medium"
+            className="mt-4 w-full rounded-lg bg-red-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-red-700"
           >
             Thử lại
           </button>
@@ -220,301 +299,407 @@ const TeamManagement = () => {
     buyers: 0,
     avgEfficiency: 0,
     totalWorkload: 0,
+    workloadCapacityPerBuyer: 10,
     members: [],
   };
 
-  return (
-    <div className="h-full w-full overflow-hidden flex flex-col bg-slate-50">
-      {/* Error Banner (if error exists but we have cached data) */}
-      {error && teamData && (
-        <div className="shrink-0 bg-amber-50 border-b border-amber-200 p-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <AlertTriangle className="w-5 h-5 text-amber-600" />
-              <p className="text-sm text-amber-800">
-                Đang hiển thị dữ liệu cũ. {error instanceof Error ? error.message : 'Lỗi kết nối API'}
-              </p>
-            </div>
-            <button
-              onClick={() => refetch()}
-              className="text-xs text-amber-700 hover:text-amber-900 font-medium underline"
-            >
-              Thử lại
-            </button>
-          </div>
-        </div>
-      )}
+  const cap = safeTeamData.workloadCapacityPerBuyer ?? 10;
 
-      {/* Header with Stats */}
-      <div className="shrink-0 bg-slate-50 border-b border-slate-200 p-6">
-        <div className="flex items-center justify-between mb-4">
-          <div>
-            <h2 className="text-2xl font-bold text-slate-900 flex items-center gap-3">
-              <Users className="w-7 h-7 text-[#2563EB]" strokeWidth={2} />
-              Buyer Team Management
-            </h2>
-            <p className="text-sm text-slate-600 mt-1">Quản lý con người – không quản lý từng PR</p>
-          </div>
-          <button
-            onClick={() => refetch()}
-            disabled={isLoading}
-            className="px-4 py-2 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl transition-colors flex items-center gap-2 text-slate-700 font-medium"
-          >
-            <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
-            Làm mới
-          </button>
-        </div>
-
-        {/* Stats Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-          <div className="bg-gradient-to-br from-blue-50 to-blue-100 rounded-xl p-4 border border-blue-200">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-xs text-blue-700 font-medium mb-1">Tổng thành viên</p>
-                <p className="text-2xl font-bold text-blue-900">{safeTeamData.totalMembers}</p>
-              </div>
-              <Users className="w-10 h-10 text-blue-600 opacity-50" />
-            </div>
-          </div>
-          <div className="bg-gradient-to-br from-green-50 to-green-100 rounded-xl p-4 border border-green-200">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-xs text-green-700 font-medium mb-1">Buyer Leaders</p>
-                <p className="text-2xl font-bold text-green-900">{safeTeamData.buyerLeaders}</p>
-              </div>
-              <Users className="w-10 h-10 text-green-600 opacity-50" />
-            </div>
-          </div>
-          <div className="bg-gradient-to-br from-indigo-50 to-indigo-100 rounded-xl p-4 border border-indigo-200">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-xs text-indigo-700 font-medium mb-1">Buyers</p>
-                <p className="text-2xl font-bold text-indigo-900">{safeTeamData.buyers}</p>
-              </div>
-              <Users className="w-10 h-10 text-indigo-600 opacity-50" />
-            </div>
-          </div>
-          <div className="bg-gradient-to-br from-purple-50 to-purple-100 rounded-xl p-4 border border-purple-200">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-xs text-purple-700 font-medium mb-1">Hiệu suất TB</p>
-                <p className="text-2xl font-bold text-purple-900">{safeTeamData.avgEfficiency.toFixed(1)}%</p>
-              </div>
-              <TrendingUp className="w-10 h-10 text-purple-600 opacity-50" />
-            </div>
-          </div>
-        </div>
+  const filterToolbar = (
+    <div className="flex min-w-0 flex-col gap-4">
+      <div className="relative w-full min-w-0">
+        <Search className="pointer-events-none absolute left-4 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-400" />
+        <input
+          type="text"
+          placeholder="Tìm theo tên, email hoặc username…"
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          className="w-full min-w-0 rounded-2xl border border-slate-200/90 bg-white py-3 pl-11 pr-4 text-sm shadow-sm ring-1 ring-slate-900/[0.03] focus:border-transparent focus:outline-none focus:ring-2 focus:ring-[#4F46E5]/40"
+        />
       </div>
-
-      {/* Filters */}
-      <div className="shrink-0 bg-slate-50 border-b border-slate-200 p-4">
-        <div className="flex flex-col lg:flex-row gap-4">
-          {/* Search */}
-          <div className="flex-1 relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
-            <input
-              type="text"
-              placeholder="Tìm kiếm theo tên, email, username..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full pl-10 pr-4 py-2.5 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent"
-            />
-          </div>
-
-          {/* Purchase Type Filter */}
-          <div className="flex items-center gap-2">
-            <Filter className="w-5 h-5 text-slate-400" />
-            <select
-              value={purchaseTypeFilter}
-              onChange={(e) => setPurchaseTypeFilter(e.target.value)}
-              className="px-4 py-2.5 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent"
-            >
-              <option value="all">Tất cả loại mua</option>
-              <option value="DOMESTIC">Nội địa</option>
-              <option value="OVERSEA">Overseas</option>
-              <option value="SERVICE">Dịch vụ</option>
-            </select>
-          </div>
-
-          {/* Workload Filter */}
-          <select
+      <div className="hidden flex-wrap items-center gap-4 lg:flex">
+        <div className="flex min-w-0 items-center gap-3">
+          <Filter className="h-5 w-5 shrink-0 text-slate-400" />
+          <CustomSelect
+            value={purchaseTypeFilter}
+            onChange={(e) => setPurchaseTypeFilter(e.target.value)}
+            className="min-w-[10rem] rounded-2xl border border-slate-200/90 bg-white px-4 py-3 text-sm shadow-sm ring-1 ring-slate-900/[0.03] focus:outline-none focus:ring-2 focus:ring-[#4F46E5]/40"
+          >
+            <option value="all">Tất cả loại mua</option>
+            <option value="DOMESTIC">Nội địa</option>
+            <option value="OVERSEA">Overseas</option>
+            <option value="SERVICE">Dịch vụ</option>
+          </CustomSelect>
+        </div>
+        <CustomSelect
+          value={workloadFilter}
+          onChange={(e) => setWorkloadFilter(e.target.value)}
+          className="min-w-[10rem] rounded-2xl border border-slate-200/90 bg-white px-4 py-3 text-sm shadow-sm ring-1 ring-slate-900/[0.03] focus:outline-none focus:ring-2 focus:ring-[#4F46E5]/40"
+        >
+          <option value="all">Tất cả mức tải</option>
+          <option value="LOW">Thấp</option>
+          <option value="NORMAL">Bình thường</option>
+          <option value="HIGH">Cao</option>
+          <option value="OVERLOADED">Quá tải</option>
+        </CustomSelect>
+      </div>
+      <details className="rounded-2xl border border-slate-200/80 bg-white/95 p-4 shadow-sm ring-1 ring-slate-900/[0.02] lg:hidden">
+        <summary className="cursor-pointer list-none text-sm font-semibold text-slate-800 [&::-webkit-details-marker]:hidden">
+          <span className="flex items-center justify-between gap-2">
+            <span className="flex items-center gap-2">
+              <Filter className="h-4 w-4 text-slate-500" />
+              Mở bộ lọc
+            </span>
+            <span className="text-xs font-medium text-slate-500">Chạm để mở</span>
+          </span>
+        </summary>
+        <div className="mt-4 flex flex-col gap-4 border-t border-slate-100 pt-4">
+          <CustomSelect
+            value={purchaseTypeFilter}
+            onChange={(e) => setPurchaseTypeFilter(e.target.value)}
+            className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#4F46E5]/40"
+          >
+            <option value="all">Tất cả loại mua</option>
+            <option value="DOMESTIC">Nội địa</option>
+            <option value="OVERSEA">Overseas</option>
+            <option value="SERVICE">Dịch vụ</option>
+          </CustomSelect>
+          <CustomSelect
             value={workloadFilter}
             onChange={(e) => setWorkloadFilter(e.target.value)}
-            className="px-4 py-2.5 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent"
+            className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#4F46E5]/40"
           >
             <option value="all">Tất cả mức tải</option>
             <option value="LOW">Thấp</option>
             <option value="NORMAL">Bình thường</option>
             <option value="HIGH">Cao</option>
             <option value="OVERLOADED">Quá tải</option>
-          </select>
+          </CustomSelect>
         </div>
+      </details>
+      <p className="text-sm font-medium text-slate-600">
+        Đang hiển thị <span className="font-bold text-slate-900">{filteredMembers.length}</span> /{' '}
+        {members.length} thành viên
+        {isLoading ? <span className="ml-2 text-xs font-medium text-indigo-600">(Đang làm mới…)</span> : null}
+      </p>
+    </div>
+  );
 
-        {/* Results count */}
-        <div className="mt-3 text-sm text-slate-600">
-          Tìm thấy <span className="font-semibold text-slate-900">{filteredMembers.length}</span> thành viên
-          {isLoading && <span className="ml-2 text-xs text-blue-600">(Đang tải...)</span>}
-        </div>
-      </div>
-
-      {/* Buyer List Table */}
-      <div className="flex-1 min-h-0 flex flex-col p-4">
-        <div className="bg-slate-50 rounded-2xl shadow-lg border border-slate-200 overflow-hidden">
-          {filteredMembers.length === 0 ? (
-            <div className="h-full min-h-[300px] flex items-center justify-center">
-              <div className="text-center">
-                <Users className="w-16 h-16 text-slate-300 mx-auto mb-4" strokeWidth={1.5} />
-                <p className="text-slate-500 text-lg font-medium">Không có thành viên nào</p>
-                <p className="text-slate-400 text-sm mt-2">Thử thay đổi bộ lọc hoặc từ khóa tìm kiếm</p>
+  return (
+    <>
+      <div
+        className={`${requestorPageStackClass} ${dashboardPageContentInsetXClass} ${dashboardPageContentInsetBottomWorkspaceClass}`}
+      >
+        {error && teamData ? (
+          <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 shadow-sm sm:p-5">
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div className="flex min-w-0 items-start gap-3">
+                <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" strokeWidth={2} aria-hidden />
+                <div className="min-w-0">
+                  <p className="font-bold text-amber-900">Đang hiển thị dữ liệu đệm (cache)</p>
+                  <p className="mt-1 text-sm font-medium text-amber-800">
+                    {error instanceof Error ? error.message : 'Lỗi kết nối API'}
+                  </p>
+                </div>
               </div>
-            </div>
-          ) : (
-            <div className="flex flex-col">
-              {/* Table Header */}
-              <div className="shrink-0 bg-slate-50 border-b border-slate-200 px-6 py-4">
-                <h3 className="text-lg font-semibold text-slate-900">Danh sách Buyer ({filteredMembers.length})</h3>
-              </div>
-              
-              {/* Scrollable Table Container - Dynamic height, max 4 rows */}
-              <div 
-                className="overflow-y-auto overflow-x-hidden"
-                style={{
-                  maxHeight: '288px', // ~4 rows × 72px per row - only scroll if more than 4 rows
-                }}
+              <button
+                type="button"
+                onClick={() => refetch()}
+                className="shrink-0 rounded-lg border border-amber-300 bg-white px-4 py-2 text-sm font-semibold text-amber-900 shadow-sm transition hover:bg-amber-50"
               >
-                <table className="w-full">
-                  <thead className="bg-slate-50 border-b border-slate-200 sticky top-0 z-10">
-                    <tr>
-                      <th className="px-6 py-3 text-left text-xs font-semibold text-slate-700 uppercase tracking-wider">
-                        Buyer
-                      </th>
-                      <th className="px-6 py-3 text-left text-xs font-semibold text-slate-700 uppercase tracking-wider">
-                        Loại mua
-                      </th>
-                      <th className="px-6 py-3 text-center text-xs font-semibold text-slate-700 uppercase tracking-wider">
-                        PR đang xử lý
-                      </th>
-                      <th className="px-6 py-3 text-center text-xs font-semibold text-slate-700 uppercase tracking-wider">
-                        Lead time TB
-                      </th>
-                      <th className="px-6 py-3 text-center text-xs font-semibold text-slate-700 uppercase tracking-wider">
-                        Tỷ lệ vượt ngân sách
-                      </th>
-                      <th className="px-6 py-3 text-center text-xs font-semibold text-slate-700 uppercase tracking-wider">
-                        Mức tải
-                      </th>
-                      <th className="px-6 py-3 text-center text-xs font-semibold text-slate-700 uppercase tracking-wider">
-                        Hành động
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody className="bg-white divide-y divide-slate-100">
-                    {filteredMembers.length === 0 && members.length > 0 ? (
-                      <tr>
-                        <td colSpan={7} className="px-6 py-12 text-center text-slate-500 bg-white">
-                          <div className="flex flex-col items-center justify-center">
-                            <Filter className="w-16 h-16 text-slate-300 mb-4" strokeWidth={1.5} />
-                            <p className="text-lg font-medium">Không tìm thấy thành viên phù hợp</p>
-                            <p className="text-sm text-slate-400 mt-1">Thử thay đổi bộ lọc hoặc từ khóa tìm kiếm</p>
-                          </div>
-                        </td>
-                      </tr>
-                    ) : (
-                      filteredMembers.map((member: BuyerTeamMember) => {
-                        // Members are now mapped with guaranteed id field
-                        if (!member || !member.id) return null;
-                        return (
-                        <tr
-                          key={member.id}
-                          onClick={() => {
-                            setSelectedBuyer(member);
-                            setShowKPIModal(true);
-                          }}
-                          className="hover:bg-blue-50/50 cursor-pointer transition-colors"
-                        >
-                          <td className="px-6 py-4 whitespace-nowrap">
-                            <div className="flex items-center gap-3">
-                              <div>
-                                <p className="text-sm font-medium text-slate-900">{member.name || 'N/A'}</p>
-                                <p className="text-xs text-slate-500">{member.email || 'N/A'}</p>
-                                <p className="text-xs text-slate-400">@{member.username || 'N/A'}</p>
-                              </div>
-                            </div>
-                          </td>
-                          <td className="px-6 py-4">
-                            <div className="flex flex-wrap gap-1.5">
-                              {getPurchaseTypeBadges(Array.isArray(member.purchaseTypes) ? member.purchaseTypes : [])}
-                            </div>
-                          </td>
-                          <td className="px-6 py-4 whitespace-nowrap text-center">
-                            <div className="flex items-center justify-center gap-2">
-                              <FileText className="w-4 h-4 text-slate-400" />
-                              <span className="text-sm font-medium text-slate-900">{member.activePRs || 0}</span>
-                            </div>
-                          </td>
-                          <td className="px-6 py-4 whitespace-nowrap text-center">
-                            <div className="flex items-center justify-center gap-2">
-                              <Clock className="w-4 h-4 text-slate-400" />
-                              <span className="text-sm font-medium text-slate-900">{(member.avgLeadTime || 0).toFixed(1)} ngày</span>
-                            </div>
-                          </td>
-                          <td className="px-6 py-4 whitespace-nowrap text-center">
-                            <div className={`flex items-center justify-center gap-2 ${(member.overBudgetRate || 0) > 10 ? 'text-red-600' : (member.overBudgetRate || 0) > 5 ? 'text-orange-600' : 'text-green-600'}`}>
-                              <TrendingUp className="w-4 h-4" />
-                              <span className="text-sm font-medium">{formatPercent(member.overBudgetRate)}</span>
-                            </div>
-                          </td>
-                          <td className="px-6 py-4 whitespace-nowrap text-center">
-                            {getWorkloadBadge(member.workload || 'NORMAL')}
-                          </td>
-                          <td className="px-6 py-4 whitespace-nowrap text-center" onClick={(e) => e.stopPropagation()}>
-                            <div className="flex items-center justify-center gap-2">
-                              <button
-                                onClick={() => {
-                                  setSelectedBuyer(member);
-                                  setShowKPIModal(true);
-                                }}
-                                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-[#2563EB] bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors"
-                                title="Xem KPI"
-                              >
-                                <BarChart3 className="w-4 h-4" />
-                                KPI
-                              </button>
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setSelectedBuyer(member);
-                                  setShowPRListModal(true);
-                                }}
-                                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
-                                title="Xem danh sách PR"
-                              >
-                                <Eye className="w-4 h-4" />
-                                PR
-                              </button>
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setSelectedBuyer(member);
-                                  setShowReassignModal(true);
-                                }}
-                                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-amber-700 bg-amber-50 hover:bg-amber-100 rounded-lg transition-colors"
-                                title="Re-assign PR"
-                              >
-                                <ArrowRightLeft className="w-4 h-4" />
-                                Điều phối
-                              </button>
-                            </div>
-                          </td>
-                        </tr>
-                      );
-                      })
-                    )}
-                  </tbody>
-                </table>
+                Thử lại
+              </button>
+            </div>
+          </div>
+        ) : null}
+
+        <RequestorPageHero
+          kicker="Buyer Manager · Đội ngũ"
+          title="Quản lý đội Buyer"
+          description={`Theo dõi tải công việc và phân loại role — định mức tham chiếu ${cap} PR / buyer (cùng công thức bố cục với Tổng quan PR Requestor).`}
+          Icon={Users}
+          tint="ocean"
+          regionLabel="Quản lý đội Buyer"
+          rightSlot={
+            <button
+              type="button"
+              onClick={() => refetch()}
+              disabled={isLoading}
+              className="inline-flex items-center gap-2 rounded-2xl border border-white/25 bg-white/10 px-4 py-2.5 text-sm font-semibold text-white shadow-sm backdrop-blur-sm transition-all hover:bg-white/15 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <RefreshCw className={`h-4 w-4 ${isLoading ? 'animate-spin' : ''}`} aria-hidden />
+              Làm mới dữ liệu
+            </button>
+          }
+        />
+
+        {/* A. KPI — StatCard bento `compact` (Dashboard V3 §4: hàng 4 cột, typography thu gọn) */}
+        <div className="grid grid-cols-1 items-stretch gap-3 sm:grid-cols-2 sm:gap-4 lg:grid-cols-4 lg:gap-4">
+          <StatCard
+            variant="bento"
+            compact
+            accent="indigo"
+            Icon={Users}
+            label="Tổng thành viên"
+            value={<CountUpNumber end={Math.max(0, Math.round(safeTeamData.totalMembers))} durationMs={800} />}
+            hint="Headcount từ dữ liệu hiện tại."
+            className={`${teamStatCardEnterClass} fade-in-right-stagger-2`}
+          />
+          <StatCard
+            variant="bento"
+            compact
+            accent="emerald"
+            Icon={Crown}
+            label="Buyer Leaders"
+            value={<CountUpNumber end={Math.max(0, Math.round(safeTeamData.buyerLeaders))} durationMs={800} />}
+            hint="Điều phối cấp đội."
+            className={`${teamStatCardEnterClass} fade-in-right-stagger-3`}
+          />
+          <StatCard
+            variant="bento"
+            compact
+            accent="slate"
+            Icon={UserRound}
+            label="Buyers"
+            value={<CountUpNumber end={Math.max(0, Math.round(safeTeamData.buyers))} durationMs={800} />}
+            hint="RFQ · báo giá · PO."
+            className={`${teamStatCardEnterClass} fade-in-right-stagger-4`}
+          />
+          <StatCard
+            variant="bento"
+            compact
+            accent="amber"
+            Icon={ClipboardList}
+            label="PR đang xử lý"
+            value={<CountUpNumber end={Math.max(0, Math.round(Number(safeTeamData.totalWorkload)))} durationMs={800} />}
+            hint={`Tham chiếu tải: ${cap} PR/buyer.`}
+            className={`${teamStatCardEnterClass} fade-in-right-stagger-5`}
+          />
+        </div>
+
+        {/* B. Lọc + bảng — một panel trắng lớn (đồng bộ khối “Phân tích PR” Requestor) */}
+        <div className={`animate-fade-in-right fade-in-right-stagger-6 ${requestorPanelCardClass}`}>
+          <div className="mb-4 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
+            <div className="flex min-w-0 flex-1 items-start gap-2">
+              <div className="rounded-xl bg-gradient-to-br from-violet-100 to-indigo-100 p-2">
+                <BarChart3 className="h-4 w-4 text-indigo-600" strokeWidth={2} />
+              </div>
+              <div className="min-w-0">
+                <h2 className="text-base font-bold text-slate-900">Danh sách & lọc đội</h2>
+                <p className="mt-0.5 text-sm leading-snug text-slate-600">
+                  Tìm theo tên hoặc email; lọc loại mua và mức tải. Chạm một hàng để xem KPI — viền trái hàng gợi ý quá tải / nhàn / ổn định.
+                </p>
               </div>
             </div>
-          )}
+            <Link
+              to="/dashboard/buyer-manager"
+              className="inline-flex shrink-0 items-center gap-1.5 self-start rounded-xl border border-slate-200/80 bg-white px-3.5 py-2 text-xs font-semibold text-slate-800 shadow-sm transition hover:bg-slate-50 sm:text-sm"
+            >
+              <LayoutDashboard className="h-4 w-4 shrink-0 text-indigo-600" aria-hidden />
+              Tổng quan mua hàng
+              <ChevronRight className="h-4 w-4 shrink-0 text-slate-400" aria-hidden />
+            </Link>
+          </div>
+
+          {filterToolbar}
+
+          <div className={`mt-5 min-w-0 ${requestorDataTableCardClass}`}>
+              <div className={requestorDataTableCardHeaderClass}>
+                <h3 className="text-base font-bold text-slate-900 sm:text-lg">Bảng thành viên</h3>
+              </div>
+
+              {filteredMembers.length === 0 ? (
+                <div className="flex min-h-[280px] items-center justify-center px-4 py-12">
+                  <div className="text-center">
+                    {members.length > 0 ? (
+                      <>
+                        <Filter className="mx-auto mb-4 h-16 w-16 text-slate-300" strokeWidth={1.5} />
+                        <p className="text-lg font-medium text-slate-600">Không tìm thấy thành viên phù hợp</p>
+                        <p className="mt-1 text-sm text-slate-400">Thử thay đổi bộ lọc hoặc từ khóa tìm kiếm</p>
+                      </>
+                    ) : (
+                      <>
+                        <Users className="mx-auto mb-4 h-16 w-16 text-slate-300" strokeWidth={1.5} />
+                        <p className="text-lg font-medium text-slate-600">Không có thành viên nào</p>
+                        <p className="mt-1 text-sm text-slate-400">Chưa có buyer / buyer leader trong hệ thống</p>
+                      </>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <div className="min-w-0 overflow-x-auto">
+                  <table className="w-full min-w-[720px]">
+                    <thead className="sticky top-0 z-10 border-b border-slate-200 bg-slate-50/95 backdrop-blur-sm">
+                      <tr>
+                        <th className="px-3 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-600 sm:px-6">
+                          Buyer
+                        </th>
+                        <th className="hidden px-3 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-600 md:table-cell sm:px-6">
+                          Loại mua
+                        </th>
+                        <th className="px-3 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600 sm:px-6">
+                          PR
+                        </th>
+                        <th className="px-3 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600 sm:px-6">
+                          % tải
+                        </th>
+                        <th className="hidden px-3 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600 sm:table-cell sm:px-6 md:table-cell">
+                          Lead TB
+                        </th>
+                        <th className="hidden px-3 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600 md:table-cell sm:px-6">
+                          Vượt NS
+                        </th>
+                        <th className="px-3 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600 sm:px-6">
+                          Mức tải
+                        </th>
+                        <th className="px-3 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600 sm:px-6">
+                          Thao tác
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 bg-white">
+                      {filteredMembers.map((member: BuyerTeamMember) => {
+                        if (!member?.id) return null;
+                        const pct =
+                          typeof member.workloadPercent === 'number'
+                            ? member.workloadPercent
+                            : Math.min(100, Math.round(((member.activePRs || 0) / cap) * 1000) / 10);
+                        const band: BuyerWorkloadBand =
+                          member.workloadBand ?? inferWorkloadBand(pct);
+                        const roleLabel = member.role === 'BUYER_LEADER' ? 'Buyer Leader' : 'Buyer';
+                        return (
+                          <tr
+                            key={member.id}
+                            onClick={() => {
+                              setSelectedBuyer(member);
+                              setShowKPIModal(true);
+                            }}
+                            className={`cursor-pointer transition-all duration-200 hover:bg-white/90 ${rowHeatmapClass(band)}`}
+                          >
+                            <td className="whitespace-nowrap px-3 py-3 sm:px-6 sm:py-4">
+                              <div className="flex min-w-0 items-center gap-3">
+                                <div
+                                  className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-indigo-500 to-blue-600 text-xs font-bold text-white shadow ring-2 ring-white transition-transform duration-200 hover:scale-105"
+                                  aria-hidden
+                                >
+                                  {memberInitials(member.name || '?')}
+                                </div>
+                                <div className="min-w-0">
+                                  <p className="truncate text-sm font-semibold text-slate-900">{member.name || 'N/A'}</p>
+                                  <p className="text-xs text-slate-500">{roleLabel}</p>
+                                  <p className="truncate text-xs text-slate-400">@{member.username || '—'}</p>
+                                  <div className="mt-0.5 flex items-center gap-1.5 md:mt-1">
+                                    <span
+                                      className="inline-flex md:hidden"
+                                      title={member.email || 'Không có email'}
+                                    >
+                                      <Mail className="h-3.5 w-3.5 text-slate-400" aria-hidden />
+                                    </span>
+                                    <p className="hidden truncate text-xs text-slate-500 md:block" title={member.email}>
+                                      {member.email || '—'}
+                                    </p>
+                                  </div>
+                                </div>
+                              </div>
+                            </td>
+                            <td className="hidden px-3 py-3 sm:px-6 sm:py-4 md:table-cell">
+                              <div className="flex flex-wrap gap-1.5">
+                                {getPurchaseTypeBadges(
+                                  Array.isArray(member.purchaseTypes) ? member.purchaseTypes : []
+                                )}
+                              </div>
+                            </td>
+                            <td className="whitespace-nowrap px-3 py-3 text-center sm:px-6 sm:py-4">
+                              <div className="flex items-center justify-center gap-1.5">
+                                <FileText className="h-4 w-4 shrink-0 text-slate-400" />
+                                <span className="text-sm font-semibold tabular-nums text-slate-900">
+                                  {member.activePRs ?? 0}
+                                </span>
+                              </div>
+                            </td>
+                            <td className="whitespace-nowrap px-3 py-3 text-center sm:px-6 sm:py-4">
+                              <span className="text-sm font-bold tabular-nums text-slate-900">{pct.toFixed(1)}%</span>
+                              <span className="mt-0.5 block text-[10px] font-medium uppercase text-slate-500">
+                                {band === 'overload' ? 'Quá tải' : band === 'idle' ? 'Nhàn' : 'Ổn định'}
+                              </span>
+                            </td>
+                            <td className="hidden whitespace-nowrap px-3 py-3 text-center sm:table-cell sm:px-6 sm:py-4 md:table-cell">
+                              <div className="flex items-center justify-center gap-1.5">
+                                <Clock className="h-4 w-4 shrink-0 text-slate-400" />
+                                <span className="text-sm font-medium tabular-nums text-slate-900">
+                                  {(member.avgLeadTime || 0).toFixed(1)}d
+                                </span>
+                              </div>
+                            </td>
+                            <td className="hidden whitespace-nowrap px-3 py-3 text-center md:table-cell sm:px-6 sm:py-4">
+                              <div
+                                className={`flex items-center justify-center gap-1.5 ${
+                                  (member.overBudgetRate || 0) > 10
+                                    ? 'text-red-600'
+                                    : (member.overBudgetRate || 0) > 5
+                                      ? 'text-orange-600'
+                                      : 'text-emerald-600'
+                                }`}
+                              >
+                                <TrendingUp className="h-4 w-4 shrink-0" />
+                                <span className="text-sm font-medium">{formatPercent(member.overBudgetRate)}</span>
+                              </div>
+                            </td>
+                            <td className="whitespace-nowrap px-3 py-3 text-center sm:px-6 sm:py-4">
+                              <div className="flex flex-col items-center gap-1">
+                                {getWorkloadBadge(member.workload || 'NORMAL')}
+                              </div>
+                            </td>
+                            <td className="whitespace-nowrap px-3 py-3 text-center sm:px-6 sm:py-4" onClick={(e) => e.stopPropagation()}>
+                              <div className="flex flex-wrap items-center justify-center gap-1.5 sm:gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setSelectedBuyer(member);
+                                    setShowKPIModal(true);
+                                  }}
+                                  className="inline-flex items-center gap-1 rounded-xl border border-indigo-200/60 bg-indigo-50/90 px-2 py-1.5 text-[11px] font-semibold text-indigo-800 shadow-sm transition hover:-translate-y-0.5 hover:bg-indigo-100 sm:px-3 sm:text-xs"
+                                  title="Xem KPI"
+                                >
+                                  <BarChart3 className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
+                                  <span className="hidden sm:inline">KPI</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setSelectedBuyer(member);
+                                    setShowPRListModal(true);
+                                  }}
+                                  className="inline-flex items-center gap-1 rounded-xl border border-slate-200/80 bg-white px-2 py-1.5 text-[11px] font-semibold text-slate-700 shadow-sm transition hover:-translate-y-0.5 hover:bg-slate-50 sm:px-3 sm:text-xs"
+                                  title="Xem danh sách PR"
+                                >
+                                  <Eye className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
+                                  <span className="hidden sm:inline">PR</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setSelectedBuyer(member);
+                                    setShowReassignModal(true);
+                                  }}
+                                  className="inline-flex items-center gap-1 rounded-xl border border-amber-200/70 bg-amber-50/90 px-2 py-1.5 text-[11px] font-semibold text-amber-900 shadow-sm transition hover:-translate-y-0.5 hover:bg-amber-100 sm:px-3 sm:text-xs"
+                                  title="Re-assign PR"
+                                >
+                                  <ArrowRightLeft className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
+                                  <span className="hidden sm:inline">Điều phối</span>
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
         </div>
       </div>
 
@@ -564,20 +749,20 @@ const TeamManagement = () => {
           }}
         />
       )}
-    </div>
+    </>
   );
 };
 
 // KPI Detail Modal Component
 const KPIModal = ({ buyer, kpis, isLoading, onClose }: { buyer: BuyerTeamMember; kpis: any; isLoading: boolean; onClose: () => void }) => {
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={onClose}>
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4 modal-popup-overlay" onClick={onClose}>
       <div
-        className="bg-white rounded-2xl shadow-xl max-w-4xl w-full max-h-[90vh] overflow-auto"
+        className="modal-popup-panel bg-white rounded-2xl shadow-xl max-w-4xl w-full max-h-[90vh] flex flex-col overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Modal Header */}
-        <div className="sticky top-0 bg-white border-b border-slate-200 p-6 flex items-center justify-between z-10">
+        <div className="flex-shrink-0 bg-white border-b border-slate-200 p-6 flex items-center justify-between">
           <div>
             <h3 className="text-xl font-bold text-slate-900">KPI Chi tiết - {buyer.name}</h3>
             <p className="text-sm text-slate-500 mt-1">{buyer.email}</p>
@@ -588,7 +773,7 @@ const KPIModal = ({ buyer, kpis, isLoading, onClose }: { buyer: BuyerTeamMember;
         </div>
 
         {/* Modal Body */}
-        <div className="p-6">
+        <div className="flex-1 min-h-0 overflow-y-auto p-6">
           {isLoading ? (
             <div className="flex items-center justify-center py-12">
               <div className="text-center">
@@ -710,11 +895,11 @@ const KPIModal = ({ buyer, kpis, isLoading, onClose }: { buyer: BuyerTeamMember;
 
 // Re-assign PR Modal Component
 const ReassignPRModal = ({ buyer, allBuyers, onClose, onReassign }: { buyer: BuyerTeamMember; allBuyers: BuyerTeamMember[]; onClose: () => void; onReassign: (data: any) => void }) => {
+  const { showWarning } = useToast();
   const [prId, setPrId] = useState('');
   const [newBuyerId, setNewBuyerId] = useState('');
   const [reason, setReason] = useState('');
   const [assignByItem, setAssignByItem] = useState(false);
-  const [selectedItemIds, setSelectedItemIds] = useState<string[]>([]);
 
   // Fetch PRs assigned to this buyer
   const { data: buyerPRsData, isLoading: isLoadingBuyerPRs } = useQuery({
@@ -729,25 +914,25 @@ const ReassignPRModal = ({ buyer, allBuyers, onClose, onReassign }: { buyer: Buy
 
   const handleSubmit = () => {
     if (!prId || !newBuyerId || !reason.trim()) {
-      alert('Vui lòng điền đầy đủ thông tin');
+      showWarning('Vui lòng điền đầy đủ thông tin');
       return;
     }
     onReassign({
       prId,
       newBuyerId,
       reason,
-      itemIds: assignByItem ? selectedItemIds : undefined,
+      itemIds: assignByItem ? [] : undefined,
     });
   };
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={onClose}>
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4 modal-popup-overlay" onClick={onClose}>
       <div
-        className="bg-white rounded-2xl shadow-xl max-w-2xl w-full max-h-[90vh] overflow-auto"
+        className="modal-popup-panel bg-white rounded-2xl shadow-xl max-w-2xl w-full max-h-[90vh] flex flex-col overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Modal Header */}
-        <div className="sticky top-0 bg-white border-b border-slate-200 p-6 flex items-center justify-between z-10">
+        <div className="flex-shrink-0 bg-white border-b border-slate-200 p-6 flex items-center justify-between">
           <div>
             <h3 className="text-xl font-bold text-slate-900">Re-assign PR</h3>
             <p className="text-sm text-slate-500 mt-1">Chuyển PR từ {buyer.name}</p>
@@ -758,7 +943,7 @@ const ReassignPRModal = ({ buyer, allBuyers, onClose, onReassign }: { buyer: Buy
         </div>
 
         {/* Modal Body */}
-        <div className="p-6 space-y-4">
+        <div className="flex-1 min-h-0 overflow-y-auto p-6 space-y-4">
           {/* PR Selection */}
           <div>
             <label className="block text-sm font-semibold text-slate-700 mb-2">Chọn PR</label>
@@ -774,7 +959,7 @@ const ReassignPRModal = ({ buyer, allBuyers, onClose, onReassign }: { buyer: Buy
                 <p className="text-sm text-slate-600 text-center">Không có PR nào đang được {buyer.name} xử lý</p>
               </div>
             ) : (
-              <select
+              <CustomSelect
                 value={prId}
                 onChange={(e) => setPrId(e.target.value)}
                 className="w-full px-4 py-2.5 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent bg-white"
@@ -783,7 +968,7 @@ const ReassignPRModal = ({ buyer, allBuyers, onClose, onReassign }: { buyer: Buy
                 {buyerPRs.map((pr: any) => (
                   <option key={pr.id} value={pr.id}>{pr.prNumber || pr.id}</option>
                 ))}
-              </select>
+              </CustomSelect>
             )}
             <p className="text-xs text-slate-500 mt-1">Danh sách PR đang được {buyer.name} xử lý</p>
           </div>
@@ -791,7 +976,7 @@ const ReassignPRModal = ({ buyer, allBuyers, onClose, onReassign }: { buyer: Buy
           {/* New Buyer Selection */}
           <div>
             <label className="block text-sm font-semibold text-slate-700 mb-2">Chuyển đến Buyer</label>
-            <select
+            <CustomSelect
               value={newBuyerId}
               onChange={(e) => setNewBuyerId(e.target.value)}
               className="w-full px-4 py-2.5 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent"
@@ -799,10 +984,10 @@ const ReassignPRModal = ({ buyer, allBuyers, onClose, onReassign }: { buyer: Buy
               <option value="">-- Chọn Buyer --</option>
               {allBuyers.map((b) => (
                 <option key={b.id} value={b.id}>
-                  {b.name} - {b.purchaseTypes.join(', ')}
+                  {b.name} — {(b.purchaseTypes ?? ['DOMESTIC']).join(', ')}
                 </option>
               ))}
-            </select>
+            </CustomSelect>
           </div>
 
           {/* Assign by Item Toggle */}
@@ -845,7 +1030,7 @@ const ReassignPRModal = ({ buyer, allBuyers, onClose, onReassign }: { buyer: Buy
         </div>
 
         {/* Modal Footer */}
-        <div className="sticky bottom-0 bg-slate-50 border-t border-slate-200 p-6 flex items-center justify-end gap-3 rounded-b-2xl">
+        <div className="flex-shrink-0 bg-slate-50 border-t border-slate-200 p-6 flex items-center justify-end gap-3 rounded-b-2xl">
           <button
             onClick={onClose}
             className="px-6 py-2.5 text-slate-700 bg-white border border-slate-300 rounded-xl hover:bg-slate-50 transition-colors font-medium"
@@ -868,13 +1053,13 @@ const ReassignPRModal = ({ buyer, allBuyers, onClose, onReassign }: { buyer: Buy
 // PR List Modal Component
 const PRListModal = ({ buyer, prs, isLoading, onClose }: { buyer: BuyerTeamMember; prs: any[]; isLoading: boolean; onClose: () => void }) => {
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={onClose}>
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4 modal-popup-overlay" onClick={onClose}>
       <div
-        className="bg-white rounded-2xl shadow-xl max-w-4xl w-full max-h-[90vh] overflow-auto"
+        className="modal-popup-panel bg-white rounded-2xl shadow-xl max-w-4xl w-full max-h-[90vh] flex flex-col overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Modal Header */}
-        <div className="sticky top-0 bg-white border-b border-slate-200 p-6 flex items-center justify-between z-10">
+        <div className="flex-shrink-0 bg-white border-b border-slate-200 p-6 flex items-center justify-between">
           <div>
             <h3 className="text-xl font-bold text-slate-900">Danh sách PR - {buyer.name}</h3>
             <p className="text-sm text-slate-500 mt-1">Tổng cộng: {prs.length} PR</p>
@@ -885,7 +1070,7 @@ const PRListModal = ({ buyer, prs, isLoading, onClose }: { buyer: BuyerTeamMembe
         </div>
 
         {/* Modal Body */}
-        <div className="p-6">
+        <div className="flex-1 min-h-0 overflow-y-auto p-6">
           {isLoading ? (
             <div className="flex items-center justify-center py-12">
               <div className="text-center">

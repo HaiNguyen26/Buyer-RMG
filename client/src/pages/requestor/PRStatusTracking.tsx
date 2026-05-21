@@ -1,7 +1,9 @@
 import { useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { requestorService } from '../../services/requestorService';
-import { Clock, CheckCircle, AlertCircle, AlertTriangle, User, MessageSquare, FileEdit, Send, CheckCircle2, XCircle, ArrowLeftRight, XOctagon, UserCheck, FileCheck, Wallet, FileText, Info, ShoppingCart, Building2 } from 'lucide-react';
+import { Clock, CheckCircle, AlertCircle, AlertTriangle, User, FileEdit, Send, CheckCircle2, XCircle, ArrowLeftRight, XOctagon, UserCheck, FileCheck, Wallet, FileText, Info, ShoppingCart, Building2, MapPin } from 'lucide-react';
+import { RequestorPageHero } from '../../components/RequestorPageHero';
+import { requestorPageStackClass, requestorPanelCardClass } from '../../constants/requestorLayout';
 
 const PRStatusTracking = () => {
     const { id } = useParams<{ id: string }>();
@@ -14,9 +16,16 @@ const PRStatusTracking = () => {
 
     if (!id) {
         return (
-            <div className="min-h-screen bg-slate-50">
-                <div className="p-6">
-                    <div className="bg-white rounded-soft shadow-soft border border-slate-200 p-6">
+            <div className="min-h-0 w-full min-w-0 bg-slate-50">
+                <div className={requestorPageStackClass}>
+                    <RequestorPageHero
+                        kicker="Requestor · Theo dõi"
+                        title="Trạng thái PR"
+                        description="Chọn một PR từ danh sách hoặc từ liên kết để xem tiến độ duyệt và SLA."
+                        Icon={MapPin}
+                        tint="cyan"
+                    />
+                    <div className={requestorPanelCardClass}>
                         <p className="text-slate-600">Vui lòng chọn một PR để theo dõi</p>
                     </div>
                 </div>
@@ -26,11 +35,12 @@ const PRStatusTracking = () => {
 
     if (isLoading) {
         return (
-            <div className="min-h-screen bg-slate-50">
-                <div className="p-6">
+            <div className="min-h-0 w-full min-w-0 bg-slate-50">
+                <div className={requestorPageStackClass}>
                     <div className="animate-pulse space-y-4">
+                        <div className="h-24 rounded-2xl bg-slate-200/90" />
                         <div className="h-8 bg-slate-200 rounded w-64"></div>
-                        <div className="h-96 bg-slate-200 rounded"></div>
+                        <div className="h-96 bg-slate-200 rounded-xl"></div>
                     </div>
                 </div>
             </div>
@@ -322,13 +332,22 @@ const PRStatusTracking = () => {
     }
 
     return (
-        <div className="min-h-screen bg-slate-50">
-            <div className="p-6 space-y-6 animate-fade-in">
-
+        <div className="min-h-0 w-full min-w-0 bg-slate-50">
+            <div className={requestorPageStackClass}>
+                {prData && pr && (
+                    <RequestorPageHero
+                        kicker="Requestor · Theo dõi"
+                        title="Trạng thái PR"
+                        description={`${pr.prNumber} — Luồng duyệt, SLA và người xử lý hiện tại.`}
+                        Icon={MapPin}
+                        tint="azure"
+                        regionLabel={`Trạng thái ${pr.prNumber}`}
+                    />
+                )}
                 {prData && (
                     <>
                         {/* Header PR */}
-                        <div className="bg-white rounded-2xl shadow-[0_8px_24px_rgba(0,0,0,0.06)] border border-slate-200 p-6 animate-slide-up">
+                        <div className={`${requestorPanelCardClass} animate-slide-up`}>
                             <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                                 <div className="space-y-2">
                                     <div className="flex items-center gap-2">
@@ -349,38 +368,81 @@ const PRStatusTracking = () => {
                                         Tổng giá Requestor đã nhập: <span className="font-semibold text-slate-900">{formatCurrency(pr?.totalAmount, pr?.currency || 'VND')}</span>
                                     </div>
                                 </div>
-                                <div className="flex items-center gap-2 text-sm text-slate-600">
-                                    <Clock className="w-4 h-4 text-blue-600" />
+                                <div className="flex flex-wrap items-center gap-2 text-sm text-slate-600">
+                                    <Clock className="h-4 w-4 shrink-0 text-blue-600" />
                                     <span>Due: {isOverdue ? `Quá hạn ${formatHours(remainingHours)}` : formatHours(remainingHours)}</span>
                                 </div>
                             </div>
                         </div>
 
-                        {/* Timeline - Core Stepper */}
-                        <div className="bg-white rounded-2xl shadow-[0_8px_24px_rgba(0,0,0,0.06)] border border-slate-200 p-6 animate-slide-up">
-                            <h2 className="text-xl font-bold text-slate-900 mb-6">Thanh tiến trình</h2>
-                            <div className="flex flex-col gap-6 md:flex-row md:items-center md:justify-between">
+                        {/* Timeline - Core Stepper với Energy Path */}
+                        <div className={`${requestorPanelCardClass} animate-slide-up`}>
+                            <h2 className="mb-4 text-lg font-bold text-slate-900 sm:mb-6 sm:text-xl">Thanh tiến trình</h2>
+                            <div className="flex flex-col gap-6 md:flex-row md:items-start md:justify-between">
                                 {steps.map((step, index) => {
                                     const isDone = isFinal || index < currentStepIndex;
                                     const isCurrent = index === currentStepIndex && !isFinal;
                                     const isWaiting = index > currentStepIndex;
+                                    const isLast = index === steps.length - 1;
                                     const StepIcon = step.icon;
-                                    const stateColor = isDone
-                                        ? 'bg-emerald-500 text-white'
-                                        : isIssueStatus && isCurrent
-                                            ? 'bg-red-500 text-white'
-                                            : isCurrent
-                                                ? 'bg-blue-600 text-white animate-pulse'
-                                                : 'bg-slate-100 text-slate-400';
-                                    const labelColor = isDone ? 'text-emerald-600' : isCurrent ? 'text-blue-600' : 'text-slate-500';
 
                                     return (
-                                        <div key={step.label} className="flex items-center gap-3 md:flex-col md:gap-2 md:flex-1">
-                                            <div className={`w-10 h-10 rounded-full flex items-center justify-center transition-all duration-300 ${stateColor}`}>
-                                                <StepIcon className="w-5 h-5" strokeWidth={2} />
+                                        <div key={step.label} className="group relative flex items-center gap-3 md:flex-col md:gap-2 md:flex-1">
+                                            {/* Connector line - chỉ hiển thị trên desktop và không phải bước cuối */}
+                                            {!isLast && (
+                                                <div className="absolute left-full top-5 hidden h-0.5 w-full translate-x-3 md:block">
+                                                    <div 
+                                                        className={`relative h-full overflow-hidden rounded-full transition-all duration-300 ${
+                                                            isDone
+                                                                ? 'bg-gradient-to-r from-indigo-500 to-cyan-400 shadow-sm shadow-cyan-300'
+                                                                : 'bg-slate-200/90'
+                                                        }`}
+                                                    >
+                                                        {isDone && (
+                                                            <>
+                                                                {/* Flowing Light horizontal */}
+                                                                <div 
+                                                                    className="absolute inset-0 bg-gradient-to-r from-transparent via-white/60 to-transparent animate-linear-flow"
+                                                                    style={{ 
+                                                                        backgroundSize: '200% 100%',
+                                                                        animation: 'linearFlow 2s linear infinite'
+                                                                    }}
+                                                                />
+                                                                {/* Glow */}
+                                                                <div className="absolute inset-0 animate-path-glow" />
+                                                            </>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {/* Node */}
+                                            <div 
+                                                className={`relative w-10 h-10 rounded-full flex items-center justify-center transition-all duration-300 group-hover:scale-110 ${
+                                                    isDone
+                                                        ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-500/40'
+                                                        : isIssueStatus && isCurrent
+                                                            ? 'bg-red-500 text-white shadow-lg shadow-red-500/40 ring-4 ring-red-100 animate-halo-glow'
+                                                            : isCurrent
+                                                                ? 'bg-blue-600 text-white shadow-md shadow-blue-600/20 ring-4 ring-blue-100 animate-halo-glow'
+                                                                : 'bg-slate-100 text-slate-400'
+                                                }`}
+                                            >
+                                                <StepIcon 
+                                                    className={`w-5 h-5 ${isCurrent ? 'animate-[spin_10s_linear_infinite]' : ''}`} 
+                                                    strokeWidth={2} 
+                                                />
                                             </div>
-                                            <div className="flex flex-col">
-                                                <span className={`text-sm font-semibold ${labelColor}`}>{step.label}</span>
+
+                                            {/* Label */}
+                                            <div className="flex flex-col transition-transform duration-200 group-hover:translate-x-1 md:group-hover:translate-x-0 md:group-hover:translate-y-1">
+                                                <span 
+                                                    className={`text-sm font-semibold ${
+                                                        isDone ? 'text-emerald-600' : isCurrent ? 'text-blue-600' : 'text-slate-500'
+                                                    }`}
+                                                >
+                                                    {step.label}
+                                                </span>
                                                 <span className="text-xs text-slate-400">
                                                     {isDone ? 'Hoàn thành' : isCurrent ? (isIssueStatus ? 'Có vấn đề' : 'Đang xử lý') : 'Chưa tới'}
                                                 </span>
@@ -392,7 +454,7 @@ const PRStatusTracking = () => {
                         </div>
 
                         {/* Realtime Due Time Bar */}
-                        <div className="bg-white rounded-2xl shadow-[0_8px_24px_rgba(0,0,0,0.06)] border border-slate-200 p-6 animate-slide-up">
+                        <div className={`${requestorPanelCardClass} animate-slide-up`}>
                             <div className="flex items-center justify-between mb-3">
                                 <div className="flex items-center gap-2">
                                     <Clock className="w-5 h-5 text-blue-600" />
@@ -400,11 +462,46 @@ const PRStatusTracking = () => {
                                 </div>
                                 <span className="text-sm text-slate-600">SLA: {SLA_HOURS} giờ</span>
                             </div>
-                            <div className={`h-3 w-full rounded-full bg-slate-100 overflow-hidden ${isOverdue ? 'animate-pulse' : ''}`}>
+                            <div className={`h-3 w-full rounded-full bg-slate-100 overflow-hidden shadow-inner ${isOverdue ? 'animate-pulse' : ''}`}>
                                 <div
-                                    className={`h-full transition-all duration-300 ${isOverdue ? 'bg-red-500' : isNearDue ? 'bg-amber-400' : 'bg-emerald-500'}`}
+                                    className={`relative h-full transition-all duration-700 ease-out ${
+                                        isOverdue 
+                                            ? 'bg-gradient-to-r from-rose-500 via-red-500 to-pink-600' 
+                                            : isNearDue 
+                                                ? 'bg-gradient-to-r from-amber-500 via-yellow-400 to-orange-500' 
+                                                : 'bg-gradient-to-r from-emerald-500 via-teal-400 to-green-600'
+                                    }`}
                                     style={{ width: `${remainingPercent}%` }}
-                                />
+                                >
+                                    {/* Liquid Flow Animation */}
+                                    {!isOverdue && (
+                                        <div
+                                            className="absolute inset-0 animate-liquid-flow"
+                                            style={{
+                                                background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.4), transparent)',
+                                                backgroundSize: '200% 100%',
+                                            }}
+                                        />
+                                    )}
+                                    
+                                    {/* Micro Bubbles */}
+                                    {remainingPercent > 20 && !isOverdue && (
+                                        <>
+                                            <div 
+                                                className="absolute left-[15%] top-0.5 h-1 w-1 animate-pulse rounded-full bg-white/40" 
+                                                style={{ animationDuration: '2.2s' }} 
+                                            />
+                                            <div 
+                                                className="absolute left-[45%] top-0.5 h-0.5 w-0.5 animate-pulse rounded-full bg-white/30" 
+                                                style={{ animationDuration: '2.8s' }} 
+                                            />
+                                            <div 
+                                                className="absolute left-[75%] top-1 h-1 w-1 animate-pulse rounded-full bg-white/35" 
+                                                style={{ animationDuration: '3.1s' }} 
+                                            />
+                                        </>
+                                    )}
+                                </div>
                             </div>
                             <div className="mt-2 text-sm text-slate-600 flex items-center gap-2">
                                 {isOverdue && <AlertTriangle className="w-4 h-4 text-red-500" />}
@@ -415,9 +512,19 @@ const PRStatusTracking = () => {
                                 </span>
                             </div>
                         </div>
+                        
+                        <style>{`
+                            @keyframes liquid-flow {
+                                from { transform: translateX(-200%); }
+                                to { transform: translateX(300%); }
+                            }
+                            .animate-liquid-flow {
+                                animation: liquid-flow 3s linear infinite;
+                            }
+                        `}</style>
 
                         {/* Owner Card */}
-                        <div className="bg-white rounded-2xl shadow-[0_8px_24px_rgba(0,0,0,0.06)] border border-slate-200 p-6 animate-slide-up">
+                        <div className={`${requestorPanelCardClass} animate-slide-up`}>
                             <div className="flex items-center gap-3">
                                 <User className="w-6 h-6 text-blue-600" strokeWidth={2} />
                                 <div>
@@ -455,7 +562,7 @@ const PRStatusTracking = () => {
                         )}
 
                         {/* Audit mini */}
-                        <div className="bg-white rounded-2xl shadow-[0_8px_24px_rgba(0,0,0,0.06)] border border-slate-200 p-6 animate-slide-up">
+                        <div className={`${requestorPanelCardClass} animate-slide-up`}>
                             <h2 className="text-xl font-bold text-slate-900 mb-4">Lịch sử hành động</h2>
                             <div className="space-y-4">
                                 {prData.timeline?.map((item: any, index: number) => (
@@ -484,7 +591,7 @@ const PRStatusTracking = () => {
 
                         {/* Comments */}
                         {prData.comments && prData.comments.length > 0 && (
-                            <div className="bg-white rounded-2xl shadow-[0_8px_24px_rgba(0,0,0,0.06)] border border-slate-200 p-6 animate-slide-up">
+                            <div className={`${requestorPanelCardClass} animate-slide-up`}>
                                 <h2 className="text-xl font-bold text-slate-900 mb-4">Comment / Yêu cầu bổ sung từ Buyer</h2>
                                 <div className="space-y-4">
                                     {prData.comments.map((comment: any, index: number) => (

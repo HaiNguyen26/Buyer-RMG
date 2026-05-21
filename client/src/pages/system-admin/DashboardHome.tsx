@@ -39,6 +39,19 @@ const DashboardHome = () => {
 
   return (
     <div className="space-y-6">
+      <div className="page-banner-dark page-banner-dark-tint-ocean relative overflow-hidden animate-fade-in-right fade-in-right-delay-0">
+        <div className="relative z-10 max-w-[min(100%,40rem)] pr-12 sm:pr-14">
+          <p className="page-banner-dark-kicker">System Admin</p>
+          <h1 className="page-banner-dark-title mt-1">Bảng điều khiển hệ thống</h1>
+          <p className="page-banner-dark-desc mt-1">
+            Nhân sự, tổ chức, PR hoạt động và cảnh báo vận hành — tổng quan một màn hình.
+          </p>
+        </div>
+        <div className="page-banner-deco-icon" aria-hidden>
+          <Settings className="h-12 w-12 sm:h-14 sm:w-14" strokeWidth={1.5} />
+        </div>
+      </div>
+
       {/* Stats Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
         {/* Total Employees */}

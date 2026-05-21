@@ -1,7 +1,16 @@
 import { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { ClipboardList, User, Building2, DollarSign, Calendar, ArrowRight, X, Mail, MapPin, Package, Info, FileText, AlertTriangle, Globe, Home, Save, CheckCircle2 } from 'lucide-react';
 import { buyerLeaderService } from '../../services/buyerLeaderService';
+import CustomSelect from '../../components/CustomSelect';
+import { useToast } from '../../contexts/ToastContext';
+import { BuyerLeaderPageHero } from '../../components/BuyerLeaderPageHero';
+import { AppModal } from '../../components/AppModal';
+import { saasTableHeadCellClass, saasPrStatusBadgeClass } from '../../constants/saasDataTable';
+import { getPRStatusLabel } from '../../constants/statusLabels';
+import { formatIsoDateToDdMmYyyy } from '../../utils/dateDisplay';
+import { buyerLeaderPageStackClass } from '../../constants/buyerLeaderLayout';
 
 const formatCurrency = (amount: number | null, currency: string = 'VND') => {
   if (!amount) return 'Chưa có';
@@ -34,6 +43,7 @@ const PendingAssignments = () => {
   const [isDetailModalOpen, setIsDetailModalOpen] = useState(false);
   const [itemAssignments, setItemAssignments] = useState<Record<string, ItemAssignment>>({});
   const queryClient = useQueryClient();
+  const { showSuccess, showError } = useToast();
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['buyer-leader-pending-assignments'],
@@ -215,10 +225,11 @@ const PendingAssignments = () => {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['buyer-leader-pending-assignments'] });
       handleCloseModal();
+      showSuccess('Đã phân công PR cho Buyer thành công.');
     },
     onError: (error: any) => {
       console.error('Assign error:', error);
-      // Error sẽ được hiển thị bởi UI
+      showError(error?.response?.data?.error || error?.message || 'Có lỗi xảy ra khi phân công PR');
     },
   });
 
@@ -253,9 +264,17 @@ const PendingAssignments = () => {
     setSelectedPRId(null);
   };
 
+  const openAssignFromDetail = () => {
+    const pr = pendingPRs.find((p: { id: string }) => p.id === selectedPRId);
+    if (!pr) return;
+    handleCloseDetailModal();
+    setSelectedPR(pr);
+    setIsModalOpen(true);
+  };
+
   if (isLoading) {
     return (
-      <div className="h-full overflow-hidden flex flex-col p-6">
+      <div className={`h-full min-h-0 w-full min-w-0 flex flex-col overflow-hidden p-6 ${buyerLeaderPageStackClass}`}>
         <div className="animate-pulse space-y-4">
           {[1, 2, 3].map((i) => (
             <div key={i} className="h-32 bg-slate-200 rounded-soft-lg"></div>
@@ -267,7 +286,7 @@ const PendingAssignments = () => {
 
   if (error) {
     return (
-      <div className="h-full overflow-hidden flex flex-col p-6">
+      <div className={`h-full min-h-0 w-full min-w-0 flex flex-col overflow-hidden p-6 ${buyerLeaderPageStackClass}`}>
         <div className="bg-red-50 border border-red-200 rounded-soft p-4">
           <p className="text-red-800 font-medium">Lỗi khi tải dữ liệu</p>
           <p className="text-red-600 text-sm mt-1">{error instanceof Error ? error.message : 'Vui lòng thử lại sau'}</p>
@@ -277,58 +296,56 @@ const PendingAssignments = () => {
   }
 
   return (
-    <div className="h-full overflow-hidden flex flex-col relative" style={{ backgroundColor: 'transparent' }}>
+    <div
+      className={`h-full min-h-0 w-full min-w-0 flex-1 overflow-hidden flex flex-col relative ${buyerLeaderPageStackClass}`}
+      style={{ backgroundColor: 'transparent' }}
+    >
       {/* Banner */}
-      <div className="flex-shrink-0 mb-6 px-6 pt-6">
-        <div className="bg-white/80 backdrop-blur-sm rounded-2xl shadow-soft-md border border-slate-200/50 p-6 slide-right-title">
-          <div className="flex items-center justify-between">
-            {/* Left: Introduction */}
-            <div className="flex-1">
-              <h1 className="text-2xl font-bold text-slate-900 mb-2">Phân công PR cho Buyer</h1>
-              <p className="text-slate-600">Xem và phân công các PR đã được duyệt cho Buyer xử lý</p>
-            </div>
-            
-            {/* Right: PR Count */}
-            <div className="ml-6 flex items-center gap-4 px-6 py-4 bg-gradient-to-br from-blue-50 to-blue-100 rounded-2xl border border-blue-200/50">
-              <div className="p-3 bg-blue-600 rounded-xl">
-                <ClipboardList className="w-6 h-6 text-white" strokeWidth={2} />
-              </div>
-              <div>
-                <p className="text-3xl font-bold text-blue-900">{pendingPRs.length}</p>
-                <p className="text-sm text-blue-700 font-medium">PR chờ phân công</p>
+      <div className="flex-shrink-0 mb-4 px-2 pt-3 sm:px-3 sm:pt-4 md:px-4">
+        <BuyerLeaderPageHero
+          kicker="Buyer Leader · Assignment Workspace"
+          title="Phân công PR cho Buyer"
+          description="Xem và phân công các PR đã được duyệt cho Buyer xử lý."
+          Icon={ClipboardList}
+          tint="ocean"
+          regionLabel="Phân công PR"
+          rightSlot={
+            <div className="flex items-center gap-2 rounded-xl border border-white/25 bg-white/10 px-4 py-2 backdrop-blur-sm">
+              <ClipboardList className="h-5 w-5 text-white" strokeWidth={2} />
+              <div className="leading-tight">
+                <p className="text-2xl font-black tabular-nums text-white">{pendingPRs.length}</p>
+                <p className="text-[11px] font-semibold text-white/85">PR chờ phân công</p>
               </div>
             </div>
-          </div>
-        </div>
+          }
+        />
       </div>
 
       {/* Table */}
-      <div className="flex-1 min-h-0 flex flex-col overflow-hidden px-6 pb-6">
-        <div className="bg-white rounded-2xl shadow-lg border border-slate-200/50 flex flex-col overflow-hidden slide-right-content relative z-10" style={{ isolation: 'isolate', borderRadius: '1.25rem' }}>
+      <div className="flex-1 min-h-0 flex flex-col overflow-hidden px-2 pb-3 sm:px-3 sm:pb-4 md:px-4">
+        <div className="relative z-10 flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-slate-200/50 bg-white shadow-lg slide-right-content" style={{ isolation: 'isolate', borderRadius: '1.25rem' }}>
           {/* Table Header */}
-          <div className="flex-shrink-0 bg-gradient-to-r from-slate-50 to-slate-100 border-b border-slate-200/50 overflow-hidden" style={{ borderTopLeftRadius: '1.25rem', borderTopRightRadius: '1.25rem' }}>
+          <div className="flex-shrink-0 overflow-hidden border-b border-slate-200/60 bg-gradient-to-r from-slate-50 to-slate-100" style={{ borderTopLeftRadius: '1.25rem', borderTopRightRadius: '1.25rem' }}>
             <div className="grid grid-cols-12 gap-4 px-6 py-4 text-sm font-semibold text-slate-700">
-              <div className="col-span-1">STT</div>
-              <div className="col-span-2">Mã PR</div>
-              <div className="col-span-2">Người yêu cầu</div>
-              <div className="col-span-2">Phòng ban</div>
-              <div className="col-span-2">Tổng tiền</div>
-              <div className="col-span-2">Ngày tạo</div>
-              <div className="col-span-1">Hành động</div>
+              <div className="col-span-1 inline-flex items-center gap-1.5"><span className="text-indigo-600">#</span>STT</div>
+              <div className="col-span-2 inline-flex items-center gap-1.5"><FileText className="h-4 w-4 text-indigo-600" strokeWidth={2} />Mã PR</div>
+              <div className="col-span-2 inline-flex items-center gap-1.5"><User className="h-4 w-4 text-cyan-600" strokeWidth={2} />Người yêu cầu</div>
+              <div className="col-span-2 inline-flex items-center gap-1.5"><Building2 className="h-4 w-4 text-slate-600" strokeWidth={2} />Phòng ban</div>
+              <div className="col-span-2 inline-flex items-center gap-1.5"><DollarSign className="h-4 w-4 text-emerald-600" strokeWidth={2} />Tổng tiền</div>
+              <div className="col-span-2 inline-flex items-center gap-1.5"><Calendar className="h-4 w-4 text-amber-600" strokeWidth={2} />Ngày tạo</div>
+              <div className="col-span-1 inline-flex items-center gap-1.5"><ArrowRight className="h-4 w-4 text-violet-600" strokeWidth={2} />Hành động</div>
             </div>
           </div>
 
-          {/* Table Body - Scrollable with fixed height */}
+          {/* Table Body — cuộn trong phần cao còn lại của viewport */}
           <div 
-            className="bg-white overflow-y-auto overflow-x-hidden" 
+            className="min-h-0 flex-1 overflow-y-auto overflow-x-auto bg-white" 
             style={{ 
               borderBottomLeftRadius: '1.25rem', 
               borderBottomRightRadius: '1.25rem',
-              height: '504px', // Fixed height to show ~7 PRs (72px per row)
-              maxHeight: '504px',
             }}
           >
-            <div className="bg-white w-full">
+            <div className="bg-white w-full min-w-[1120px]">
               {pendingPRs.length === 0 ? (
                 <div className="h-full min-h-[400px] flex items-center justify-center">
                   <div className="text-center">
@@ -338,15 +355,16 @@ const PendingAssignments = () => {
                   </div>
                 </div>
               ) : (
-                <div className="divide-y divide-slate-100/50 w-full bg-white">
+                <div className="divide-y divide-slate-100/50 w-full min-w-[1120px] bg-white">
                   {pendingPRs.map((pr: any, index: number) => (
                     <div
                       key={pr.id}
-                      className="grid grid-cols-12 gap-4 px-6 py-4 hover:bg-slate-50/50 transition-all duration-200 bg-white cursor-pointer slide-right-item w-full flex-shrink-0"
+                      className="group grid min-w-[1120px] grid-cols-12 gap-4 px-6 py-4 transition-all duration-300 ease-out hover:-translate-y-[1px] hover:bg-indigo-50/70 cursor-pointer slide-right-item w-full flex-shrink-0"
                       style={{ animationDelay: `${0.5 + index * 0.03}s` }}
                       onClick={() => handleViewPRDetails(pr.id)}
                     >
-                      <div className="col-span-1 flex items-center text-sm text-slate-600">
+                      <div className="col-span-1 relative flex items-center text-sm text-slate-600">
+                        <div aria-hidden className="pointer-events-none absolute inset-y-0 -left-6 w-[3px] rounded-r-full bg-indigo-600 opacity-0 transition-all duration-300 group-hover:opacity-100" />
                         {index + 1}
                       </div>
                       <div className="col-span-2 flex items-center">
@@ -379,7 +397,7 @@ const PendingAssignments = () => {
                       <div className="col-span-1 flex items-center">
                         <button
                           onClick={(e) => handleAssignClick(pr, e)}
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white text-xs font-medium rounded-xl hover:bg-blue-700 transition-colors whitespace-nowrap shadow-sm"
+                          className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-xl border border-indigo-300/70 bg-gradient-to-b from-indigo-500 to-indigo-600 px-3 py-1.5 text-xs font-semibold text-white shadow-[0_8px_18px_-10px_rgba(79,70,229,0.55)] transition-all duration-200 hover:-translate-y-0.5 hover:from-indigo-600 hover:to-indigo-700"
                         >
                           <span>Phân công</span>
                           <ArrowRight className="w-3 h-3" strokeWidth={2} />
@@ -395,8 +413,8 @@ const PendingAssignments = () => {
       </div>
 
       {/* Modal - Assign PR to Buyer */}
-      {isModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm animate-fadeIn">
+      {isModalOpen && createPortal(
+        <div className="fixed inset-0 z-[9998] flex items-center justify-center bg-black/50 backdrop-blur-sm animate-fadeIn">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-6xl max-h-[90vh] flex flex-col modal-enter overflow-hidden animate-slideUpFadeIn">
             {/* A. HEADER PR (STICKY) */}
             <div className="flex-shrink-0 sticky top-0 z-10 flex items-center justify-between p-6 border-b border-slate-200 bg-gradient-to-r from-indigo-50 to-blue-50 rounded-t-2xl">
@@ -432,22 +450,25 @@ const PendingAssignments = () => {
                 <div className="flex items-center gap-3">
                   <span className="text-sm font-semibold text-slate-700">Quick Actions:</span>
                   <div className="flex items-center gap-2">
-                    <select
-                      onChange={(e) => {
-                        if (e.target.value) {
-                          handleAssignAllToBuyer(e.target.value);
-                        }
-                      }}
-                      className="px-3 py-1.5 text-sm border border-slate-300 rounded-lg bg-white hover:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
-                      defaultValue=""
-                    >
-                      <option value="">Gán tất cả item cho Buyer...</option>
-                      {buyers.map((buyer: any) => (
-                        <option key={buyer.id} value={buyer.id}>
-                          {buyer.username}
-                        </option>
-                      ))}
-                    </select>
+                    <div className="w-[320px] max-w-full">
+                      <CustomSelect
+                        value=""
+                        onValueChange={(value) => {
+                          if (value) handleAssignAllToBuyer(value);
+                        }}
+                        options={[
+                          { value: '', label: 'Gán tất cả item cho Buyer...' },
+                          ...buyers.map((buyer: any) => ({
+                            value: buyer.id,
+                            label: buyer.username,
+                          })),
+                        ]}
+                        className="h-[38px] rounded-xl border-slate-300 bg-white text-sm hover:border-indigo-400 focus:border-indigo-500"
+                        dropdownClassName="rounded-2xl border-slate-200 shadow-2xl"
+                        enableDropdownSearch
+                        dropdownSearchPlaceholder="Tìm Buyer..."
+                      />
+                    </div>
                     <button
                       onClick={handleSplitByPurchaseType}
                       className="px-4 py-1.5 text-sm bg-indigo-100 text-indigo-700 rounded-lg hover:bg-indigo-200 transition-colors font-medium"
@@ -661,184 +682,216 @@ const PendingAssignments = () => {
               </div>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* PR Details Modal */}
-      {isDetailModalOpen && selectedPRId && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm animate-fadeIn">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col modal-enter overflow-hidden">
-            {/* Modal Header */}
-            <div className="flex-shrink-0 flex items-center justify-between p-6 border-b border-slate-200 bg-gradient-to-r from-blue-50 to-slate-50 rounded-t-2xl">
-              <div>
-                <h2 className="text-xl font-bold text-slate-900">Chi tiết Purchase Request</h2>
-                {prDetails && (
-                  <p className="text-sm text-slate-600 mt-1">
-                    Mã PR: <span className="font-semibold text-blue-600">{prDetails.prNumber}</span>
-                  </p>
-                )}
-              </div>
-              <button
-                onClick={handleCloseDetailModal}
-                className="p-2 hover:bg-slate-200 rounded-xl transition-colors"
-                type="button"
-              >
-                <X className="w-5 h-5 text-slate-600" strokeWidth={2} />
-              </button>
-            </div>
-
-            {/* Modal Body - PR Details */}
-            <div className="flex-1 min-h-0 overflow-y-auto p-6">
-              {isLoadingPRDetails ? (
-                <div className="flex items-center justify-center py-12">
-                  <div className="text-center">
-                    <div className="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-                    <p className="text-slate-600">Đang tải chi tiết PR...</p>
-                  </div>
-                </div>
-              ) : prDetailsError ? (
-                <div className="flex items-center justify-center py-12">
-                  <div className="text-center">
-                    <div className="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                      <X className="w-8 h-8 text-red-600" strokeWidth={2} />
-                    </div>
-                    <p className="text-red-600 font-medium mb-1">Lỗi khi tải chi tiết PR</p>
-                    <p className="text-slate-500 text-sm">{prDetailsError instanceof Error ? prDetailsError.message : 'Vui lòng thử lại sau'}</p>
-                  </div>
-                </div>
-              ) : prDetails ? (
-                <div className="space-y-6">
-                  {/* PR Info */}
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div className="flex items-center gap-3 p-4 bg-slate-50 rounded-xl shadow-sm">
-                      <Building2 className="w-5 h-5 text-slate-600" strokeWidth={2} />
-                      <div>
-                        <p className="text-xs text-slate-500 mb-1">Phòng ban</p>
-                        <p className="font-semibold text-slate-900">{prDetails.department || 'N/A'}</p>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-3 p-4 bg-slate-50 rounded-xl shadow-sm">
-                      <User className="w-5 h-5 text-slate-600" strokeWidth={2} />
-                      <div>
-                        <p className="text-xs text-slate-500 mb-1">Người yêu cầu</p>
-                        <p className="font-semibold text-slate-900">{prDetails.requestor?.username || 'N/A'}</p>
-                      </div>
-                    </div>
-                    {prDetails.requiredDate && (
-                      <div className="flex items-center gap-3 p-4 bg-slate-50 rounded-xl shadow-sm">
-                        <Calendar className="w-5 h-5 text-slate-600" strokeWidth={2} />
-                        <div>
-                          <p className="text-xs text-slate-500 mb-1">Ngày cần</p>
-                          <p className="font-semibold text-slate-900">{formatDate(prDetails.requiredDate)}</p>
-                        </div>
-                      </div>
-                    )}
-                    <div className="flex items-center gap-3 p-4 bg-green-50 rounded-xl border border-green-200 shadow-sm">
-                      <DollarSign className="w-5 h-5 text-green-600" strokeWidth={2} />
-                      <div>
-                        <p className="text-xs text-green-700 mb-1">Tổng tiền</p>
-                        <p className="font-bold text-green-700 text-lg">
-                          {formatCurrency(prDetails.totalAmount, prDetails.currency)}
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Purpose */}
-                  {prDetails.purpose && (
-                    <div className="p-4 bg-blue-50 rounded-xl border border-blue-200 shadow-sm">
-                      <div className="flex items-center gap-2 mb-2">
-                        <Info className="w-4 h-4 text-blue-600" strokeWidth={2} />
-                        <p className="text-sm font-semibold text-blue-900">Mục đích sử dụng</p>
-                      </div>
-                      <p className="text-sm text-slate-700">{prDetails.purpose}</p>
-                    </div>
-                  )}
-
-                  {/* Items Table */}
-                  {prDetails.items && prDetails.items.length > 0 && (
-                    <div>
-                      <h3 className="text-lg font-bold text-slate-900 mb-4 flex items-center gap-2">
-                        <Package className="w-5 h-5 text-slate-600" strokeWidth={2} />
-                        Danh sách vật tư/dịch vụ ({prDetails.items.length})
-                      </h3>
-                      <div className="overflow-x-auto overflow-hidden rounded-xl">
-                        <table className="w-full bg-white border border-slate-200 overflow-hidden shadow-sm" style={{ borderRadius: '0.75rem' }}>
-                          <thead className="bg-slate-100 border-b border-slate-200" style={{ borderTopLeftRadius: '0.75rem', borderTopRightRadius: '0.75rem' }}>
-                            <tr>
-                              <th className="px-4 py-3 text-left text-xs font-semibold text-slate-700 uppercase bg-slate-100">STT</th>
-                              <th className="px-4 py-3 text-left text-xs font-semibold text-slate-700 uppercase bg-slate-100">Mô tả</th>
-                              <th className="px-4 py-3 text-left text-xs font-semibold text-slate-700 uppercase bg-slate-100">Số lượng</th>
-                              <th className="px-4 py-3 text-left text-xs font-semibold text-slate-700 uppercase bg-slate-100">Đơn vị</th>
-                              <th className="px-4 py-3 text-right text-xs font-semibold text-slate-700 uppercase bg-slate-100">Đơn giá</th>
-                              <th className="px-4 py-3 text-right text-xs font-semibold text-slate-700 uppercase bg-slate-100">Thành tiền</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-slate-200/50 bg-white">
-                            {prDetails.items.map((item: any, index: number) => (
-                              <tr 
-                                key={item.id} 
-                                className="hover:bg-slate-50 transition-colors bg-white"
-                                style={index === prDetails.items.length - 1 ? { borderBottomLeftRadius: '0.75rem', borderBottomRightRadius: '0.75rem' } : {}}
-                              >
-                                <td className={`px-4 py-3 text-sm text-slate-600 bg-white ${index === prDetails.items.length - 1 ? 'rounded-bl-xl' : ''}`}>{item.lineNo}</td>
-                                <td className="px-4 py-3 text-sm text-slate-900 bg-white">
-                                  <div>
-                                    <p className="font-medium">{item.description}</p>
-                                    {item.spec && (
-                                      <p className="text-xs text-slate-500 mt-1">Spec: {item.spec}</p>
-                                    )}
-                                    {item.manufacturer && (
-                                      <p className="text-xs text-slate-500">NSX: {item.manufacturer}</p>
-                                    )}
-                                  </div>
-                                </td>
-                                <td className="px-4 py-3 text-sm text-slate-600 bg-white">{item.qty}</td>
-                                <td className="px-4 py-3 text-sm text-slate-600 bg-white">{item.unit || '-'}</td>
-                                <td className="px-4 py-3 text-sm text-slate-600 text-right bg-white">
-                                  {item.unitPrice ? formatCurrency(item.unitPrice, prDetails.currency) : '-'}
-                                </td>
-                                <td className={`px-4 py-3 text-sm font-semibold text-slate-900 text-right bg-white ${index === prDetails.items.length - 1 ? 'rounded-br-xl' : ''}`}>
-                                  {item.amount ? formatCurrency(item.amount, prDetails.currency) : '-'}
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Notes */}
-                  {prDetails.notes && (
-                    <div className="p-4 bg-amber-50 rounded-xl border border-amber-200 shadow-sm">
-                      <p className="text-sm font-semibold text-amber-900 mb-2">Ghi chú</p>
-                      <p className="text-sm text-slate-700">{prDetails.notes}</p>
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <div className="flex items-center justify-center py-12">
-                  <div className="text-center">
-                    <FileText className="w-16 h-16 text-slate-300 mx-auto mb-4" strokeWidth={1.5} />
-                    <p className="text-slate-500">Không tìm thấy chi tiết PR</p>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Modal Footer */}
-            <div className="flex-shrink-0 flex items-center justify-end gap-3 p-6 border-t border-slate-200 bg-slate-50 rounded-b-2xl">
-              <button
-                onClick={handleCloseDetailModal}
-                className="px-6 py-2 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-colors font-medium shadow-sm hover:shadow-md"
-              >
-                Đóng
-              </button>
-            </div>
+      <AppModal
+        open={isDetailModalOpen && !!selectedPRId}
+        onClose={handleCloseDetailModal}
+        size="wide"
+        zIndexClass="z-[9999]"
+        title={
+          prDetails ? (
+            <>
+              <span className="block text-[10px] font-bold uppercase tracking-[0.14em] text-indigo-600">
+                Buyer Leader · PR chờ phân công
+              </span>
+              <span className="mt-1 block font-mono text-xl font-black tracking-tight text-slate-900 sm:text-2xl">
+                {prDetails.prNumber}
+              </span>
+            </>
+          ) : (
+            'Chi tiết PR'
+          )
+        }
+        subtitle={
+          prDetails ? (
+            <span className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+              <span className={saasPrStatusBadgeClass(prDetails.status)}>{getPRStatusLabel(prDetails.status)}</span>
+              <span className="inline-flex items-center gap-1 text-xs text-slate-500">
+                <Building2 className="h-3 w-3 shrink-0 text-slate-400" aria-hidden />
+                {prDetails.department || '—'}
+              </span>
+              <span className="inline-flex items-center gap-1 text-xs text-slate-400">
+                <Calendar className="h-3 w-3 shrink-0" aria-hidden />
+                Tạo{' '}
+                {formatIsoDateToDdMmYyyy(
+                  typeof prDetails.createdAt === 'string'
+                    ? prDetails.createdAt
+                    : new Date(prDetails.createdAt).toISOString(),
+                ) || formatDate(prDetails.createdAt)}
+              </span>
+            </span>
+          ) : isLoadingPRDetails ? (
+            'Đang tải…'
+          ) : undefined
+        }
+      >
+        {isLoadingPRDetails ? (
+          <div className="flex justify-center py-16">
+            <div className="h-10 w-10 animate-spin rounded-full border-4 border-indigo-600 border-t-transparent" />
           </div>
-        </div>
-      )}
+        ) : prDetailsError ? (
+          <div className="rounded-2xl border border-red-200 bg-red-50 p-6 text-center">
+            <X className="mx-auto mb-3 h-8 w-8 text-red-500" strokeWidth={2} />
+            <p className="font-semibold text-red-700">Không tải được chi tiết PR</p>
+            <p className="mt-1 text-sm text-red-500">
+              {prDetailsError instanceof Error ? prDetailsError.message : 'Vui lòng thử lại sau'}
+            </p>
+          </div>
+        ) : prDetails ? (
+          <div className="flex min-h-0 flex-col gap-6 md:flex-row md:items-stretch md:gap-0">
+            <div className="min-w-0 flex-1 space-y-4 md:border-r md:border-slate-200/60 md:pr-6">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <div className="relative overflow-hidden rounded-xl bg-gradient-to-br from-blue-600 to-indigo-600 p-4 text-white shadow-md shadow-blue-500/20">
+            <div className="absolute -right-3 -top-3 h-16 w-16 rounded-full bg-white/10" aria-hidden />
+            <p className="text-[10px] font-bold uppercase tracking-widest text-blue-100">Giá trị PR</p>
+            <p className="mt-1 text-xl font-black tabular-nums leading-tight">
+            {formatCurrency(prDetails.totalAmount, prDetails.currency)}
+            </p>
+            <DollarSign className="pointer-events-none absolute bottom-3 right-3 h-6 w-6 text-white/20" strokeWidth={1.5} aria-hidden />
+            </div>
+            <div className="relative overflow-hidden rounded-xl bg-gradient-to-br from-violet-500 to-purple-600 p-4 text-white shadow-md shadow-violet-500/20">
+            <div className="absolute -right-3 -top-3 h-16 w-16 rounded-full bg-white/10" aria-hidden />
+            <p className="text-[10px] font-bold uppercase tracking-widest text-violet-100">Mục đích</p>
+            <p className="mt-1 line-clamp-3 text-sm font-semibold leading-snug" title={prDetails.purpose || undefined}>
+            {prDetails.purpose?.trim() ? prDetails.purpose : '—'}
+            </p>
+            <Info className="pointer-events-none absolute bottom-3 right-3 h-6 w-6 text-white/20" strokeWidth={1.5} aria-hidden />
+            </div>
+            <div className="relative overflow-hidden rounded-xl bg-gradient-to-br from-orange-500 to-amber-500 p-4 text-white shadow-md shadow-amber-500/20">
+            <div className="absolute -right-3 -top-3 h-16 w-16 rounded-full bg-white/10" aria-hidden />
+            <p className="text-[10px] font-bold uppercase tracking-widest text-orange-100">Ngày cần</p>
+            <p className="mt-1 text-lg font-black tabular-nums leading-tight">
+            {prDetails.requiredDate ? formatDate(prDetails.requiredDate) : '—'}
+            </p>
+            <Calendar className="pointer-events-none absolute bottom-3 right-3 h-6 w-6 text-white/20" strokeWidth={1.5} aria-hidden />
+            </div>
+            </div>
+            {prDetails.items && prDetails.items.length > 0 ? (
+            <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+            <div className="flex items-center gap-2 border-b border-slate-100 px-4 py-3">
+            <Package className="h-4 w-4 shrink-0 text-slate-500" strokeWidth={2} aria-hidden />
+            <h3 className="text-xs font-bold uppercase tracking-wide text-slate-600">
+            Danh sách vật tư ({prDetails.items.length})
+            </h3>
+            </div>
+            <div className="max-h-[min(24rem,55vh)] overflow-auto [scrollbar-width:thin]">
+            <table className="w-full min-w-[640px] border-separate border-spacing-0 text-sm">
+            <thead className="sticky top-0 z-10 border-b border-slate-100 bg-slate-50">
+            <tr className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+            <th className={`px-3 py-2.5 text-left ${saasTableHeadCellClass}`}>#</th>
+            <th className={`min-w-[10rem] px-3 py-2.5 text-left ${saasTableHeadCellClass}`}>Mô tả</th>
+            <th className={`px-3 py-2.5 text-right ${saasTableHeadCellClass}`}>SL</th>
+            <th className={`px-3 py-2.5 text-left ${saasTableHeadCellClass}`}>ĐVT</th>
+            <th className={`px-3 py-2.5 text-right ${saasTableHeadCellClass}`}>Đơn giá</th>
+            <th className={`px-3 py-2.5 text-right ${saasTableHeadCellClass}`}>Thành tiền</th>
+            </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+            {prDetails.items.map((item: any) => (
+            <tr key={item.id} className="bg-white hover:bg-slate-50/80">
+            <td className="px-3 py-2.5 text-xs tabular-nums text-slate-400">{item.lineNo}</td>
+            <td className="px-3 py-2.5 text-slate-900">
+            <p className="font-medium">{item.description}</p>
+            {item.spec ? <p className="mt-0.5 text-xs text-slate-500">Spec: {item.spec}</p> : null}
+            {item.manufacturer ? <p className="text-xs text-slate-500">NSX: {item.manufacturer}</p> : null}
+            </td>
+            <td className="px-3 py-2.5 text-right text-slate-700">{item.qty}</td>
+            <td className="px-3 py-2.5 text-slate-600">{item.unit || '—'}</td>
+            <td className="px-3 py-2.5 text-right text-slate-600">
+            {item.unitPrice ? formatCurrency(item.unitPrice, prDetails.currency) : '—'}
+            </td>
+            <td className="px-3 py-2.5 text-right font-semibold text-slate-900">
+            {item.amount ? formatCurrency(item.amount, prDetails.currency) : '—'}
+            </td>
+            </tr>
+            ))}
+            </tbody>
+            </table>
+            </div>
+            </div>
+            ) : null}
+            {prDetails.notes?.trim() ? (
+            <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <p className="text-xs font-bold uppercase tracking-wide text-slate-600">Ghi chú</p>
+            <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-slate-700">{prDetails.notes}</p>
+            </div>
+            ) : null}
+            </div>
+          <div className="flex w-full shrink-0 flex-col gap-4 border-t border-slate-200/70 bg-gradient-to-b from-slate-50 to-white pt-5 md:mt-0 md:w-72 md:border-l md:border-t-0 md:pl-6 md:pt-0">
+          <div className="overflow-hidden rounded-2xl bg-gradient-to-br from-indigo-900 to-indigo-800 text-white shadow-lg shadow-indigo-900/30">
+          <div className="border-b border-indigo-700/50 px-4 py-3">
+          <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-indigo-300">Thông tin chứng từ</p>
+          </div>
+          <dl className="divide-y divide-indigo-700/30 px-4 py-0 text-sm">
+          <div className="flex items-center justify-between gap-2 py-3">
+          <dt className="flex items-center gap-1.5 text-xs text-indigo-300">
+          <Building2 className="h-3 w-3 shrink-0" strokeWidth={2} aria-hidden />
+          Phòng ban
+          </dt>
+          <dd className="font-semibold text-white">{prDetails.department || '—'}</dd>
+          </div>
+          <div className="flex items-center justify-between gap-2 py-3">
+          <dt className="flex items-center gap-1.5 text-xs text-indigo-300">
+          <User className="h-3 w-3 shrink-0" strokeWidth={2} aria-hidden />
+          Người yêu cầu
+          </dt>
+          <dd className="max-w-[10rem] truncate text-right font-semibold text-white" title={prDetails.requestor?.username}>
+          {prDetails.requestor?.username || '—'}
+          </dd>
+          </div>
+          <div className="flex items-center justify-between gap-2 py-3">
+          <dt className="flex items-center gap-1.5 text-xs text-indigo-300">
+          <Calendar className="h-3 w-3 shrink-0" strokeWidth={2} aria-hidden />
+          Ngày tạo
+          </dt>
+          <dd className="font-semibold tabular-nums text-white">
+          {formatIsoDateToDdMmYyyy(
+          typeof prDetails.createdAt === 'string'
+          ? prDetails.createdAt
+          : new Date(prDetails.createdAt).toISOString(),
+          ) || formatDate(prDetails.createdAt)}
+          </dd>
+          </div>
+          <div className="flex flex-col gap-1 py-3">
+          <dt className="text-xs text-indigo-300">Trạng thái</dt>
+          <dd>
+          <span className="inline-flex max-w-full items-center truncate rounded-full bg-white/10 px-2.5 py-1 text-xs font-semibold text-white ring-1 ring-white/20">
+          {getPRStatusLabel(prDetails.status)}
+          </span>
+          </dd>
+          </div>
+          </dl>
+          </div>
+          <div className="mt-auto flex flex-col gap-2 pb-1 md:pb-0">
+          <button
+          type="button"
+          onClick={openAssignFromDetail}
+          className="flex w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700"
+          >
+          <ArrowRight className="h-4 w-4" strokeWidth={2} />
+          Phân công Buyer
+          </button>
+          <button
+          type="button"
+          onClick={handleCloseDetailModal}
+          className="flex w-full items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-600 transition hover:bg-slate-50"
+          >
+          Đóng
+          </button>
+          </div>
+          </div>
+          </div>
+        ) : (
+          <div className="py-12 text-center">
+            <FileText className="mx-auto mb-4 h-16 w-16 text-slate-300" strokeWidth={1.5} />
+            <p className="text-slate-500">Không tìm thấy chi tiết PR</p>
+          </div>
+        )}
+      </AppModal>
     </div>
   );
 };

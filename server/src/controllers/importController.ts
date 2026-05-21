@@ -8,13 +8,65 @@ import { auditCreate } from '../utils/audit';
 interface ExcelRow {
   employee_code: string;
   full_name: string;
+  /** Luôn có giá trị: cột email (nếu hợp lệ) hoặc tự sinh `{employee_code}@import.rmg.local` */
   email: string;
   branch_code?: string;
+  branch_name?: string;
+  department_name?: string;
   department_code?: string;
   job_title?: string;
+  work_location?: string;
+  /** Cột Excel is_branch_director */
+  is_branch_director?: boolean;
   level_code?: string;
   system_roles?: string;
   direct_manager_code?: string;
+}
+
+/** Mẫu Excel nhân sự: chỉ bắt buộc mã + họ tên (không còn bắt buộc email). */
+const REQUIRED_EMPLOYEE_COLUMNS = ['employee_code', 'full_name'] as const;
+
+function getExcelCell(
+  row: ExcelJS.Row,
+  headers: Record<string, number>,
+  key: string
+): string | undefined {
+  const col = headers[key];
+  if (!col) return undefined;
+  const raw = row.getCell(col).value;
+  if (raw === null || raw === undefined) return undefined;
+  if (typeof raw === 'object' && raw !== null && 'text' in (raw as object)) {
+    const t = (raw as { text?: string }).text;
+    return t != null && String(t).trim() ? String(t).trim() : undefined;
+  }
+  const s = String(raw).trim();
+  return s || undefined;
+}
+
+function parseExcelBooleanCell(row: ExcelJS.Row, headers: Record<string, number>, key: string): boolean {
+  const col = headers[key];
+  if (!col) return false;
+  const raw = row.getCell(col).value;
+  if (raw === true) return true;
+  if (raw === false || raw === null || raw === undefined) return false;
+  if (typeof raw === 'number') return raw === 1;
+  const s = String(raw).trim().toLowerCase();
+  return ['1', 'true', 'yes', 'y', 'x', 'có', 'co'].includes(s);
+}
+
+function syntheticImportEmail(employeeCode: string): string {
+  const safe = employeeCode.replace(/[^a-zA-Z0-9._-]/g, '_');
+  return `${safe}@import.rmg.local`;
+}
+
+function resolveImportEmail(
+  row: ExcelJS.Row,
+  headers: Record<string, number>,
+  employeeCode: string
+): string {
+  const explicit = getExcelCell(row, headers, 'email');
+  if (explicit && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(explicit)) return explicit;
+  return syntheticImportEmail(employeeCode);
 }
 
 // Map system_roles từ Excel sang Role enum
@@ -27,7 +79,7 @@ const mapRoleFromExcel = (systemRoles: string | undefined): string => {
     'DEPT_MANAGER': 'DEPARTMENT_HEAD', // Map DEPT_MANAGER to DEPARTMENT_HEAD (Trưởng phòng)
     'TEAM_LEAD': 'DEPARTMENT_HEAD', // Map TEAM_LEAD to DEPARTMENT_HEAD (Trưởng nhóm)
     'BRANCH_MANAGER': 'BRANCH_MANAGER', // Giám đốc / Quản lý chi nhánh
-    'BRANCH_DIRECTOR': 'BRANCH_MANAGER', // Map BRANCH_DIRECTOR to BRANCH_MANAGER
+    'BRANCH_DIRECTOR': 'BRANCH_DIRECTOR', // Giám đốc chi nhánh (enum riêng)
     'BUYER': 'BUYER',
     'BUYER_LEADER': 'BUYER_LEADER',
     'BUYER_MANAGER': 'BUYER_MANAGER',
@@ -53,6 +105,11 @@ const mapRoleFromExcel = (systemRoles: string | undefined): string => {
   // Default to REQUESTOR
   return 'REQUESTOR';
 };
+
+function mapRoleFromExcelRow(row: Pick<ExcelRow, 'system_roles' | 'is_branch_director'>): string {
+  if (row.is_branch_director) return 'BRANCH_DIRECTOR';
+  return mapRoleFromExcel(row.system_roles);
+}
 
 // Import Users from Excel
 export const importUsersFromExcel = async (
@@ -103,14 +160,14 @@ export const importUsersFromExcel = async (
 
     console.log('📊 Excel Headers:', headers);
 
-    // Validate required columns
-    const requiredColumns = ['employee_code', 'full_name', 'email'];
-    const missingColumns = requiredColumns.filter(col => !headers[col]);
-    
+    // Validate required columns (mẫu mới: không bắt buộc email)
+    const missingColumns = REQUIRED_EMPLOYEE_COLUMNS.filter((col) => !headers[col]);
+
     if (missingColumns.length > 0) {
       return reply.code(400).send({
         error: 'Missing required columns',
         missingColumns,
+        expected: [...REQUIRED_EMPLOYEE_COLUMNS],
       });
     }
 
@@ -122,35 +179,33 @@ export const importUsersFromExcel = async (
 
     for (let rowNumber = 2; rowNumber <= worksheet.rowCount; rowNumber++) {
       const row = worksheet.getRow(rowNumber);
-      
-      // Skip empty rows
-      const employeeCode = row.getCell(headers['employee_code'])?.value?.toString()?.trim();
+
+      const employeeCode = getExcelCell(row, headers, 'employee_code');
       if (!employeeCode) {
         continue;
       }
 
+      const fullName = getExcelCell(row, headers, 'full_name') || '';
+      const email = resolveImportEmail(row, headers, employeeCode);
+
       const excelRow: ExcelRow = {
         employee_code: employeeCode,
-        full_name: row.getCell(headers['full_name'])?.value?.toString()?.trim() || '',
-        email: row.getCell(headers['email'])?.value?.toString()?.trim() || '',
-        branch_code: row.getCell(headers['branch_code'])?.value?.toString()?.trim(),
-        department_code: row.getCell(headers['department_code'])?.value?.toString()?.trim(),
-        job_title: row.getCell(headers['job_title'])?.value?.toString()?.trim(),
-        level_code: row.getCell(headers['level_code'])?.value?.toString()?.trim(),
-        system_roles: row.getCell(headers['system_roles'])?.value?.toString()?.trim(),
-        direct_manager_code: row.getCell(headers['direct_manager_code'])?.value?.toString()?.trim(),
+        full_name: fullName,
+        email,
+        branch_code: getExcelCell(row, headers, 'branch_code'),
+        branch_name: getExcelCell(row, headers, 'branch_name'),
+        department_name: getExcelCell(row, headers, 'department_name'),
+        department_code: getExcelCell(row, headers, 'department_code'),
+        job_title: getExcelCell(row, headers, 'job_title'),
+        work_location: getExcelCell(row, headers, 'work_location'),
+        is_branch_director: parseExcelBooleanCell(row, headers, 'is_branch_director'),
+        level_code: getExcelCell(row, headers, 'level_code'),
+        system_roles: getExcelCell(row, headers, 'system_roles'),
+        direct_manager_code: getExcelCell(row, headers, 'direct_manager_code'),
       };
 
-      // Validate row data
-      if (!excelRow.email) {
-        errors.push({ row: rowNumber, error: 'Email is required' });
-        continue;
-      }
-
-      // Validate email format
-      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-      if (!emailRegex.test(excelRow.email)) {
-        errors.push({ row: rowNumber, error: `Invalid email format: ${excelRow.email}` });
+      if (!fullName.trim()) {
+        errors.push({ row: rowNumber, error: 'full_name is required' });
         continue;
       }
 
@@ -189,18 +244,20 @@ export const importUsersFromExcel = async (
           continue;
         }
 
-        // Map role
-        const role = mapRoleFromExcel(row.system_roles) as any;
+        const role = mapRoleFromExcelRow(row) as any;
 
         // Create user
         const newUser = await prisma.user.create({
           data: {
             username: row.employee_code,
+            fullName: row.full_name || null,
             email: row.email,
             passwordHash: passwordHash, // Default password
             role: role,
-            location: row.branch_code || null,
+            location: row.work_location || row.branch_code || null,
             department: row.department_code || null,
+            jobTitle: row.job_title || null,
+            directManagerCode: row.direct_manager_code || null,
             companyId: null, // TODO: Get from context
           },
         });
@@ -244,6 +301,8 @@ export const importUsersFromExcel = async (
         errors: results.errors,
       },
       defaultPassword: defaultPassword,
+      emailNote:
+        'Nếu không có cột email hợp lệ: hệ thống dùng {employee_code}@import.rmg.local (trùng employee_code thì trùng email).',
     });
   } catch (error: any) {
     console.error('Import error:', error);
@@ -312,15 +371,14 @@ export const importMasterDataFromExcel = async (
     });
     console.log('📊 Actual Excel headers:', actualHeaders);
 
-    // Validate required columns
-    const requiredColumns = ['employee_code', 'full_name', 'email'];
-    const missingColumns = requiredColumns.filter(col => !headers[col]);
-    
+    const missingColumns = REQUIRED_EMPLOYEE_COLUMNS.filter((col) => !headers[col]);
+
     if (missingColumns.length > 0) {
       console.error('❌ Missing required columns:', missingColumns);
       return reply.code(400).send({
         error: 'Missing required columns',
         missingColumns,
+        expected: [...REQUIRED_EMPLOYEE_COLUMNS],
       });
     }
 
@@ -357,52 +415,55 @@ export const importMasterDataFromExcel = async (
           continue;
         }
 
-        const employeeCode = row.getCell(headers['employee_code'])?.value?.toString()?.trim();
+        const employeeCode = getExcelCell(row, headers, 'employee_code');
         if (!employeeCode) {
           console.log(`📊 Row ${rowNumber}: No employee_code, skipping`);
           continue;
         }
 
-        const fullName = row.getCell(headers['full_name'])?.value?.toString()?.trim() || '';
-        const email = row.getCell(headers['email'])?.value?.toString()?.trim() || '';
-        const branchCode = row.getCell(headers['branch_code'])?.value?.toString()?.trim();
-        const departmentCode = row.getCell(headers['department_code'])?.value?.toString()?.trim();
-        const systemRoles = row.getCell(headers['system_roles'])?.value?.toString()?.trim();
-
-        const directManagerCode = row.getCell(headers['direct_manager_code'])?.value?.toString()?.trim();
+        const fullName = getExcelCell(row, headers, 'full_name') || '';
+        const email = resolveImportEmail(row, headers, employeeCode);
+        const branchCode = getExcelCell(row, headers, 'branch_code');
+        const branchName = getExcelCell(row, headers, 'branch_name');
+        const departmentCode = getExcelCell(row, headers, 'department_code');
+        const departmentName = getExcelCell(row, headers, 'department_name');
+        const systemRoles = getExcelCell(row, headers, 'system_roles');
+        const directManagerCode = getExcelCell(row, headers, 'direct_manager_code');
+        const isBranchDirector = parseExcelBooleanCell(row, headers, 'is_branch_director');
 
         console.log(`📊 Row ${rowNumber}:`, {
           employee_code: employeeCode,
           full_name: fullName,
-          email: email,
+          email,
           branch_code: branchCode,
+          branch_name: branchName,
           department_code: departmentCode,
+          department_name: departmentName,
           system_roles: systemRoles,
           direct_manager_code: directManagerCode || '(empty)',
+          is_branch_director: isBranchDirector,
         });
+
+        if (!fullName.trim()) {
+          console.log(`📊 Row ${rowNumber}: No full_name, skipping`);
+          continue;
+        }
 
         const excelRow: ExcelRow = {
           employee_code: employeeCode,
           full_name: fullName,
-          email: email,
+          email,
           branch_code: branchCode,
+          branch_name: branchName,
+          department_name: departmentName,
           department_code: departmentCode,
-          job_title: row.getCell(headers['job_title'])?.value?.toString()?.trim(),
-          level_code: row.getCell(headers['level_code'])?.value?.toString()?.trim(),
+          job_title: getExcelCell(row, headers, 'job_title'),
+          work_location: getExcelCell(row, headers, 'work_location'),
+          is_branch_director: isBranchDirector,
+          level_code: getExcelCell(row, headers, 'level_code'),
           system_roles: systemRoles,
           direct_manager_code: directManagerCode,
         };
-
-        // Validate email
-        if (!excelRow.email) {
-          console.log(`📊 Row ${rowNumber}: No email, skipping`);
-          continue;
-        }
-        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-        if (!emailRegex.test(excelRow.email)) {
-          console.log(`📊 Row ${rowNumber}: Invalid email format: ${excelRow.email}, skipping`);
-          continue;
-        }
 
         rows.push(excelRow);
       } catch (rowError: any) {
@@ -417,8 +478,7 @@ export const importMasterDataFromExcel = async (
       console.warn('⚠️ This could be because:');
       console.warn('   1. Excel file has no data rows (only headers)');
       console.warn('   2. All rows are missing employee_code');
-      console.warn('   3. All rows are missing email');
-      console.warn('   4. All emails are invalid format');
+      console.warn('   3. All rows are missing full_name');
       console.warn('   5. Headers are not matching (case-sensitive)');
       
       // Get actual headers from Excel for better error message
@@ -430,11 +490,12 @@ export const importMasterDataFromExcel = async (
       
       return reply.code(400).send({
         error: 'No valid data rows found in Excel file',
-        message: 'Please check that your Excel file has data rows with valid employee_code and email columns',
+        message:
+          'Please check data rows: employee_code, full_name (required). Email optional — auto-generated if omitted.',
         headersFound: Object.keys(headers),
         actualHeaders: actualHeaders,
         totalRowsInFile: worksheet.rowCount - 1,
-        requiredColumns: ['employee_code', 'full_name', 'email'],
+        requiredColumns: [...REQUIRED_EMPLOYEE_COLUMNS],
       });
     }
     if (rows.length === 0) {
@@ -475,10 +536,13 @@ export const importMasterDataFromExcel = async (
           results.branches.skipped++;
           console.log(`📊 Branch ${branchCode} already exists, skipped`);
         } else {
+          const rowWithBranch = rows.find((r) => r.branch_code === branchCode && r.branch_name?.trim());
+          const displayBranchName = rowWithBranch?.branch_name?.trim() || branchCode;
+
           await prisma.branch.create({
             data: {
               branchCode: branchCode,
-              branchName: branchCode, // Use code as name if no name provided
+              branchName: displayBranchName,
               status: true,
             },
           });
@@ -517,10 +581,15 @@ export const importMasterDataFromExcel = async (
           results.departments.skipped++;
           console.log(`📊 Department ${departmentCode} already exists, skipped`);
         } else {
+          const rowWithDept = rows.find(
+            (r) => r.department_code === departmentCode && r.department_name?.trim()
+          );
+          const displayDeptName = rowWithDept?.department_name?.trim() || departmentCode;
+
           await prisma.department.create({
             data: {
               departmentCode: departmentCode,
-              departmentName: departmentCode, // Use code as name if no name provided
+              departmentName: displayDeptName,
               status: true,
             },
           });
@@ -539,13 +608,27 @@ export const importMasterDataFromExcel = async (
     console.log('📊 Step 3: Processing Users...');
     for (const row of rows) {
       try {
-        // Validate role
-        const mappedRole = mapRoleFromExcel(row.system_roles);
-        if (mappedRole === 'REQUESTOR' && row.system_roles && row.system_roles.trim()) {
-          // If role was provided but mapped to default, it's invalid
+        const mappedRole = mapRoleFromExcelRow(row);
+        if (
+          mappedRole === 'REQUESTOR' &&
+          row.system_roles?.trim() &&
+          !row.is_branch_director
+        ) {
           const upperRole = row.system_roles.toUpperCase().trim();
-          const validRoles = ['REQUESTOR', 'DEPARTMENT_HEAD', 'BRANCH_MANAGER', 'BUYER', 'BUYER_LEADER', 'BUYER_MANAGER', 'ACCOUNTANT', 'WAREHOUSE', 'BGD', 'SYSTEM_ADMIN'];
-          if (!validRoles.some(r => upperRole.includes(r))) {
+          const validRoles = [
+            'REQUESTOR',
+            'DEPARTMENT_HEAD',
+            'BRANCH_MANAGER',
+            'BRANCH_DIRECTOR',
+            'BUYER',
+            'BUYER_LEADER',
+            'BUYER_MANAGER',
+            'ACCOUNTANT',
+            'WAREHOUSE',
+            'BGD',
+            'SYSTEM_ADMIN',
+          ];
+          if (!validRoles.some((r) => upperRole.includes(r))) {
             results.roles.invalid.push({
               employee_code: row.employee_code,
               role: row.system_roles,
@@ -595,7 +678,7 @@ export const importMasterDataFromExcel = async (
             email: row.email,
             passwordHash: passwordHash,
             role: mappedRole as any,
-            location: row.branch_code || null,
+            location: row.work_location || row.branch_code || null,
             department: row.department_code || null,
             jobTitle: row.job_title || null,
             directManagerCode: row.direct_manager_code || null,
@@ -664,6 +747,8 @@ export const importMasterDataFromExcel = async (
         },
       },
       defaultPassword: defaultPassword,
+      emailNote:
+        'Nếu không có cột email hợp lệ: dùng {employee_code}@import.rmg.local.',
     };
 
     console.log('✅ Import master data completed');
@@ -743,9 +828,7 @@ export const previewMasterDataExcel = async (
       }
     });
 
-    // Validate required columns
-    const requiredColumns = ['employee_code', 'full_name', 'email'];
-    const missingColumns = requiredColumns.filter(col => !headers[col]);
+    const missingColumns = REQUIRED_EMPLOYEE_COLUMNS.filter((col) => !headers[col]);
 
     // Extract unique branches and departments
     const uniqueBranches = new Set<string>();
@@ -757,30 +840,43 @@ export const previewMasterDataExcel = async (
 
     for (let rowNumber = 2; rowNumber <= Math.min(worksheet.rowCount, maxPreviewRows + 1); rowNumber++) {
       const row = worksheet.getRow(rowNumber);
-      const employeeCode = row.getCell(headers['employee_code'])?.value?.toString()?.trim();
-      
+      const employeeCode = getExcelCell(row, headers, 'employee_code');
+
       if (!employeeCode) continue;
 
-      const branchCode = row.getCell(headers['branch_code'])?.value?.toString()?.trim();
-      const departmentCode = row.getCell(headers['department_code'])?.value?.toString()?.trim();
+      const branchCode = getExcelCell(row, headers, 'branch_code');
+      const departmentCode = getExcelCell(row, headers, 'department_code');
 
       if (branchCode) uniqueBranches.add(branchCode);
       if (departmentCode) uniqueDepartments.add(departmentCode);
 
+      const fullName = getExcelCell(row, headers, 'full_name') || '';
+      const email = resolveImportEmail(row, headers, employeeCode);
+      const systemRoles = getExcelCell(row, headers, 'system_roles');
+      const isBranchDirector = parseExcelBooleanCell(row, headers, 'is_branch_director');
+
       const previewRow: any = {
         rowNumber: rowNumber,
         employee_code: employeeCode,
-        full_name: row.getCell(headers['full_name'])?.value?.toString()?.trim() || '',
-        email: row.getCell(headers['email'])?.value?.toString()?.trim() || '',
+        full_name: fullName,
+        email,
+        email_source: getExcelCell(row, headers, 'email') ? 'column' : 'synthetic',
         branch_code: branchCode || '',
+        branch_name: getExcelCell(row, headers, 'branch_name') || '',
         department_code: departmentCode || '',
-        job_title: row.getCell(headers['job_title'])?.value?.toString()?.trim() || '',
-        level_code: row.getCell(headers['level_code'])?.value?.toString()?.trim() || '',
-        system_roles: row.getCell(headers['system_roles'])?.value?.toString()?.trim() || '',
-        direct_manager_code: row.getCell(headers['direct_manager_code'])?.value?.toString()?.trim() || '',
+        department_name: getExcelCell(row, headers, 'department_name') || '',
+        job_title: getExcelCell(row, headers, 'job_title') || '',
+        work_location: getExcelCell(row, headers, 'work_location') || '',
+        is_branch_director: isBranchDirector,
+        level_code: getExcelCell(row, headers, 'level_code') || '',
+        system_roles: systemRoles || '',
+        direct_manager_code: getExcelCell(row, headers, 'direct_manager_code') || '',
       };
 
-      previewRow.mapped_role = mapRoleFromExcel(previewRow.system_roles);
+      previewRow.mapped_role = mapRoleFromExcelRow({
+        system_roles: previewRow.system_roles,
+        is_branch_director: previewRow.is_branch_director,
+      });
       previewRows.push(previewRow);
     }
 
@@ -878,9 +974,7 @@ export const previewExcelImport = async (
       }
     });
 
-    // Validate required columns
-    const requiredColumns = ['employee_code', 'full_name', 'email'];
-    const missingColumns = requiredColumns.filter(col => !headers[col]);
+    const missingColumns = REQUIRED_EMPLOYEE_COLUMNS.filter((col) => !headers[col]);
 
     // Parse preview data (first 10 rows)
     const previewRows: any[] = [];
@@ -888,25 +982,37 @@ export const previewExcelImport = async (
 
     for (let rowNumber = 2; rowNumber <= Math.min(worksheet.rowCount, maxPreviewRows + 1); rowNumber++) {
       const row = worksheet.getRow(rowNumber);
-      const employeeCode = row.getCell(headers['employee_code'])?.value?.toString()?.trim();
-      
+      const employeeCode = getExcelCell(row, headers, 'employee_code');
+
       if (!employeeCode) continue;
+
+      const fullName = getExcelCell(row, headers, 'full_name') || '';
+      const email = resolveImportEmail(row, headers, employeeCode);
+      const isBranchDirector = parseExcelBooleanCell(row, headers, 'is_branch_director');
+      const systemRoles = getExcelCell(row, headers, 'system_roles') || '';
 
       const previewRow: any = {
         rowNumber: rowNumber,
         employee_code: employeeCode,
-        full_name: row.getCell(headers['full_name'])?.value?.toString()?.trim() || '',
-        email: row.getCell(headers['email'])?.value?.toString()?.trim() || '',
-        branch_code: row.getCell(headers['branch_code'])?.value?.toString()?.trim() || '',
-        department_code: row.getCell(headers['department_code'])?.value?.toString()?.trim() || '',
-        job_title: row.getCell(headers['job_title'])?.value?.toString()?.trim() || '',
-        level_code: row.getCell(headers['level_code'])?.value?.toString()?.trim() || '',
-        system_roles: row.getCell(headers['system_roles'])?.value?.toString()?.trim() || '',
-        direct_manager_code: row.getCell(headers['direct_manager_code'])?.value?.toString()?.trim() || '',
+        full_name: fullName,
+        email,
+        email_source: getExcelCell(row, headers, 'email') ? 'column' : 'synthetic',
+        branch_code: getExcelCell(row, headers, 'branch_code') || '',
+        branch_name: getExcelCell(row, headers, 'branch_name') || '',
+        department_code: getExcelCell(row, headers, 'department_code') || '',
+        department_name: getExcelCell(row, headers, 'department_name') || '',
+        job_title: getExcelCell(row, headers, 'job_title') || '',
+        work_location: getExcelCell(row, headers, 'work_location') || '',
+        is_branch_director: isBranchDirector,
+        level_code: getExcelCell(row, headers, 'level_code') || '',
+        system_roles: systemRoles,
+        direct_manager_code: getExcelCell(row, headers, 'direct_manager_code') || '',
       };
 
-      // Map role for preview
-      previewRow.mapped_role = mapRoleFromExcel(previewRow.system_roles);
+      previewRow.mapped_role = mapRoleFromExcelRow({
+        system_roles: previewRow.system_roles,
+        is_branch_director: previewRow.is_branch_director,
+      });
 
       previewRows.push(previewRow);
     }

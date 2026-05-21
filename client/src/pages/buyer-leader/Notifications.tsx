@@ -1,17 +1,18 @@
 import { Bell } from 'lucide-react';
+import { BuyerLeaderPageHero } from '../../components/BuyerLeaderPageHero';
+import { buyerLeaderPageStackClass } from '../../constants/buyerLeaderLayout';
 
 const Notifications = () => {
   return (
-    <div className="min-h-screen p-6 space-y-6">
-      {/* Header */}
-      <div className="bg-white/80 backdrop-blur-sm rounded-soft-lg shadow-soft-md border border-slate-200/50 p-6 slide-right-title">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-bold text-slate-900">Thông báo</h1>
-            <p className="text-slate-600 mt-1">Thông báo và cảnh báo quan trọng</p>
-          </div>
-        </div>
-      </div>
+    <div className={`animate-fade-in-right fade-in-right-delay-0 ${buyerLeaderPageStackClass}`}>
+      <BuyerLeaderPageHero
+        kicker="Buyer Leader · Thông báo"
+        title="Thông báo"
+        description="Thông báo và cảnh báo quan trọng"
+        Icon={Bell}
+        tint="graphite"
+        regionLabel="Thông báo Buyer Leader"
+      />
 
       {/* Content */}
       <div className="bg-white/80 backdrop-blur-sm rounded-soft-lg shadow-soft-md border border-slate-200/50 p-12 text-center slide-right-content">

@@ -12,14 +12,19 @@ async function updateUserPasswords() {
 
     // List of usernames to update
     const usernames = [
+      'system_admin',
       'requestor',
       'buyer',
       'buyer_leader',
       'buyer_manage',
       'buyer_manager',
+      'department_head',
       'branch_manager',
-      'sales',
       'bgd',
+      'sales',
+      'warehouse',
+      'duc',
+      'nguyen',
       'accountant',
     ];
 

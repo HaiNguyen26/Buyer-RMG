@@ -1,0 +1,43 @@
+{
+  "mcpServers": {
+    "gitnexus": {
+      "command": "gitnexus",
+      "args": ["mcp"]
+    },
+    "shadcn": {
+      "command": "npx",
+      "args": [
+        "shadcn@latest",
+        "mcp"
+      ]
+    },
+    "shadcn-community": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@magnusrodseth/shadcn-mcp-server"
+      ]
+    },
+    "context7": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@upstash/context7-mcp"
+      ]
+    },
+    "lobe-ui": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@lobehub/mcp-ui-expert"
+      ]
+    },
+    "flyonui": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "flyonui-mcp"
+      ]
+    }
+  }
+}

@@ -178,6 +178,10 @@ export const login = async (
                 email: user.email,
                 role: user.role,
                 location: user.location,
+                directManagerCode: user.directManagerCode ?? null,
+                fullName: user.fullName ?? undefined,
+                jobTitle: user.jobTitle ?? undefined,
+                phone: user.phone ?? undefined,
             },
             token,
         };
@@ -210,6 +214,10 @@ export const getCurrentUser = async (
                 email: true,
                 role: true,
                 location: true,
+                directManagerCode: true,
+                fullName: true,
+                jobTitle: true,
+                phone: true,
             },
         });
 

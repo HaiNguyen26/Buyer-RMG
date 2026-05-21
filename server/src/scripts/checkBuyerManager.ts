@@ -8,11 +8,21 @@ async function checkBuyerManager() {
     console.log('🔍 Checking buyer_manager user...\n');
 
     // Check if user exists
-    const user = await prisma.user.findFirst({
-      where: {
-        username: 'buyer_manager',
-      },
+    let user = await prisma.user.findFirst({
+      where: { username: 'buyer_manager', deletedAt: null },
     });
+    if (!user) {
+      const softDeleted = await prisma.user.findFirst({
+        where: { username: 'buyer_manager', deletedAt: { not: null } },
+      });
+      if (softDeleted) {
+        user = await prisma.user.update({
+          where: { id: softDeleted.id },
+          data: { deletedAt: null },
+        });
+        console.log('♻️  Đã khôi phục buyer_manager (bỏ soft-delete).');
+      }
+    }
 
     if (!user) {
       console.log('❌ User "buyer_manager" NOT FOUND in database');

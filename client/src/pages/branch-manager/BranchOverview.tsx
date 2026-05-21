@@ -1,7 +1,18 @@
 import { useQuery } from '@tanstack/react-query';
-import { Building2, ShoppingBag, TrendingUp, FileText } from 'lucide-react';
+import { TrendingUp, FileText, BarChart3 } from 'lucide-react';
 import { branchManagerService } from '../../services/branchManagerService';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
+import { BranchOverviewChartCards } from './BranchOverviewChartCards';
+import { BranchManagerPageHero } from '../../components/BranchManagerPageHero';
+import {
+  branchManagerPageContentClass,
+  branchManagerPageRootClass,
+} from '../../constants/branchManagerLayout';
+import { dashboardV3IslandClass, DashboardV3ShimmerBlock } from '../../components/dashboard/DashboardV3Chrome';
+import { SectionHeader } from '../../components/buyer-manager/SectionHeader';
+
+/** Chiều cao vùng bảng (~10 hàng dữ liệu + thead) — phần dài cuộn trong khối */
+const TOP_PR_TABLE_VIEWPORT_CLASS =
+  'max-h-[min(35rem,calc(100dvh-14rem))] overflow-x-auto overflow-y-auto scrollbar-hide touch-pan-y rounded-xl border border-slate-100 bg-white shadow-[inset_0_1px_0_0_rgba(248,250,252,1)]';
 
 const BranchOverview = () => {
   const { data: overviewData, isLoading, error } = useQuery({
@@ -10,17 +21,6 @@ const BranchOverview = () => {
     staleTime: 60000,
     gcTime: 10 * 60 * 1000,
     retry: 1,
-    onSuccess: (data) => {
-      console.log('Branch Overview - Frontend received data:', {
-        data,
-        prsByDepartment: data?.prsByDepartment,
-        prsByType: data?.prsByType,
-        topPRsByValue: data?.topPRsByValue,
-      });
-    },
-    onError: (err) => {
-      console.error('Branch Overview - Frontend error:', err);
-    },
   });
 
   const formatCurrency = (amount: number | null, currency: string = 'VND') => {
@@ -45,10 +45,14 @@ const BranchOverview = () => {
 
   if (isLoading) {
     return (
-      <div className="h-full flex items-center justify-center">
-        <div className="text-center">
-          <div className="w-12 h-12 border-4 border-[#2563EB] border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-          <p className="text-slate-600">Đang tải...</p>
+      <div className={branchManagerPageRootClass}>
+        <div className={branchManagerPageContentClass}>
+          <DashboardV3ShimmerBlock className="h-28 w-full rounded-[28px]" />
+          <DashboardV3ShimmerBlock className="min-h-[22rem] w-full rounded-[28px]" />
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-2 lg:gap-8">
+            <DashboardV3ShimmerBlock className="min-h-[320px] rounded-[28px]" />
+            <DashboardV3ShimmerBlock className="min-h-[320px] rounded-[28px]" />
+          </div>
         </div>
       </div>
     );
@@ -56,213 +60,117 @@ const BranchOverview = () => {
 
   if (error) {
     return (
-      <div className="h-full flex items-center justify-center">
-        <div className="bg-red-50 border border-red-200 rounded-xl p-4">
-          <p className="text-red-800 font-medium">Lỗi khi tải dữ liệu</p>
-          <p className="text-red-600 text-sm mt-1">{error instanceof Error ? error.message : 'Vui lòng thử lại sau'}</p>
+      <div className={branchManagerPageRootClass}>
+        <div className={branchManagerPageContentClass}>
+          <div className="rounded-[28px] border border-rose-200/90 bg-rose-50/95 p-6 shadow-[0_20px_25px_-5px_rgba(239,68,68,0.12)] md:p-8">
+            <p className="text-lg font-bold text-rose-900">Lỗi khi tải dữ liệu</p>
+            <p className="mt-2 text-sm font-medium text-rose-800/90">
+              {error instanceof Error ? error.message : 'Vui lòng thử lại sau'}
+            </p>
+          </div>
         </div>
       </div>
     );
   }
 
-  // Prepare chart data
-  const departmentChartData = overviewData?.prsByDepartment || [];
-  const typeChartData = overviewData?.prsByType || [];
-  
-  console.log('Branch Overview - Chart data preparation:', {
-    overviewData,
-    departmentChartData,
-    typeChartData,
-    departmentChartDataLength: departmentChartData.length,
-    typeChartDataLength: typeChartData.length,
-  });
-  
-  const typePieData = [
-    { name: 'Sản xuất', value: typeChartData.find((t: any) => t.type === 'PRODUCTION')?.count || 0, color: '#3B82F6' },
-    { name: 'Thương mại', value: typeChartData.find((t: any) => t.type === 'COMMERCIAL')?.count || 0, color: '#10B981' },
-  ].filter(item => item.value > 0); // Only show types with data
+  const departmentChartData = overviewData?.prsByDepartment ?? [];
+  const typeChartData = overviewData?.prsByType ?? [];
+
+  const topPRsCount = overviewData?.topPRsByValue?.length ?? 0;
 
   return (
-    <div className="h-full overflow-y-auto">
-      <div className="flex flex-col space-y-6 p-6">
-        {/* Header Banner */}
-        <div className="rounded-xl shadow-lg p-6 text-white slide-right-title relative overflow-hidden bg-gradient-to-r from-slate-800 to-slate-900">
-          <div className="relative z-10">
-            <h2 className="text-2xl font-bold text-white mb-2">
-              Tổng quan Mua hàng Chi nhánh
-            </h2>
-            <p className="text-slate-300 text-sm">
-              Nhìn xu hướng – không thao tác
-            </p>
-          </div>
+    <div className={branchManagerPageRootClass}>
+      <div className={branchManagerPageContentClass}>
+        <div className="shrink-0 pb-2">
+          <BranchManagerPageHero
+            kicker="Giám đốc chi nhánh · Phân tích"
+            title="Tổng quan Mua hàng Chi nhánh"
+            description="Nhìn xu hướng – không thao tác"
+            Icon={BarChart3}
+            tint="graphite"
+            regionLabel="Tổng quan chi nhánh"
+          />
         </div>
 
-        {/* Grid Layout */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {/* 1. Tổng PR theo phòng ban */}
-          <div className="bg-white rounded-xl shadow-lg border border-slate-200/50 overflow-hidden slide-right-content" style={{ boxShadow: 'none' }}>
-            <div className="flex-shrink-0 p-6 border-b border-slate-200 bg-[#F8FAFC]">
-              <div className="flex items-center gap-3">
-                <div className="p-2 bg-blue-100 rounded-lg">
-                  <Building2 className="w-5 h-5 text-blue-600" strokeWidth={2} />
+        <article className={`${dashboardV3IslandClass} slide-right-content overflow-hidden`}>
+          <SectionHeader
+            Icon={TrendingUp}
+            eyebrow="Giá trị"
+            title="Top PR giá trị cao"
+            description="Khung cố định ~10 dòng; danh sách dài cuộn trong bảng."
+          />
+          <div className="mt-4 min-h-0 md:mt-6">
+            {overviewData?.topPRsByValue && topPRsCount > 0 ? (
+              <div className={TOP_PR_TABLE_VIEWPORT_CLASS}>
+                  <table className="w-full min-w-[640px] text-left">
+                    <thead className="sticky top-0 z-10 border-b border-slate-200 bg-[#F8FAFC] shadow-[0_1px_0_0_rgba(226,232,240,1)]">
+                      <tr>
+                        <th className="bg-[#F8FAFC] px-4 py-3 text-left text-xs font-semibold uppercase text-slate-700 sm:px-6 sm:py-3.5">
+                          STT
+                        </th>
+                        <th className="bg-[#F8FAFC] px-4 py-3 text-left text-xs font-semibold uppercase text-slate-700 sm:px-6 sm:py-3.5">
+                          Mã PR
+                        </th>
+                        <th className="bg-[#F8FAFC] px-4 py-3 text-left text-xs font-semibold uppercase text-slate-700 sm:px-6 sm:py-3.5">
+                          Phòng ban
+                        </th>
+                        <th className="bg-[#F8FAFC] px-4 py-3 text-left text-xs font-semibold uppercase text-slate-700 sm:px-6 sm:py-3.5">
+                          Người yêu cầu
+                        </th>
+                        <th className="bg-[#F8FAFC] px-4 py-3 text-left text-xs font-semibold uppercase text-slate-700 sm:px-6 sm:py-3.5">
+                          Tổng giá
+                        </th>
+                        <th className="bg-[#F8FAFC] px-4 py-3 text-left text-xs font-semibold uppercase text-slate-700 sm:px-6 sm:py-3.5">
+                          Ngày tạo
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 bg-white">
+                      {overviewData.topPRsByValue.map((pr: any, index: number) => (
+                        <tr key={pr.id} className="bg-white transition-colors hover:bg-[#F8FAFC]">
+                          <td className="px-4 py-3 sm:px-6 sm:py-3.5">
+                            <div className="flex h-8 w-8 items-center justify-center rounded-full bg-slate-100 text-sm font-semibold text-slate-700">
+                              {index + 1}
+                            </div>
+                          </td>
+                          <td className="px-4 py-3 sm:px-6 sm:py-3.5">
+                            <div className="flex items-center gap-2">
+                              <FileText className="h-4 w-4 text-slate-400" strokeWidth={2} />
+                              <span className="text-sm font-bold text-slate-900">{pr.prNumber}</span>
+                            </div>
+                          </td>
+                          <td className="px-4 py-3 sm:px-6 sm:py-3.5">
+                            <span className="text-sm text-slate-700">{pr.department}</span>
+                          </td>
+                          <td className="px-4 py-3 sm:px-6 sm:py-3.5">
+                            <span className="text-sm text-slate-700">{pr.requestor}</span>
+                          </td>
+                          <td className="px-4 py-3 sm:px-6 sm:py-3.5">
+                            <span className="text-sm font-bold text-green-700">
+                              {formatCurrency(pr.totalAmount, pr.currency)}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 sm:px-6 sm:py-3.5">
+                            <span className="text-sm text-slate-600">{formatDate(pr.createdAt)}</span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
-                <h3 className="text-lg font-bold text-slate-900">Tổng PR theo phòng ban</h3>
-              </div>
-            </div>
-            <div className="p-6">
-              {departmentChartData.length > 0 ? (
-                <ResponsiveContainer width="100%" height={300}>
-                  <BarChart data={departmentChartData} style={{ boxShadow: 'none' }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" />
-                    <XAxis
-                      dataKey="department"
-                      tick={{ fontSize: 12, fill: '#64748B' }}
-                      angle={-45}
-                      textAnchor="end"
-                      height={80}
-                    />
-                    <YAxis tick={{ fontSize: 12, fill: '#64748B' }} />
-                    <Tooltip
-                      contentStyle={{
-                        backgroundColor: '#fff',
-                        border: '1px solid #E5E7EB',
-                        borderRadius: '8px',
-                        boxShadow: 'none',
-                      }}
-                    />
-                    <Bar dataKey="count" fill="#3B82F6" radius={[8, 8, 0, 0]} />
-                  </BarChart>
-                </ResponsiveContainer>
-              ) : (
-                <div className="h-[300px] flex items-center justify-center">
-                  <p className="text-slate-400">Chưa có dữ liệu</p>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* 2. PR theo loại */}
-          <div className="bg-white rounded-xl shadow-lg border border-slate-200/50 overflow-hidden slide-right-content" style={{ boxShadow: 'none' }}>
-            <div className="flex-shrink-0 p-6 border-b border-slate-200 bg-[#F8FAFC]">
-              <div className="flex items-center gap-3">
-                <div className="p-2 bg-green-100 rounded-lg">
-                  <ShoppingBag className="w-5 h-5 text-green-600" strokeWidth={2} />
-                </div>
-                <h3 className="text-lg font-bold text-slate-900">PR theo loại</h3>
-              </div>
-            </div>
-            <div className="p-6">
-              {typePieData.some(item => item.value > 0) ? (
-                <div className="flex flex-col items-center justify-center">
-                  <ResponsiveContainer width="100%" height={300}>
-                    <PieChart style={{ boxShadow: 'none' }}>
-                      <Pie
-                        data={typePieData}
-                        cx="50%"
-                        cy="50%"
-                        labelLine={false}
-                        label={({ name, value, percent }) => `${name}: ${value} (${(percent * 100).toFixed(0)}%)`}
-                        outerRadius={100}
-                        fill="#8884d8"
-                        dataKey="value"
-                      >
-                        {typePieData.map((entry, index) => (
-                          <Cell key={`cell-${index}`} fill={entry.color} />
-                        ))}
-                      </Pie>
-                      <Tooltip
-                        contentStyle={{
-                          backgroundColor: '#fff',
-                          border: '1px solid #E5E7EB',
-                          borderRadius: '8px',
-                          boxShadow: 'none',
-                        }}
-                      />
-                    </PieChart>
-                  </ResponsiveContainer>
-                  <div className="flex items-center gap-6 mt-4">
-                    <div className="flex items-center gap-2">
-                      <div className="w-4 h-4 bg-blue-500 rounded"></div>
-                      <span className="text-sm text-slate-700">Sản xuất: {typePieData[0].value}</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <div className="w-4 h-4 bg-green-500 rounded"></div>
-                      <span className="text-sm text-slate-700">Thương mại: {typePieData[1].value}</span>
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                <div className="h-[300px] flex items-center justify-center">
-                  <p className="text-slate-400">Chưa có dữ liệu</p>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* 3. Top PR giá trị cao */}
-        <div className="bg-white rounded-xl shadow-lg border border-slate-200/50 overflow-hidden slide-right-content flex flex-col">
-          <div className="flex-shrink-0 p-6 border-b border-slate-200 bg-[#F8FAFC]">
-            <div className="flex items-center gap-3">
-              <div className="p-2 bg-amber-100 rounded-lg">
-                <TrendingUp className="w-5 h-5 text-amber-600" strokeWidth={2} />
-              </div>
-              <h3 className="text-lg font-bold text-slate-900">Top PR giá trị cao</h3>
-            </div>
-          </div>
-          <div className="flex-1 min-h-0 overflow-y-auto scrollbar-hide">
-            {overviewData?.topPRsByValue && overviewData.topPRsByValue.length > 0 ? (
-              <table className="w-full">
-                <thead className="bg-slate-50 border-b border-slate-200 sticky top-0 z-10">
-                  <tr>
-                    <th className="px-6 py-4 text-left text-xs font-semibold text-slate-700 uppercase bg-slate-50">STT</th>
-                    <th className="px-6 py-4 text-left text-xs font-semibold text-slate-700 uppercase bg-slate-50">Mã PR</th>
-                    <th className="px-6 py-4 text-left text-xs font-semibold text-slate-700 uppercase bg-slate-50">Phòng ban</th>
-                    <th className="px-6 py-4 text-left text-xs font-semibold text-slate-700 uppercase bg-slate-50">Người yêu cầu</th>
-                    <th className="px-6 py-4 text-left text-xs font-semibold text-slate-700 uppercase bg-slate-50">Tổng giá</th>
-                    <th className="px-6 py-4 text-left text-xs font-semibold text-slate-700 uppercase bg-slate-50">Ngày tạo</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {overviewData.topPRsByValue.map((pr: any, index: number) => (
-                    <tr key={pr.id} className="bg-white hover:bg-[#F8FAFC] transition-colors-theme">
-                      <td className="px-6 py-4">
-                        <div className="flex items-center justify-center w-8 h-8 rounded-full bg-slate-100 text-slate-700 font-semibold text-sm">
-                          {index + 1}
-                        </div>
-                      </td>
-                      <td className="px-6 py-4">
-                        <div className="flex items-center gap-2">
-                          <FileText className="w-4 h-4 text-slate-400" strokeWidth={2} />
-                          <span className="text-sm font-bold text-slate-900">{pr.prNumber}</span>
-                        </div>
-                      </td>
-                      <td className="px-6 py-4">
-                        <span className="text-sm text-slate-700">{pr.department}</span>
-                      </td>
-                      <td className="px-6 py-4">
-                        <span className="text-sm text-slate-700">{pr.requestor}</span>
-                      </td>
-                      <td className="px-6 py-4">
-                        <span className="text-sm font-bold text-green-700">
-                          {formatCurrency(pr.totalAmount, pr.currency)}
-                        </span>
-                      </td>
-                      <td className="px-6 py-4">
-                        <span className="text-sm text-slate-600">{formatDate(pr.createdAt)}</span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
             ) : (
-              <div className="p-12 text-center">
-                <TrendingUp className="w-12 h-12 text-slate-300 mx-auto mb-4" strokeWidth={1.5} />
+              <div className="flex flex-col items-center py-12 text-center">
+                <TrendingUp className="mx-auto mb-4 h-12 w-12 text-slate-300" strokeWidth={1.5} />
                 <p className="text-slate-500">Chưa có dữ liệu</p>
               </div>
             )}
           </div>
-        </div>
+        </article>
+
+        <BranchOverviewChartCards
+          departmentChartData={departmentChartData}
+          typeChartData={typeChartData}
+        />
       </div>
     </div>
   );

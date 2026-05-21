@@ -3,8 +3,34 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>client</title>
+    <style>
+      html,
+      body,
+      #root {
+        height: 100%;
+        background-color: #ffffff;
+      }
+
+      body {
+        margin: 0;
+      }
+
+      /* Double-Layer Shield: force rounded mask + white base during early paint */
+      .module-container {
+        background-color: #ffffff !important;
+        border-radius: 24px !important;
+        overflow: visible !important;
+      }
+
+      .module-content {
+        background-color: #ffffff !important;
+        border-radius: 24px !important;
+        overflow: hidden !important;
+        clip-path: inset(0 round 24px);
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>

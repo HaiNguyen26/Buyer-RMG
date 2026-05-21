@@ -9,23 +9,11 @@ import {
 } from '../controllers/managerController';
 
 export default async function managerRoutes(fastify: FastifyInstance) {
-  // Apply authentication middleware to all routes
   fastify.addHook('onRequest', authenticate);
 
-  // Executive Dashboard
-  fastify.get('/dashboard', getExecutiveDashboard);
-
-  // PR Overview
-  fastify.get('/pr-overview', getPROverview);
-
-  // Supplier Overview
-  fastify.get('/supplier-overview', getSupplierOverview);
-
-  // Buyer Performance
-  fastify.get('/buyer-performance', getBuyerPerformance);
-
-  // Notifications
-  fastify.get('/notifications', getNotifications);
+  fastify.get('/dashboard', { compress: false }, getExecutiveDashboard);
+  fastify.get('/pr-overview', { compress: false }, getPROverview);
+  fastify.get('/supplier-overview', { compress: false }, getSupplierOverview);
+  fastify.get('/buyer-performance', { compress: false }, getBuyerPerformance);
+  fastify.get('/notifications', { compress: false }, getNotifications);
 }
-
-

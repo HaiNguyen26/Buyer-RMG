@@ -1,6 +1,10 @@
+import { useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { requestorService } from '../../services/requestorService';
-import { Bell, CheckCircle, AlertCircle, FileText, MessageSquare } from 'lucide-react';
+import { createMockRequestorNotifications } from '../../mocks/requestorDevMock';
+import { Bell, CheckCircle, AlertCircle, FileText } from 'lucide-react';
+import { RequestorPageHero } from '../../components/RequestorPageHero';
+import { requestorPageStackClass } from '../../constants/requestorLayout';
 
 const Notifications = () => {
   const { data: notificationsData, isLoading } = useQuery({
@@ -8,10 +12,16 @@ const Notifications = () => {
     queryFn: () => requestorService.getNotifications(),
   });
 
+  const mockNotifications = useMemo(() => createMockRequestorNotifications(), []);
+  const notificationsList =
+    notificationsData?.notifications && notificationsData.notifications.length > 0
+      ? notificationsData.notifications
+      : mockNotifications;
+
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-slate-50">
-        <div className="p-6">
+      <div className="min-h-0 w-full min-w-0 bg-slate-50">
+        <div className={requestorPageStackClass}>
           <div className="animate-pulse space-y-4">
             <div className="h-8 bg-slate-200 rounded w-64"></div>
             <div className="space-y-3">
@@ -71,16 +81,23 @@ const Notifications = () => {
   };
 
   return (
-    <div className="min-h-screen bg-slate-50">
-      <div className="p-6 space-y-6 animate-fade-in">
+    <div className="min-h-0 w-full min-w-0 bg-slate-50">
+      <div className={requestorPageStackClass}>
+        <RequestorPageHero
+          kicker="Requestor · Thông báo"
+          title="Thông báo"
+          description="Cập nhật các sự kiện ảnh hưởng đến PR — gửi, duyệt, trả về và các bước tiếp theo."
+          Icon={Bell}
+          tint="emerald"
+          regionLabel="Thông báo"
+        />
 
-      {/* Notifications List */}
       <div className="space-y-3 animate-slide-up">
-        {notificationsData?.notifications && notificationsData.notifications.length > 0 ? (
-          notificationsData.notifications.map((notification: any) => (
+        {notificationsList.length > 0 ? (
+          notificationsList.map((notification: any) => (
             <div
               key={notification.id}
-              className={`bg-white rounded-soft shadow-soft border-l-4 p-4 card-hover ${getNotificationColor(notification.type)}`}
+              className={`rounded-xl border border-slate-200/50 bg-white p-4 shadow-md card-hover border-l-4 ${getNotificationColor(notification.type)}`}
             >
               <div className="flex items-start gap-3">
                 <div className="mt-0.5">
@@ -114,7 +131,7 @@ const Notifications = () => {
             </div>
           ))
         ) : (
-          <div className="bg-white rounded-soft shadow-soft border border-slate-200 p-8 text-center">
+          <div className="rounded-2xl border border-slate-200/60 bg-white p-6 text-center shadow-lg sm:p-8">
             <Bell className="w-12 h-12 text-slate-400 mx-auto mb-4" strokeWidth={2} />
             <p className="text-slate-600 font-normal">Không có thông báo nào</p>
           </div>

@@ -28,46 +28,40 @@ import {
 } from '../controllers/importController';
 
 export default async function systemAdminRoutes(fastify: FastifyInstance) {
-  // Apply authentication middleware to all routes
   fastify.addHook('onRequest', authenticate);
 
-  // Dashboard
-  fastify.get('/dashboard', getDashboard);
+  fastify.get('/dashboard', { compress: false }, getDashboard);
 
-  // User Management (Employees)
-  fastify.get('/employees', getEmployees);
+  // User Management
+  fastify.get('/employees', { compress: false }, getEmployees);
   fastify.put('/employees/:id', updateEmployee);
   fastify.put('/employees/:id/roles', updateEmployeeRoles);
   fastify.put('/employees/:id/status', toggleEmployeeStatus);
 
   // Approval Configuration
-  fastify.get('/approval-rules', getApprovalRules);
+  fastify.get('/approval-rules', { compress: false }, getApprovalRules);
   fastify.post('/approval-rules', createApprovalRule);
   fastify.put('/approval-rules/:id', updateApprovalRule);
   fastify.put('/approval-rules/:id/status', toggleApprovalRuleStatus);
 
-  // Approval Config (NEW) - Branch Approval Rules (YES/NO duyệt cấp 2 theo chi nhánh)
-  fastify.get('/branch-approval-rules', getBranchApprovalRules);
+  // Branch Approval Rules
+  fastify.get('/branch-approval-rules', { compress: false }, getBranchApprovalRules);
   fastify.put('/branch-approval-rules/:branchCode', updateBranchApprovalRule);
 
-  // Organization Management - Branches
-  fastify.get('/branches', getBranches);
+  // Branches
+  fastify.get('/branches', { compress: false }, getBranches);
   fastify.post('/branches', createBranch);
   fastify.put('/branches/:id', updateBranch);
 
-  // Organization Management - Departments
-  fastify.get('/departments', getDepartments);
+  // Departments
+  fastify.get('/departments', { compress: false }, getDepartments);
   fastify.post('/departments', createDepartment);
   fastify.put('/departments/:id', updateDepartment);
 
   // Import Center
-  fastify.get('/import-history', getImportHistory);
+  fastify.get('/import-history', { compress: false }, getImportHistory);
   fastify.post('/import/users', importUsersFromExcel);
   fastify.post('/import/users/preview', previewExcelImport);
   fastify.post('/import/master-data', importMasterDataFromExcel);
   fastify.post('/import/master-data/preview', previewMasterDataExcel);
 }
-
-
-
-

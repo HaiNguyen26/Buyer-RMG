@@ -36,10 +36,16 @@ export type Employee = {
   employeeCode: string;
   fullName: string;
   email: string;
-  branchCode: string;
-  departmentCode: string;
-  jobTitle: string;
+  /** Tên chi nhánh (đã resolve từ master; có thể là địa điểm làm việc nếu không khớp mã CN) */
+  branchName: string;
+  /** Tên phòng ban (resolve từ master; không hiển thị mã PB trên UI) */
+  departmentName: string;
+  jobTitle: string | null;
+  /** Họ tên quản lý trực tiếp (không hiển thị mã QL) */
+  directManagerName: string;
   systemRoles: string[];
+  /** Theo role BRANCH_DIRECTOR */
+  isBranchDirector: boolean;
   status: 'ACTIVE' | 'INACTIVE';
 };
 
@@ -107,7 +113,16 @@ export const systemAdminService = {
     return response.data;
   },
 
-  updateEmployee: async (id: string, data: Partial<Employee>): Promise<Employee> => {
+  updateEmployee: async (
+    id: string,
+    data: Partial<{
+      fullName: string;
+      email: string;
+      branchCode: string;
+      departmentCode: string;
+      jobTitle: string | null;
+    }>
+  ): Promise<Employee> => {
     const response = await api.put(`/system-admin/employees/${id}`, data);
     return response.data;
   },
