@@ -3,7 +3,7 @@ import { useNavigate, useLocation, Outlet } from 'react-router-dom';
 import { setBranchManagerMockOutletActive } from '../mocks/branchManagerMockScope';
 import { isBranchManagerMockEnvEnabled } from '../mocks/branchManagerDevMock';
 import { useCurrentUser } from '../hooks/useAuth';
-import { LayoutDashboard, ClipboardCheck, History, BarChart3, Bell, ShieldAlert } from 'lucide-react';
+import { LayoutDashboard, ClipboardCheck, History, BarChart3, Bell, ShieldAlert, Radar } from 'lucide-react';
 import DashboardHeader from '../components/DashboardHeader';
 import { StandardDashboardSidebar } from '../components/StandardDashboardSidebar';
 import { useMobileDashboardNav, mainMarginForSidebar240 } from '../hooks/useMobileDashboardNav';
@@ -48,6 +48,16 @@ const BranchManagerDashboard = () => {
             ],
         },
         {
+            title: 'Giám sát',
+            items: [
+                {
+                    icon: Radar,
+                    label: 'Giám sát mua hàng',
+                    path: '/dashboard/branch-manager/procurement-monitoring',
+                },
+            ],
+        },
+        {
             title: 'Duyệt PR',
             items: [
                 { icon: ClipboardCheck, label: 'Duyệt PR', path: '/dashboard/branch-manager/pr-approval' },
@@ -74,6 +84,8 @@ const BranchManagerDashboard = () => {
     const getPageTitle = () => {
         if (location.pathname === '/dashboard/branch-manager') {
             return 'Tổng quan';
+        } else if (location.pathname.includes('/procurement-monitoring')) {
+            return 'Giám sát mua hàng';
         } else if (location.pathname.includes('/pr-approval')) {
             return 'Duyệt PR';
         } else if (location.pathname.includes('/budget-exception')) {
@@ -113,6 +125,8 @@ const BranchManagerDashboard = () => {
     const getPageSubtitle = () => {
         if (location.pathname === '/dashboard/branch-manager') {
             return 'Hôm nay chi nhánh tôi cần duyệt những PR nào?';
+        } else if (location.pathname.includes('/procurement-monitoring')) {
+            return 'Theo dõi PR/PO, trễ giao, SLA và mua lại trong chi nhánh';
         } else if (location.pathname.includes('/pr-approval')) {
             return 'Trung tâm duyệt PR của chi nhánh';
         } else if (location.pathname.includes('/budget-exception')) {

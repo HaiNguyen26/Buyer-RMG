@@ -10,9 +10,9 @@ import {
   Clock,
   DollarSign,
   GitCompareArrows,
-  LayoutGrid,
   NotebookPen,
   Radar,
+  Rows3,
   Save,
   ShieldCheck,
   Sparkles,
@@ -29,6 +29,7 @@ import CustomSelect from '../../components/CustomSelect';
 import { AwardAllocationSummary } from './award/AwardAllocationSummary';
 import { AwardSuggestionsPanel } from './award/AwardSuggestionsPanel';
 import { AwardCompareItemCards } from './award/AwardCompareItemCards';
+import { AwardLineComparisonMatrix } from './award/AwardLineComparisonMatrix';
 
 type SelectionMap = Record<string, string>;
 
@@ -247,12 +248,12 @@ const useAnimatedNumber = (value: number, duration = 450) => {
 };
 
 const TAB_LINKS = [
-  { key: 'compare', label: 'So sánh', to: 'compare', icon: GitCompareArrows, activeClass: 'from-sky-500 to-indigo-600' },
+  { key: 'compare', label: 'So sánh NCC', to: 'compare', icon: GitCompareArrows, activeClass: 'from-sky-500 to-indigo-600' },
   {
     key: 'allocation',
-    label: 'Phân bổ trao thầu',
+    label: 'So sánh theo dòng',
     to: 'allocation',
-    icon: LayoutGrid,
+    icon: Rows3,
     activeClass: 'from-cyan-500 to-teal-600',
   },
   { key: 'exceptions', label: 'Ngoại lệ', to: 'exceptions', icon: Radar, activeClass: 'from-amber-500 to-rose-600' },
@@ -688,7 +689,7 @@ const CompareAwardWorkspace = () => {
               Quotation Comparison &amp; Awarding
             </h1>
             <p className="mt-1.5 max-w-3xl text-xs leading-snug text-slate-600 sm:text-[13px] sm:leading-relaxed">
-              Đối chiếu báo giá và phân bổ NCC — đề xuất tối ưu và tab điều hướng nằm trên; bảng và khung phụ xếp một cột.
+              So sánh báo giá từng NCC trước, sau đó chọn trao thầu theo dòng trên bảng matrix.
             </p>
           </header>
 
@@ -1020,51 +1021,22 @@ export const CompareAwardTabCompare = () => {
 };
 
 export const CompareAwardTabAllocation = () => {
-  const { splitByVendor, prItems, selectedItems, setSelectedItems, approvalMode } =
+  const { prItems, quotations, selectedItems, setSelectedItems, approvalMode } =
     useOutletContext<CompareAwardContextShape>();
-  const [draggingItemId, setDraggingItemId] = useState<string | null>(null);
-
-  const itemByVendor = useMemo(() => {
-    const grouped: Record<string, any[]> = {};
-    prItems.forEach((item: any) => {
-      const qid = selectedItems[item.id];
-      if (!qid) return;
-      if (!grouped[qid]) grouped[qid] = [];
-      grouped[qid].push(item);
-    });
-    return grouped;
-  }, [prItems, selectedItems]);
+  const [search, setSearch] = useState('');
 
   return (
-    <div className="grid gap-3 md:grid-cols-2">
-      {splitByVendor.map((v) => (
-        <div
-          key={v.vendorId}
-          className="rounded-2xl border border-slate-200 bg-slate-50 p-3"
-          onDragOver={(e) => e.preventDefault()}
-          onDrop={() => {
-            if (!draggingItemId || approvalMode) return;
-            setSelectedItems((prev) => ({ ...prev, [draggingItemId]: v.vendorId }));
-            setDraggingItemId(null);
-          }}
-        >
-          <h3 className="font-bold text-slate-900">{v.vendorName}</h3>
-          <p className="text-xs text-slate-500">Tạm tính: {currency(v.amount)}</p>
-          <div className="mt-2 space-y-2">
-            {(itemByVendor[v.vendorId] || []).map((item) => (
-              <div
-                key={item.id}
-                draggable={!approvalMode}
-                onDragStart={() => setDraggingItemId(item.id)}
-                className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
-              >
-                {item.description}
-              </div>
-            ))}
-          </div>
-        </div>
-      ))}
-    </div>
+    <AwardLineComparisonMatrix
+      items={prItems}
+      quotations={quotations}
+      selectedItems={selectedItems}
+      setSelectedItems={setSelectedItems}
+      approvalMode={approvalMode}
+      currency={currency}
+      parseLead={parseLead}
+      search={search}
+      onSearchChange={setSearch}
+    />
   );
 };
 

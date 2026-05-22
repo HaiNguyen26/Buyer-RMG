@@ -25,13 +25,17 @@ export type RequestorItemStatusKey =
   | 'RFQ'
   | 'PENDING_APPROVAL'
   | 'PROCUREMENT'
-  | 'CANCELLED';
+  | 'CANCELLED'
+  | 'LINE_CANCEL_PENDING'
+  | 'AWAITING_REORDER';
 
 export type ProcurementListSnapshot = {
   nextEta: string | null;
   receivedCount: number;
   totalCount: number;
   partialCount: number;
+  waitingReorderCount: number;
+  waitingReorderQty: number;
   hasDelay: boolean;
   delayHint: string | null;
   itemPreview: Array<{
@@ -39,8 +43,12 @@ export type ProcurementListSnapshot = {
     statusLabel: string;
     statusKey: RequestorItemStatusKey;
     eta: string | null;
+    etaOriginal: string | null;
+    etaRevised: string | null;
     qtyReceived: number;
     qtyCap: number;
+    qtyWaiting: number;
+    lineCancelReason: string | null;
   }>;
 };
 
@@ -82,6 +90,8 @@ export type RequestorProcurementTracking = {
     totalCount: number;
     nextEta: string | null;
     partialCount: number;
+    waitingReorderCount: number;
+    waitingReorderQty: number;
   };
   items: Array<{
     itemId: string;
@@ -90,10 +100,15 @@ export type RequestorProcurementTracking = {
     qtyOrdered: number;
     qtyReceived: number;
     qtyCap: number;
+    qtyWaiting: number;
     eta: string | null;
+    etaOriginal: string | null;
+    etaRevised: string | null;
     statusKey: RequestorItemStatusKey;
     statusLabel: string;
     poNumber: string | null;
+    lineCancelReason: string | null;
+    cancelledRemainingQty?: number | null;
   }>;
   sla: {
     status: 'on_time' | 'warning' | 'overdue' | 'completed';

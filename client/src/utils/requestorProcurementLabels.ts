@@ -18,6 +18,8 @@ export const ITEM_STATUS_BADGE_CLASS: Record<RequestorItemStatusKey, string> = {
   PENDING_APPROVAL: 'bg-amber-50 text-amber-800 ring-amber-200',
   PROCUREMENT: 'bg-slate-100 text-slate-800 ring-slate-200',
   CANCELLED: 'bg-slate-100 text-slate-600 ring-slate-200',
+  LINE_CANCEL_PENDING: 'bg-amber-100 text-amber-950 ring-amber-200',
+  AWAITING_REORDER: 'bg-orange-100 text-orange-950 ring-orange-200',
 };
 
 export function currentStepToneClass(

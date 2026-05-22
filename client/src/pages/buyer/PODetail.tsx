@@ -13,6 +13,7 @@ import {
   CheckCircle,
   Printer,
   Wallet,
+  PackageX,
 } from 'lucide-react';
 import { buyerService } from '../../services/buyerService';
 import { useToast } from '../../contexts/ToastContext';
@@ -21,8 +22,13 @@ import { downloadPurchaseOrderPdf } from '../../utils/poPdf';
 import { PoDetailUnifiedSheet } from './PoDetailUnifiedSheet';
 import type { PoDisplayLang } from '../../utils/poDisplayLang';
 import { getStoredPoDisplayLang, setStoredPoDisplayLang } from '../../utils/poDisplayLang';
-import { poDetailUi, PO_STATUS_LABELS } from '../../utils/poDetailUiStrings';
+import { poDetailUi, PO_LINE_STATUS_LABELS, PO_STATUS_LABELS } from '../../utils/poDetailUiStrings';
+import {
+  isPoLineWarehouseShort,
+  poShowsWarehouseShortfallUi,
+} from '../../utils/poWarehouseShortfall';
 import { inferVatPercentFromLine } from '../../utils/quotationLine';
+import { PoLineCancelNote } from '../../components/po/PoLineCancelNote';
 import {
   PoCanvasKpiCard,
   PoDocumentSheetHeader,
@@ -132,11 +138,31 @@ const PODetail = () => {
   });
 
   const shortfallLineIds = useMemo(() => {
-    const items = (po?.items ?? []) as Array<{ id: string; qty: number; qtyReceived?: number }>;
-    return items
-      .filter((it) => Number(it.qty) > (Number(it.qtyReceived) ?? 0) + 1e-9)
-      .map((it) => it.id);
+    const items = (po?.items ?? []) as Array<{
+      id: string;
+      qty: number;
+      confirmedQty?: number | null;
+      qtyReceived?: number;
+      lineStatus?: string;
+    }>;
+    return items.filter((it) => isPoLineWarehouseShort(it)).map((it) => it.id);
   }, [po?.items]);
+
+  const highlightWarehouseShortQty = poShowsWarehouseShortfallUi(po?.status, shortfallLineIds);
+
+  const cancelRequestedIdSet = useMemo(
+    () => new Set<string>((po as { cancelRequestedPoItemIds?: string[] } | undefined)?.cancelRequestedPoItemIds ?? []),
+    [(po as { cancelRequestedPoItemIds?: string[] } | undefined)?.cancelRequestedPoItemIds]
+  );
+
+  const poHasLineCancelHistory = useMemo(
+    () =>
+      (po?.items ?? []).some(
+        (it: { lineStatus?: string; lineCancelReason?: string | null }) =>
+          String(it.lineStatus ?? '') === 'CANCELLED' || Boolean(it.lineCancelReason?.trim())
+      ),
+    [po?.items]
+  );
 
   const poVatSummary = useMemo(() => {
     const items = (po?.items ?? []) as Array<{
@@ -167,15 +193,31 @@ const PODetail = () => {
     setForm((prev) => ({
       ...prev,
       supplierTaxCode: prev.supplierTaxCode ?? po.supplier?.taxCode ?? '',
+      supplierBankName: prev.supplierBankName ?? po.supplier?.bankName ?? '',
+      supplierBankAccount: prev.supplierBankAccount ?? po.supplier?.bankAccount ?? '',
+      supplierName: prev.supplierName ?? po.supplier?.name ?? '',
+      supplierAddress: prev.supplierAddress ?? po.supplier?.address ?? '',
+      supplierPhone: prev.supplierPhone ?? po.supplier?.phone ?? '',
     }));
-  }, [po?.id, po?.supplier?.taxCode]);
+  }, [
+    po?.id,
+    po?.supplier?.taxCode,
+    po?.supplier?.bankName,
+    po?.supplier?.bankAccount,
+    po?.supplier?.name,
+    po?.supplier?.address,
+    po?.supplier?.phone,
+  ]);
 
-  useEffect(() => {
-    if (!cancelModalOpen) return;
+  const openCancelLineModal = (preselectLineId?: string) => {
+    setCancelReasonDraft('');
     const init: Record<string, boolean> = {};
-    for (const id of shortfallLineIds) init[id] = true;
+    for (const id of shortfallLineIds) {
+      init[id] = preselectLineId ? id === preselectLineId : true;
+    }
     setCancelLineSelection(init);
-  }, [cancelModalOpen, shortfallLineIds.join('|')]);
+    setCancelModalOpen(true);
+  };
 
   const updateMutation = useMutation({
     mutationFn: (payload: typeof form) => buyerService.updatePODraft(poId!, payload),
@@ -244,10 +286,12 @@ const PODetail = () => {
   const requestCancelMutation = useMutation({
     mutationFn: (payload: { reason: string; poItemIds?: string[] }) =>
       buyerService.requestCancelPO(poId!, payload.reason, payload.poItemIds),
-    onSuccess: () => {
+    onSuccess: (data: { message?: string }) => {
       queryClient.invalidateQueries({ queryKey: ['buyer-po-detail', poId] });
       queryClient.invalidateQueries({ queryKey: ['buyer-po-list'] });
-      showSuccess(poDetailUi(langRef.current).toastCancelRequestedOk);
+      queryClient.invalidateQueries({ queryKey: ['warehouse-incoming-pos'] });
+      queryClient.invalidateQueries({ queryKey: ['requestor-pr-tracking'] });
+      showSuccess(data?.message ?? poDetailUi(langRef.current).toastCancelRequestedOk);
       setCancelModalOpen(false);
       setCancelReasonDraft('');
     },
@@ -268,6 +312,9 @@ const PODetail = () => {
     po?.status === 'SENT' ||
     po?.status === 'CONFIRMED' ||
     po?.status === 'PARTIAL_RECEIVED';
+  const canCancelLineItems =
+    canRequestCancel && po?.status !== 'CANCEL_REQUESTED' && shortfallLineIds.length > 0;
+  const lineStatusLabels = PO_LINE_STATUS_LABELS[lang];
 
   if (!poId) return null;
   if (isLoading) {
@@ -545,22 +592,19 @@ const PODetail = () => {
                   {t.updateSupplierConfirm}
                 </button>
               )}
-              {canRequestCancel && !editMode && (
+              {canCancelLineItems && !editMode && (
                 <button
                   type="button"
                   disabled={requestCancelMutation.isPending}
-                  onClick={() => {
-                    setCancelReasonDraft('');
-                    setCancelModalOpen(true);
-                  }}
+                  onClick={() => openCancelLineModal()}
                   className="inline-flex items-center justify-center gap-2 rounded-xl border border-rose-200 bg-rose-50 px-4 py-2.5 text-sm font-semibold text-rose-900 transition-colors hover:bg-rose-100 disabled:opacity-50"
                 >
                   {requestCancelMutation.isPending ? (
                     <Loader2 className="h-4 w-4 animate-spin" />
                   ) : (
-                    <AlertCircle className="h-4 w-4" strokeWidth={2} />
+                    <PackageX className="h-4 w-4" strokeWidth={2} />
                   )}
-                  {t.requestCancel}
+                  {t.requestCancelLine}
                 </button>
               )}
             </div>
@@ -652,6 +696,31 @@ const PODetail = () => {
           </div>
         )}
 
+        {po.status === 'CANCEL_REQUESTED' ? (
+          <div className="mx-6 mt-6 rounded-xl border border-amber-200/90 bg-amber-50/90 px-4 py-3 sm:mx-8">
+            <p className="text-sm font-semibold text-amber-950">{t.cancelPendingBannerTitle}</p>
+            <p className="mt-1 text-sm text-amber-900/90">{t.cancelPendingBannerBody}</p>
+            {(po as { cancelRequestReason?: string | null }).cancelRequestReason ? (
+              <p className="mt-2 text-sm text-amber-950">
+                <span className="font-medium">{t.cancelReasonLabel}:</span>{' '}
+                {(po as { cancelRequestReason?: string | null }).cancelRequestReason}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+
+        {canCancelLineItems && (po.status === 'PARTIAL_RECEIVED' || shortfallLineIds.length > 0) ? (
+          <div className="mx-6 mt-4 rounded-xl border border-cyan-200/90 bg-cyan-50/80 px-4 py-3 sm:mx-8">
+            <p className="text-sm font-semibold text-cyan-950">{t.partialReceiveBannerTitle}</p>
+            <p className="mt-1 text-sm leading-relaxed text-cyan-900/90">{t.partialReceiveBannerBody}</p>
+            {po.prCode ? (
+              <p className="mt-2 text-xs font-medium text-cyan-800/90">
+                {t.metaPr}: <span className="font-mono">{po.prCode}</span>
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+
         {/* Line items */}
         <section className="border-t border-slate-100 px-6 py-6 sm:px-8">
           <h2 className={sectionTitleClass}>{t.lineItemsSection}</h2>
@@ -685,6 +754,8 @@ const PODetail = () => {
                       [t.thUnitPrice, 'right'],
                       [t.thVat, 'center'],
                       [t.thAmount, 'right'],
+                      ...(isPostLeader ? ([[t.colLineStatus, 'left']] as const) : []),
+                      ...(canCancelLineItems ? ([[t.thActions, 'center']] as const) : []),
                     ].map(([h, align]) => (
                       <th
                         key={h as string}
@@ -707,11 +778,50 @@ const PODetail = () => {
                             Number(item.unitPrice),
                             Number(item.amount)
                           );
+                    const lineShort =
+                      highlightWarehouseShortQty && shortfallLineIds.includes(item.id);
+                    const lineEligible = lineShort;
+                    const linePendingCancel = cancelRequestedIdSet.has(item.id);
+                    const lineStatusKey = String(item.lineStatus ?? 'OPEN');
+                    const qtyRemaining = Number(item.qtyRemaining ?? 0);
                     return (
                     <tr key={item.id} className="transition-colors hover:bg-slate-50/80">
                       <td className="px-4 py-3 text-slate-600">{rowIndex + 1}</td>
                       <td className="px-4 py-3 font-medium text-slate-800">{item.prItemCode ?? '—'}</td>
-                      <td className="max-w-xs px-4 py-3 text-slate-700">{item.description}</td>
+                      <td className="max-w-xs px-4 py-3 text-slate-700">
+                        <div>{item.description}</div>
+                        {lineStatusKey === 'CANCELLED' ||
+                        item.lineCancelReason ||
+                        linePendingCancel ? (
+                          <PoLineCancelNote
+                            orderedQty={Number(item.qty)}
+                            receivedQty={Number(item.qtyReceived ?? 0)}
+                            cancelledQty={
+                              item.cancelledRemainingQty != null
+                                ? Number(item.cancelledRemainingQty)
+                                : Math.max(
+                                    0,
+                                    Number(item.qty) - Number(item.qtyReceived ?? 0)
+                                  )
+                            }
+                            reason={
+                              item.lineCancelReason ??
+                              (linePendingCancel
+                                ? (po as { cancelRequestReason?: string }).cancelRequestReason
+                                : null)
+                            }
+                            pending={linePendingCancel}
+                            unit={item.unit}
+                          />
+                        ) : poHasLineCancelHistory &&
+                          Number(item.qtyReceived ?? 0) + 1e-9 >= Number(item.qty) ? (
+                          <PoLineCancelNote
+                            orderedQty={Number(item.qty)}
+                            receivedQty={Number(item.qtyReceived ?? 0)}
+                            unit={item.unit}
+                          />
+                        ) : null}
+                      </td>
                       <td className="px-4 py-3 text-right tabular-nums text-slate-800">{item.qty}</td>
                       <td className="px-4 py-3 text-right tabular-nums text-emerald-800">
                         {item.confirmedQty != null ? item.confirmedQty : '—'}
@@ -722,7 +832,15 @@ const PODetail = () => {
                           : '—'}
                       </td>
                       <td className="px-4 py-3 text-right tabular-nums text-slate-700">{item.qtyReceived ?? 0}</td>
-                      <td className="px-4 py-3 text-right tabular-nums text-slate-800">{item.qtyRemaining ?? 0}</td>
+                      <td
+                        className={`px-4 py-3 text-right tabular-nums ${
+                          lineShort && qtyRemaining > 0
+                            ? 'font-semibold text-rose-700'
+                            : 'text-slate-800'
+                        }`}
+                      >
+                        {qtyRemaining}
+                      </td>
                       <td className="px-4 py-3 text-slate-600">{item.unit}</td>
                       <td className="px-4 py-3 text-right tabular-nums text-slate-700">
                         {item.unitPrice != null ? Number(item.unitPrice).toLocaleString(numLocale) : '—'}
@@ -733,6 +851,37 @@ const PODetail = () => {
                       <td className="px-4 py-3 text-right text-sm font-semibold tabular-nums text-slate-900">
                         {item.amount != null ? Number(item.amount).toLocaleString(numLocale) : '—'}
                       </td>
+                      {isPostLeader ? (
+                        <td className="px-4 py-3">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-700">
+                              {lineStatusLabels[lineStatusKey] ?? lineStatusKey}
+                            </span>
+                            {linePendingCancel ? (
+                              <span className="inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-900">
+                                {t.lineCancelPendingBadge}
+                              </span>
+                            ) : null}
+                          </div>
+                        </td>
+                      ) : null}
+                      {canCancelLineItems ? (
+                        <td className="px-4 py-3 text-center">
+                          {lineEligible ? (
+                            <button
+                              type="button"
+                              disabled={requestCancelMutation.isPending}
+                              onClick={() => openCancelLineModal(item.id)}
+                              className="inline-flex items-center gap-1 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1 text-[11px] font-semibold text-rose-800 transition hover:bg-rose-100 disabled:opacity-50"
+                            >
+                              <PackageX className="h-3.5 w-3.5" strokeWidth={2} />
+                              {t.cancelLineRowAction}
+                            </button>
+                          ) : (
+                            <span className="text-xs text-slate-400">—</span>
+                          )}
+                        </td>
+                      ) : null}
                     </tr>
                     );
                   })}
@@ -847,7 +996,7 @@ const PODetail = () => {
                 }
                 requestCancelMutation.mutate({
                   reason,
-                  ...(picked.length > 0 ? { poItemIds: picked } : {}),
+                  poItemIds: picked,
                 });
               }}
               className="inline-flex items-center gap-2 rounded-xl bg-rose-600 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-700 disabled:opacity-50"

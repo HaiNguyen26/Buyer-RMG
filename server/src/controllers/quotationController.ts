@@ -1,9 +1,5 @@
 import { FastifyReply } from 'fastify';
-import {
-  allocateNextCounter,
-  rfqGlobalYearSequenceKey,
-  scanMaxRFQGlobalYearSuffix,
-} from '../utils/documentSequence';
+import { allocateNextRfqNumber } from '../utils/rfqNumber';
 import { prisma } from '../config/database';
 import { AuthenticatedRequest } from '../middleware/auth';
 import { auditCreate, auditUpdate } from '../utils/audit';
@@ -13,7 +9,15 @@ import { getIO } from '../utils/getIO';
 import { handleMultipleFileUpload } from '../utils/storage';
 import { computeQuotationBaseline } from '../utils/baseline';
 import { mapQuotationItemAmounts, normalizeVatPercent } from '../utils/quotationLine';
+import { resolveQuotationTotalAmount } from '../utils/quotationTotals';
 import { validateQuotationCommercialTermsInput } from '../utils/quotationCommercialTerms';
+import {
+  coerceToValidCalendarYmd,
+  computeLeadTimeDaysFromDelivery,
+  parseWarrantyMonthsInput,
+  todayYmdLocal,
+} from '../utils/quotationLeadTime';
+import { Prisma } from '@prisma/client';
 
 // Validation schemas
 const createQuotationSchema = z.object({
@@ -22,10 +26,10 @@ const createQuotationSchema = z.object({
   quotationNumber: z.string().optional(),
   totalAmount: z.number().min(0),
   currency: z.string().default('VND'),
-  leadTime: z.number().int().min(1, 'Lead time (ngày) là bắt buộc'),
+  leadTime: z.number().int().min(1).optional(),
   deliveryTerms: z.string().optional(),
   paymentTerms: z.string().trim().min(1, 'Điều kiện thanh toán là bắt buộc'),
-  warranty: z.string().trim().min(1, 'Bảo hành là bắt buộc'),
+  warranty: z.string().trim().min(1).optional(),
   riskNotes: z.string().optional(),
   validUntil: z.string().optional(), // ISO date string
   items: z.array(
@@ -36,10 +40,17 @@ const createQuotationSchema = z.object({
       qty: z.number().min(0),
       unit: z.string().optional(),
       unitPrice: z.number().min(0),
-      vatPercent: z.union([z.literal(3), z.literal(5), z.literal(8), z.literal(10)]).optional(),
+      vatPercent: z
+        .union([z.number(), z.string()])
+        .optional()
+        .transform((v) => (v === undefined || v === '' ? undefined : normalizeVatPercent(v))),
+      leadTimeDays: z.number().int().min(1).optional(),
+      warrantyMonths: z.number().int().min(0).optional(),
+      deliveryDate: z.string().optional(),
       notes: z.string().optional(),
     })
   ).min(1),
+  quotationDate: z.string().optional(),
 });
 
 const updateQuotationSchema = createQuotationSchema.partial();
@@ -61,6 +72,9 @@ type QuotationItemBody = {
   unitPrice: number;
   vatPercent?: number;
   unit?: string;
+  leadTimeDays?: number;
+  warrantyMonths?: number;
+  deliveryDate?: string;
   notes?: string;
 };
 
@@ -69,12 +83,78 @@ type SafeQuotationItemRow = QuotationItemBody & {
   unitPrice: number;
   vatPercent: number;
   totalPrice: number;
+  leadTimeDays: number;
+  warrantyMonths: number;
+  deliveryDateYmd: string;
 };
+
+function normalizeQuotationItemCommercial(
+  item: QuotationItemBody,
+  quotationDateYmd: string,
+  lineNo: number
+): { ok: true; leadTimeDays: number; warrantyMonths: number; deliveryDateYmd: string } | { ok: false; error: string } {
+  let leadTimeDays = item.leadTimeDays;
+  let deliveryDateYmd = coerceToValidCalendarYmd(item.deliveryDate) || null;
+
+  if (deliveryDateYmd) {
+    const calc = computeLeadTimeDaysFromDelivery(deliveryDateYmd, quotationDateYmd);
+    if (!calc.leadTimeDays || !calc.deliveryDateYmd) {
+      return { ok: false, error: `Dòng ${lineNo}: ngày giao phải sau ngày nhập báo giá (${quotationDateYmd})` };
+    }
+    leadTimeDays = calc.leadTimeDays;
+    deliveryDateYmd = calc.deliveryDateYmd;
+  } else if (item.leadTimeDays != null && item.leadTimeDays >= 1) {
+    const [y, m, d] = quotationDateYmd.split('-').map(Number);
+    const dt = new Date(Date.UTC(y, m - 1, d + item.leadTimeDays));
+    deliveryDateYmd = todayYmdLocal(dt);
+    leadTimeDays = item.leadTimeDays;
+  } else {
+    return { ok: false, error: `Dòng ${lineNo}: cần ngày giao NCC hoặc lead time (ngày)` };
+  }
+
+  const warrantyMonths =
+    item.warrantyMonths != null
+      ? Math.round(Number(item.warrantyMonths))
+      : parseWarrantyMonthsInput(item.notes);
+  if (warrantyMonths == null || warrantyMonths < 0) {
+    return { ok: false, error: `Dòng ${lineNo}: bảo hành (tháng) không hợp lệ` };
+  }
+
+  return { ok: true, leadTimeDays, warrantyMonths, deliveryDateYmd };
+}
+
+function aggregateHeaderCommercialFromItems(items: SafeQuotationItemRow[]) {
+  const leadTime = Math.max(...items.map((i) => i.leadTimeDays));
+  const warrantyMonths = Math.max(...items.map((i) => i.warrantyMonths));
+  return {
+    leadTime,
+    warranty: `${warrantyMonths} tháng`,
+  };
+}
+
+function mapSafeItemToPrismaCreate(item: SafeQuotationItemRow, companyId: string | null) {
+  return {
+    lineNo: item.lineNo,
+    purchaseRequestItemId: item.purchaseRequestItemId || null,
+    description: item.description,
+    qty: item.qty,
+    unit: item.unit || null,
+    unitPrice: item.unitPrice,
+    vatPercent: item.vatPercent,
+    totalPrice: item.totalPrice,
+    leadTimeDays: item.leadTimeDays,
+    warrantyMonths: item.warrantyMonths,
+    deliveryDate: new Date(`${item.deliveryDateYmd}T00:00:00.000Z`),
+    notes: item.notes || null,
+    companyId,
+  };
+}
 
 /** Tính thành tiền từng dòng = SL × đơn giá × (1 + VAT%) */
 function buildSafeQuotationItems(
   items: QuotationItemBody[],
-  reply: FastifyReply
+  reply: FastifyReply,
+  quotationDateYmd: string
 ): SafeQuotationItemRow[] | null {
   const safeItems: SafeQuotationItemRow[] = [];
   for (const item of items) {
@@ -94,6 +174,11 @@ function buildSafeQuotationItems(
       reply.code(400).send({ error: `Thành tiền vượt giới hạn tại dòng ${item.lineNo}`, maxAmount: MAX_DECIMAL_15_2 });
       return null;
     }
+    const commercial = normalizeQuotationItemCommercial(item, quotationDateYmd, item.lineNo);
+    if (!commercial.ok) {
+      reply.code(400).send({ error: commercial.error });
+      return null;
+    }
     safeItems.push({
       lineNo: item.lineNo,
       purchaseRequestItemId: item.purchaseRequestItemId,
@@ -104,6 +189,9 @@ function buildSafeQuotationItems(
       totalPrice,
       unit: item.unit,
       notes: item.notes,
+      leadTimeDays: commercial.leadTimeDays,
+      warrantyMonths: commercial.warrantyMonths,
+      deliveryDateYmd: commercial.deliveryDateYmd,
     });
   }
   return safeItems;
@@ -393,25 +481,35 @@ export const createQuotation = async (
       return reply.code(404).send({ error: 'Supplier not found' });
     }
 
-    // Round and validate decimals to avoid DB overflow (Decimal 15,2 must be < 10^13)
-    const safeTotalAmount = roundDecimal(Number(body.totalAmount), 2);
-    if (safeTotalAmount < 0 || safeTotalAmount > MAX_DECIMAL_15_2 || !Number.isFinite(safeTotalAmount)) {
+    const quotationDateYmd = body.quotationDate?.trim().slice(0, 10) || todayYmdLocal();
+    const safeItems = buildSafeQuotationItems(body.items, reply, quotationDateYmd);
+    if (!safeItems) return;
+
+    const headerCommercial = aggregateHeaderCommercialFromItems(safeItems);
+    const commercialCheck = validateQuotationCommercialTermsInput({
+      leadTime: headerCommercial.leadTime,
+      paymentTerms: body.paymentTerms,
+      warranty: headerCommercial.warranty,
+    });
+    if (!commercialCheck.ok) {
+      return reply.code(400).send({ error: commercialCheck.error });
+    }
+
+    const calculatedTotal = roundDecimal(
+      safeItems.reduce((sum, item) => sum + item.totalPrice, 0),
+      2
+    );
+    if (calculatedTotal < 0 || calculatedTotal > MAX_DECIMAL_15_2 || !Number.isFinite(calculatedTotal)) {
       return reply.code(400).send({
         error: 'Tổng giá trị báo giá không hợp lệ (vượt quá giới hạn hoặc không hợp lệ)',
         maxAllowed: MAX_DECIMAL_15_2,
       });
     }
-
-    const safeItems = buildSafeQuotationItems(body.items, reply);
-    if (!safeItems) return;
-
-    // Calculate total from rounded items (đã gồm VAT)
-    const calculatedTotal = safeItems.reduce((sum, item) => sum + item.totalPrice, 0);
-    if (Math.abs(calculatedTotal - safeTotalAmount) > 0.01) {
-      return reply.code(400).send({
-        error: 'Tổng báo giá không khớp tổng các dòng (sau VAT). Vui lòng tải lại trang và thử lại.',
+    const providedTotal = roundDecimal(Number(body.totalAmount), 2);
+    if (Math.abs(calculatedTotal - providedTotal) > 0.01) {
+      console.warn('[createQuotation] Client total mismatch — using sum of lines', {
         calculatedTotal,
-        providedTotal: safeTotalAmount,
+        providedTotal,
       });
     }
 
@@ -421,29 +519,20 @@ export const createQuotation = async (
         rfqId: body.rfqId,
         supplierId: body.supplierId,
         quotationNumber: body.quotationNumber || null,
-        totalAmount: safeTotalAmount,
+        totalAmount: calculatedTotal,
         currency: body.currency,
-        leadTime: body.leadTime,
+        leadTime: headerCommercial.leadTime,
         deliveryTerms: body.deliveryTerms || null,
         paymentTerms: body.paymentTerms,
-        warranty: body.warranty,
+        warranty: headerCommercial.warranty,
         riskNotes: body.riskNotes || null,
         validUntil: body.validUntil ? new Date(body.validUntil) : null,
         status: 'PENDING',
         companyId: rfq.companyId || null,
         items: {
-          create: safeItems.map((item) => ({
-            lineNo: item.lineNo,
-            purchaseRequestItemId: item.purchaseRequestItemId || null,
-            description: item.description,
-            qty: item.qty,
-            unit: item.unit || null,
-            unitPrice: item.unitPrice,
-            vatPercent: item.vatPercent,
-            totalPrice: item.totalPrice,
-            notes: item.notes || null,
-            companyId: rfq.companyId || null,
-          })),
+          create: safeItems.map((item) =>
+            mapSafeItemToPrismaCreate(item, rfq.companyId || null)
+          ),
         },
       },
       include: {
@@ -524,14 +613,23 @@ export const createQuotation = async (
       },
       createdAt: quotation.createdAt.toISOString(),
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     if (error instanceof z.ZodError) {
       return reply.code(400).send({ error: 'Validation error', details: error.errors });
     }
+    if (error instanceof Prisma.PrismaClientValidationError) {
+      console.error('Create quotation Prisma validation:', error.message);
+      return reply.code(500).send({
+        error:
+          'Server chưa đồng bộ schema (Prisma). Dừng server, chạy `npx prisma generate` trong thư mục server, rồi khởi động lại.',
+        message: error.message,
+      });
+    }
+    const message = error instanceof Error ? error.message : 'Unknown error';
     console.error('Create quotation error:', error);
     reply.code(500).send({
       error: 'Internal server error',
-      message: error.message,
+      message,
     });
   }
 };
@@ -701,7 +799,7 @@ export const getQuotations = async (
         supplier: q.supplier,
         supplierId: q.supplierId,
         quotationNumber: q.quotationNumber,
-        totalAmount: Number(q.totalAmount),
+        totalAmount: resolveQuotationTotalAmount(q.totalAmount, q.items as Array<{ totalPrice?: unknown }>),
         currency: q.currency,
         leadTime: q.leadTime,
         paymentTerms: q.paymentTerms,
@@ -1051,8 +1149,13 @@ export const updateQuotation = async (
         });
       }
 
-      const safeItems = buildSafeQuotationItems(body.items, reply);
+      const quotationDateYmd = body.quotationDate?.trim().slice(0, 10) || todayYmdLocal();
+      const safeItems = buildSafeQuotationItems(body.items, reply, quotationDateYmd);
       if (!safeItems) return;
+
+      const headerCommercial = aggregateHeaderCommercialFromItems(safeItems);
+      updateData.leadTime = headerCommercial.leadTime;
+      updateData.warranty = headerCommercial.warranty;
 
       await prisma.quotationItem.deleteMany({
         where: { quotationId: id },
@@ -1060,16 +1163,7 @@ export const updateQuotation = async (
       await prisma.quotationItem.createMany({
         data: safeItems.map((item) => ({
           quotationId: id,
-          lineNo: item.lineNo,
-          purchaseRequestItemId: item.purchaseRequestItemId || null,
-          description: item.description,
-          qty: item.qty,
-          unit: item.unit || null,
-          unitPrice: item.unitPrice,
-          vatPercent: item.vatPercent,
-          totalPrice: item.totalPrice,
-          notes: item.notes || null,
-          companyId: quotation.rfq.companyId || null,
+          ...mapSafeItemToPrismaCreate(item, quotation.rfq.companyId || null),
         })),
       });
       const calculatedTotal = safeItems.reduce((sum, item) => sum + item.totalPrice, 0);
@@ -1222,15 +1316,6 @@ export const createQuotationForPR = async (
       return reply.code(400).send({ error: 'supplierId and items are required' });
     }
 
-    const commercialCheck = validateQuotationCommercialTermsInput({
-      leadTime,
-      paymentTerms,
-      warranty,
-    });
-    if (!commercialCheck.ok) {
-      return reply.code(400).send({ error: commercialCheck.error });
-    }
-
     const purchaseRequestId = prId;
     if (!purchaseRequestId) {
       return reply.code(400).send({ error: 'purchaseRequestId is required' });
@@ -1359,12 +1444,12 @@ export const createQuotationForPR = async (
           notesContent = `[RFQ_ITEMS]${itemIdsJson}[/RFQ_ITEMS]`;
         }
 
-        const year = new Date().getFullYear();
-        const seqKey = rfqGlobalYearSequenceKey(year);
         rfq = await prisma.$transaction(
           async (tx) => {
-            const seq = await allocateNextCounter(tx, seqKey, () => scanMaxRFQGlobalYearSuffix(tx, year));
-            const rfqNumber = `RFQ-${year}-${String(seq).padStart(4, '0')}`;
+            const rfqNumber = await allocateNextRfqNumber(tx, pr.prNumber, {
+              department: pr.department,
+              location: pr.location,
+            });
             return tx.rFQ.create({
               data: {
                 purchaseRequestId,
@@ -1433,22 +1518,28 @@ export const createQuotationForPR = async (
       return reply.code(404).send({ error: 'Supplier not found' });
     }
 
-    // Round and validate decimals to avoid DB overflow (Decimal 15,2 must be < 10^13)
-    const safeTotalAmount = roundDecimal(Number(totalAmount), 2);
-    if (safeTotalAmount < 0 || safeTotalAmount > MAX_DECIMAL_15_2 || !Number.isFinite(safeTotalAmount)) {
+    const quotationDateYmd = body.quotationDate?.trim().slice(0, 10) || todayYmdLocal();
+    const safeItems = buildSafeQuotationItems(items, reply, quotationDateYmd);
+    if (!safeItems) return;
+
+    const headerCommercial = aggregateHeaderCommercialFromItems(safeItems);
+    const commercialCheck = validateQuotationCommercialTermsInput({
+      leadTime: headerCommercial.leadTime,
+      paymentTerms,
+      warranty: headerCommercial.warranty,
+    });
+    if (!commercialCheck.ok) {
+      return reply.code(400).send({ error: commercialCheck.error });
+    }
+
+    const calculatedTotal = roundDecimal(
+      safeItems.reduce((sum, item) => sum + item.totalPrice, 0),
+      2
+    );
+    if (calculatedTotal < 0 || calculatedTotal > MAX_DECIMAL_15_2 || !Number.isFinite(calculatedTotal)) {
       return reply.code(400).send({
         error: 'Tổng giá trị báo giá không hợp lệ (vượt quá giới hạn hoặc không hợp lệ)',
         maxAllowed: MAX_DECIMAL_15_2,
-      });
-    }
-    const safeItems = buildSafeQuotationItems(items, reply);
-    if (!safeItems) return;
-    const calculatedTotal = safeItems.reduce((sum, item) => sum + item.totalPrice, 0);
-    if (Math.abs(calculatedTotal - safeTotalAmount) > 0.01) {
-      return reply.code(400).send({
-        error: 'Tổng báo giá không khớp tổng các dòng (sau VAT). Vui lòng tải lại trang và thử lại.',
-        calculatedTotal,
-        providedTotal: safeTotalAmount,
       });
     }
 
@@ -1476,29 +1567,20 @@ export const createQuotationForPR = async (
         rfqId: rfq.id,
         supplierId,
         quotationNumber: quotationNumber || null,
-        totalAmount: safeTotalAmount,
+        totalAmount: calculatedTotal,
         currency,
-        leadTime: Number(leadTime),
+        leadTime: headerCommercial.leadTime,
         deliveryTerms: deliveryTerms || null,
         paymentTerms: paymentTerms!.trim(),
-        warranty: warranty!.trim(),
+        warranty: headerCommercial.warranty,
         riskNotes: riskNotes || null,
         validUntil: validUntil ? new Date(validUntil) : null,
         status: 'PENDING',
         companyId: pr.companyId || null,
         items: {
-          create: safeItems.map((item) => ({
-            lineNo: item.lineNo,
-            purchaseRequestItemId: item.purchaseRequestItemId || null,
-            description: item.description,
-            qty: item.qty,
-            unit: item.unit || null,
-            unitPrice: item.unitPrice,
-            vatPercent: item.vatPercent,
-            totalPrice: item.totalPrice,
-            notes: item.notes || null,
-            companyId: pr.companyId || null,
-          })),
+          create: safeItems.map((item) =>
+            mapSafeItemToPrismaCreate(item, pr.companyId || null)
+          ),
         },
       },
       include: {

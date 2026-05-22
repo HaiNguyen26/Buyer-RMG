@@ -51,16 +51,7 @@ import {
   rfqStatusPillClass,
 } from '../../components/buyer/RfqDetailBlocks';
 
-const PR_STATUS_AFTER_AWARD = new Set([
-  'SUPPLIER_SELECTED',
-  'RFQ_COMPLETED',
-  'PO_PENDING',
-  'PO_IN_PROGRESS',
-  'PO_ISSUED',
-  'CLOSED',
-  'BUDGET_EXCEPTION',
-  'BUDGET_APPROVED',
-]);
+import { isPrPastRfqApprovalPhase } from '../../utils/rfqAwardDisplay';
 
 export default function RFQDetail() {
   const { id } = useParams<{ id: string }>();
@@ -173,7 +164,10 @@ export default function RFQDetail() {
   const itemCount = rfqItems.length > 0 ? rfqItems.length : (rfqData.itemCount ?? 0);
   const quoteCount = rfqData.quotations?.length ?? 0;
   const prStatus = String(rfqData?.purchaseRequest?.status || '');
-  const awardedDone = PR_STATUS_AFTER_AWARD.has(prStatus);
+  const awardedDone =
+    (rfqData as { awardComplete?: boolean }).awardComplete === true ||
+    isPrPastRfqApprovalPhase(prStatus) ||
+    rfqData.status === 'CLOSED';
   const statusLabel = awardedDone || rfqData.status === 'CLOSED' ? 'Đã chọn NCC' : getStatusLabel(rfqData.status);
   const statusPill = rfqStatusPillClass(rfqData.status, awardedDone);
 

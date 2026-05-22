@@ -1,4 +1,8 @@
 import axios from 'axios';
+import {
+  buildRfqQuotationExcelFilename,
+  parseFilenameFromContentDisposition,
+} from '../utils/rfqQuotationExcelFilename';
 
 export type SupplierConfirmLinePayload = {
   poItemId: string;
@@ -89,6 +93,8 @@ export interface AssignedPRData {
   };
   scope: string;
   status: string;
+  /** Số dòng ASSIGNED còn purchaseQty — chờ RFQ/PO mới sau hủy dòng PO */
+  awaitingPurchaseCount?: number;
   assignedDate: string;
   department?: string | null;
   totalAmount?: number | null;
@@ -246,6 +252,25 @@ export const buyerService = {
     if (Array.isArray(data)) return { suppliers: data };
     if (data && Array.isArray(data.suppliers)) return { suppliers: data.suppliers };
     return { suppliers: [] };
+  },
+
+  updateSupplier: async (
+    supplierId: string,
+    data: {
+      name?: string;
+      code?: string;
+      email?: string;
+      phone?: string;
+      address?: string;
+      taxCode?: string;
+      contactPerson?: string;
+      bankName?: string;
+      bankAccount?: string;
+      notes?: string;
+    }
+  ): Promise<any> => {
+    const response = await api.put(`/suppliers/${encodeURIComponent(supplierId)}`, data);
+    return response.data;
   },
 
   // Get PR Details
@@ -438,6 +463,57 @@ export const buyerService = {
     return response.data;
   },
 
+  /** Parse Excel báo giá NCC trả về — điền modal nhập báo giá. */
+  importRFQQuotationExcel: async (
+    rfqId: string,
+    file: File,
+    quotationDateYmd?: string
+  ): Promise<import('../types/rfqQuotationExcelImport').RfqQuotationExcelImportResult> => {
+    const form = new FormData();
+    form.append('file', file);
+    if (quotationDateYmd?.trim()) {
+      form.append('quotationDateYmd', quotationDateYmd.trim().slice(0, 10));
+    }
+    const response = await api.post(
+      `/buyer/rfqs/${encodeURIComponent(rfqId)}/import/quotation-excel`,
+      form,
+      { headers: { 'Content-Type': 'multipart/form-data' } }
+    );
+    return response.data;
+  },
+
+  /** Excel mẫu báo giá gửi NCC (snake_case, tên file có tên NCC). */
+  downloadRFQQuotationExcel: async (
+    rfqId: string,
+    supplierId: string,
+    options?: { rfqNumber?: string; supplierName?: string }
+  ): Promise<void> => {
+    const response = await api.get(`/buyer/rfqs/${encodeURIComponent(rfqId)}/export/excel`, {
+      params: { supplierId },
+      responseType: 'blob',
+    });
+    const blob = new Blob([response.data], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    let filename =
+      options?.rfqNumber?.trim() && options?.supplierName?.trim()
+        ? buildRfqQuotationExcelFilename(options.rfqNumber.trim(), options.supplierName.trim())
+        : `RFQ_${rfqId}_bao_gia.xlsx`;
+    const cd = response.headers['content-disposition'] as string | undefined;
+    if (cd) {
+      const fromHeader = parseFilenameFromContentDisposition(cd);
+      if (fromHeader) filename = fromHeader;
+    }
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    window.URL.revokeObjectURL(url);
+    document.body.removeChild(a);
+  },
+
   // Export RFQ PDF/JSON
   exportRFQPDF: async (rfqId: string): Promise<void> => {
     const response = await api.get(`/buyer/rfqs/${rfqId}/export`, {
@@ -475,6 +551,15 @@ export const buyerService = {
     return response.data;
   },
 
+  /** Đánh dấu báo giá hợp lệ / không hợp lệ (Buyer). */
+  validateQuotation: async (quotationId: string, valid: boolean): Promise<{ status: string; message?: string }> => {
+    const response = await api.post(
+      `/buyer/quotations/${encodeURIComponent(quotationId)}/validate`,
+      { valid }
+    );
+    return response.data;
+  },
+
   // ----- PO (Phase 3) -----
   getPODashboard: async () => {
     const response = await api.get('/buyer/po/dashboard');
@@ -495,6 +580,23 @@ export const buyerService = {
   getPOList: async (params?: { poCode?: string; prCode?: string; supplier?: string; status?: string }) => {
     const response = await api.get('/buyer/po/list', { params });
     return response.data;
+  },
+  exportPOListExcel: async (params?: {
+    poCode?: string;
+    prCode?: string;
+    supplier?: string;
+    status?: string;
+  }): Promise<Blob> => {
+    const { data } = await api.get('/buyer/po/export/excel', {
+      params: {
+        ...(params?.poCode ? { poCode: params.poCode } : {}),
+        ...(params?.prCode ? { prCode: params.prCode } : {}),
+        ...(params?.supplier ? { supplier: params.supplier } : {}),
+        ...(params?.status ? { status: params.status } : {}),
+      },
+      responseType: 'blob',
+    });
+    return data;
   },
   getPODetail: async (poId: string) => {
     const response = await api.get(`/buyer/po/${poId}`);

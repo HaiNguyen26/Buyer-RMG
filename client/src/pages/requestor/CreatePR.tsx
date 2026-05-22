@@ -37,6 +37,8 @@ import { RequestorPageHero } from '../../components/RequestorPageHero';
 import { RequestorCustomerPODetailModal } from '../../components/RequestorCustomerPODetailModal';
 import { parseMaterialImportFile } from '../../utils/prMaterialImport';
 import { formatIsoDateToDdMmYyyy } from '../../utils/dateDisplay';
+import { DdMmYyyyDateInput } from '../../components/DdMmYyyyDateInput';
+import { coerceToValidCalendarYmd } from '../../utils/quotationLeadTime';
 
 const createPRSchema = z.object({
   department: z.string().min(1, 'Vui lòng chọn Phòng ban'),
@@ -78,7 +80,11 @@ const createPRSchema = z.object({
           return Math.round(n);
         }, z.number().optional()),
         desiredDeliveryDate: z.preprocess(
-          (v) => (v === '' || v == null ? undefined : String(v).trim()),
+          (v) => {
+            if (v === '' || v == null) return undefined;
+            const ymd = coerceToValidCalendarYmd(String(v).trim());
+            return ymd || undefined;
+          },
           z.string().optional()
         ),
         purpose: z.string().optional(),
@@ -1431,14 +1437,23 @@ const CreatePR = () => {
                         )}
                       </td>
                       <td className="px-4 py-3">
-                        <input
-                          type="date"
-                          {...register(`items.${idx}.desiredDeliveryDate` as const)}
-                          className={`w-full min-w-[120px] px-3 py-2.5 border rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-500/30 focus:border-violet-500 transition-all text-sm ${
-                            errors.items?.[idx]?.desiredDeliveryDate
-                              ? 'border-rose-400 bg-rose-50/50'
-                              : 'border-slate-200 hover:border-slate-300'
-                          }`}
+                        <Controller
+                          control={control}
+                          name={`items.${idx}.desiredDeliveryDate`}
+                          render={({ field }) => (
+                            <DdMmYyyyDateInput
+                              valueYmd={coerceToValidCalendarYmd(
+                                field.value == null || field.value === '' ? '' : String(field.value)
+                              )}
+                              onChangeYmd={(ymd) => field.onChange(ymd || '')}
+                              placeholder="dd/mm/yyyy"
+                              className={`w-full min-w-[8.5rem] border px-3 py-2.5 text-sm text-center rounded-lg transition-all focus:outline-none focus:ring-2 focus:ring-violet-500/30 focus:border-violet-500 ${
+                                errors.items?.[idx]?.desiredDeliveryDate
+                                  ? 'border-rose-400 bg-rose-50/50'
+                                  : 'border-slate-200 hover:border-slate-300'
+                              }`}
+                            />
+                          )}
                         />
                         {errors.items?.[idx]?.desiredDeliveryDate && (
                           <p className="text-xs text-rose-500 mt-1">{errors.items[idx]?.desiredDeliveryDate?.message}</p>
@@ -1451,7 +1466,11 @@ const CreatePR = () => {
                           render={({ field }) => (
                             <VndIntegerInput
                               placeholder="Ví dụ: 1.500.000"
-                              value={field.value ?? undefined}
+                              value={
+                                typeof field.value === 'number' && Number.isFinite(field.value)
+                                  ? field.value
+                                  : undefined
+                              }
                               onChange={field.onChange}
                               className={`w-full min-w-[100px] px-3 py-2.5 border rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-500/30 focus:border-violet-500 transition-all text-sm ${
                                 errors.items?.[idx]?.estimatedUnitPriceVnd

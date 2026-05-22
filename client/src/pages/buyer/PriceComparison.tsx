@@ -64,7 +64,7 @@ const PriceComparison = () => {
 
   const { data: prsData } = useQuery({
     queryKey: ['buyer-assigned-prs'],
-    queryFn: () => buyerService.getAssignedPRs({ status: 'all' }),
+    queryFn: () => buyerService.getAssignedPRs(),
   });
 
   const { data: rfqsData } = useQuery({

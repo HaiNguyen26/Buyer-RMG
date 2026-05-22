@@ -4,17 +4,28 @@ import { AuthenticatedRequest } from '../middleware/auth';
 import { auditCreate, auditUpdate } from '../utils/audit';
 import { computePRStatusFromItemStatuses } from '../utils/prStatusFromItems';
 import {
+  isRfqAwardCompleteFromCounts,
+  prHasActivePurchaseOrder,
+} from '../utils/rfqAwardComplete';
+import {
   itemDepartmentOutcomeAllowsProcurement,
   prismaDepartmentOutcomeRowActive,
   resolveBuyerAssignedItemIds,
 } from '../utils/departmentPrItemReview';
+import { allocateNextRfqNumber } from '../utils/rfqNumber';
+import { loadRfqExportScopeForBuyer } from '../utils/rfqExportScope';
+import { parseRfqQuotationExcelBuffer } from '../utils/rfqQuotationExcelImport';
+import { resolveSupplierForQuotationExcelImport } from '../utils/rfqQuotationSupplierResolve';
 import {
-  allocateNextCounter,
-  rfqPrBuyerSequenceKey,
-  scanMaxRFQPRBuyerSuffix,
-} from '../utils/documentSequence';
+  buildRfqQuotationExcelBuffer,
+  buildRfqQuotationExcelFilename,
+  buildRfqNccQuoteLines,
+  excelContentDisposition,
+} from '../utils/rfqQuotationExcelExport';
 import { z } from 'zod';
+
 import { prSalesPOSelect, serializePRSalesOrder } from '../utils/prSalesOrder';
+import { isPrItemAwaitingRepurchase } from '../utils/buyerPrDisplayStatus';
 
 // Validation schemas
 const createRFQSchema = z.object({
@@ -140,8 +151,9 @@ export const createRFQ = async (
           }
         }
 
-        // Mark items as locked
-        rfqItemIds.forEach(itemId => {
+        rfqItemIds.forEach((itemId) => {
+          const prItem = pr.items.find((i) => i.id === itemId);
+          if (prItem && isPrItemAwaitingRepurchase(prItem)) return;
           lockedItemIds.add(itemId);
           if (!itemToRFQMap[itemId]) {
             itemToRFQMap[itemId] = {
@@ -169,13 +181,6 @@ export const createRFQ = async (
       }
     }
 
-    // Get buyer username for RFQ number
-    const buyer = await prisma.user.findUnique({
-      where: { id: userId },
-      select: { username: true },
-    });
-    const buyerUsername = buyer?.username || 'BUYER';
-
     // Prepare notes: combine user notes with itemIds (stored as JSON in notes)
     let notesContent = body.notes || '';
     if (body.itemIds && Array.isArray(body.itemIds) && body.itemIds.length > 0) {
@@ -189,16 +194,12 @@ export const createRFQ = async (
       console.warn(`[createRFQ] No itemIds provided! body.itemIds:`, body.itemIds);
     }
 
-    const prPrefix = pr.prNumber.split('-').slice(0, -1).join('-');
-    const buyerTag = buyerUsername.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 10);
-    const seqKey = rfqPrBuyerSequenceKey(prPrefix, buyerTag);
-
     const rfq = await prisma.$transaction(
       async (tx) => {
-        const seq = await allocateNextCounter(tx, seqKey, () =>
-          scanMaxRFQPRBuyerSuffix(tx, prPrefix, buyerTag)
-        );
-        const rfqNumber = `RFQ-PR-${prPrefix}-${buyerTag}-${String(seq).padStart(3, '0')}`;
+        const rfqNumber = await allocateNextRfqNumber(tx, pr.prNumber, {
+          department: pr.department,
+          location: pr.location,
+        });
         return tx.rFQ.create({
           data: {
             purchaseRequestId: body.purchaseRequestId,
@@ -236,10 +237,16 @@ export const createRFQ = async (
         .filter((i) => itemDepartmentOutcomeAllowsProcurement(i.departmentItemOutcome))
         .map((i) => i.status)
     );
-    if (aggregatedStatus) {
+    let prStatusToSet = aggregatedStatus;
+    if (body.itemIds && body.itemIds.length > 0) {
+      if (!prStatusToSet || prStatusToSet === 'RFQ_COMPLETED' || prStatusToSet === 'SUPPLIER_SELECTED') {
+        prStatusToSet = 'RFQ_IN_PROGRESS';
+      }
+    }
+    if (prStatusToSet) {
       await prisma.purchaseRequest.update({
         where: { id: body.purchaseRequestId },
-        data: { status: aggregatedStatus },
+        data: { status: prStatusToSet },
       });
     }
 
@@ -374,8 +381,89 @@ export const getRFQs = async (
       return !rfqNumber.startsWith('MOCK-') && !prNumber.startsWith('MOCK-');
     });
 
-    console.log(`[getRFQs] Returning ${filteredRFQs.length} RFQs for buyer ${userId}`);
-    reply.send({ rfqs: filteredRFQs });
+    const allRfqItemIds = [...new Set(filteredRFQs.flatMap((r) => r.itemIds))];
+    const prIds = [...new Set(filteredRFQs.map((r) => r.prId))];
+
+    const [selectionRows, poRows, prItemRows] = await Promise.all([
+      allRfqItemIds.length > 0
+        ? prisma.supplierSelection.findMany({
+            where: { purchaseRequestItemId: { in: allRfqItemIds } },
+            select: { purchaseRequestItemId: true },
+          })
+        : Promise.resolve([]),
+      prIds.length > 0
+        ? prisma.purchaseOrder.findMany({
+            where: { purchaseRequestId: { in: prIds }, deletedAt: null },
+            select: { purchaseRequestId: true, status: true },
+          })
+        : Promise.resolve([]),
+      allRfqItemIds.length > 0
+        ? prisma.purchaseRequestItem.findMany({
+            where: { id: { in: allRfqItemIds }, deletedAt: null },
+            select: { id: true, status: true, purchaseQty: true },
+          })
+        : Promise.resolve([]),
+    ]);
+
+    const selectedItemIdSet = new Set(selectionRows.map((s) => s.purchaseRequestItemId));
+    const posByPrId = new Map<string, Array<{ status: string }>>();
+    for (const po of poRows) {
+      const list = posByPrId.get(po.purchaseRequestId) ?? [];
+      list.push({ status: String(po.status) });
+      posByPrId.set(po.purchaseRequestId, list);
+    }
+    const prItemById = new Map(
+      prItemRows.map((it) => [
+        it.id,
+        { status: String(it.status), purchaseQty: Number(it.purchaseQty ?? 0) },
+      ])
+    );
+
+    const rfqItemSettled = (itemId: string): boolean => {
+      const it = prItemById.get(itemId);
+      if (!it) return false;
+      if (it.status === 'FULFILLED') return true;
+      if (it.status === 'SUPPLIER_SELECTED' && it.purchaseQty <= 1e-9) return true;
+      return false;
+    };
+
+    const rfqsWithAward = filteredRFQs.map((rfq) => {
+      const selectedCount = rfq.itemIds.filter((id) => selectedItemIdSet.has(id)).length;
+      const settledItemCount = rfq.itemIds.filter((id) => rfqItemSettled(id)).length;
+      const hasNonDraftPo = prHasActivePurchaseOrder(posByPrId.get(rfq.prId));
+      const awardComplete = isRfqAwardCompleteFromCounts({
+        rfqStatus: String(rfq.status),
+        prStatus: String(rfq.prStatus),
+        itemIds: rfq.itemIds,
+        selectedCount,
+        hasNonDraftPo,
+        settledItemCount,
+      });
+      const displayStatus =
+        awardComplete && String(rfq.status) === 'READY_FOR_COMPARISON' ? 'CLOSED' : rfq.status;
+      return {
+        ...rfq,
+        status: displayStatus,
+        awardComplete,
+        selectedItemCount: selectedCount,
+        settledItemCount,
+        hasNonDraftPo,
+      };
+    });
+
+    const legacyCloseIds = rfqsWithAward.filter((r) => r.awardComplete).map((r) => r.id);
+    if (legacyCloseIds.length > 0) {
+      await prisma.rFQ.updateMany({
+        where: {
+          id: { in: legacyCloseIds },
+          status: 'READY_FOR_COMPARISON' as any,
+        },
+        data: { status: 'CLOSED' as any },
+      });
+    }
+
+    console.log(`[getRFQs] Returning ${rfqsWithAward.length} RFQs for buyer ${userId}`);
+    reply.send({ rfqs: rfqsWithAward });
   } catch (error: any) {
     console.error('Get RFQs error:', error);
     reply.code(500).send({
@@ -543,6 +631,37 @@ export const getRFQById = async (
       }
     }
 
+    const prPos = await prisma.purchaseOrder.findMany({
+      where: { purchaseRequestId: rfq.purchaseRequest.id, deletedAt: null },
+      select: { status: true },
+    });
+    const rfqScopeIds = rfqItemIds.length > 0 ? rfqItemIds : itemsToShow.map((i) => i.id);
+    const selectedForRfq = supplierSelections.filter((s) =>
+      rfqScopeIds.includes(s.purchaseRequestItemId)
+    ).length;
+    const settledItemCount = rfqScopeIds.filter((id) => {
+      const it = rfq.purchaseRequest.items.find((i) => i.id === id);
+      if (!it) return false;
+      const st = String(it.status);
+      return st === 'FULFILLED' || (st === 'SUPPLIER_SELECTED' && Number(it.purchaseQty) <= 0);
+    }).length;
+    const awardComplete = isRfqAwardCompleteFromCounts({
+      rfqStatus: String(rfq.status),
+      prStatus: String(rfq.purchaseRequest.status),
+      itemIds: rfqScopeIds,
+      selectedCount: selectedForRfq,
+      hasNonDraftPo: prHasActivePurchaseOrder(prPos),
+      settledItemCount,
+    });
+    let rfqStatusOut = String(rfq.status);
+    if (awardComplete && rfqStatusOut === 'READY_FOR_COMPARISON') {
+      await prisma.rFQ.update({
+        where: { id: rfq.id },
+        data: { status: 'CLOSED' as any },
+      });
+      rfqStatusOut = 'CLOSED';
+    }
+
     const { computeQuotationBaseline } = await import('../utils/baseline');
 
     const salesOrder = serializePRSalesOrder(rfq.purchaseRequest as any);
@@ -578,7 +697,8 @@ export const getRFQById = async (
     const responsePayload = {
       id: rfq.id,
       rfqNumber: rfq.rfqNumber,
-      status: rfq.status,
+      status: rfqStatusOut,
+      awardComplete,
       notes: rfq.notes,
       sentDate: rfq.sentDate?.toISOString(),
       itemIds: rfqItemIds.length > 0 ? rfqItemIds : undefined,
@@ -833,6 +953,130 @@ export const sendRFQ = async (
       error: 'Internal server error',
       message: error.message,
     });
+  }
+};
+
+/** Import Excel báo giá NCC → JSON điền modal buyer. */
+export const importRFQQuotationExcel = async (
+  request: AuthenticatedRequest,
+  reply: FastifyReply
+) => {
+  try {
+    const userId = request.user?.userId;
+    if (!userId) return reply.code(401).send({ error: 'Unauthorized' });
+
+    const { id } = request.params as { id: string };
+    const scope = await loadRfqExportScopeForBuyer(id, userId);
+    if (!scope) return reply.code(404).send({ error: 'RFQ not found' });
+    if ('forbidden' in scope) return reply.code(403).send({ error: 'Access denied' });
+
+    let fileBuffer: Buffer | null = null;
+    let quotationDateYmd: string | undefined;
+    const multipartRequest = request as AuthenticatedRequest & {
+      isMultipart?: boolean;
+      parts?: () => AsyncIterableIterator<{
+        type: string;
+        fieldname: string;
+        value?: string;
+        toBuffer?: () => Promise<Buffer>;
+        filename?: string;
+      }>;
+    };
+
+    if (multipartRequest.isMultipart && multipartRequest.parts) {
+      for await (const part of multipartRequest.parts()) {
+        if (part.type === 'file' && part.fieldname === 'file' && part.toBuffer) {
+          fileBuffer = await part.toBuffer();
+          continue;
+        }
+        if (part.type === 'field' && part.fieldname === 'quotationDateYmd' && part.value) {
+          quotationDateYmd = String(part.value).trim().slice(0, 10);
+        }
+      }
+    }
+
+    if (!fileBuffer?.length) {
+      return reply.code(400).send({ error: 'Vui lòng upload file Excel (.xlsx)' });
+    }
+
+    const parsed = await parseRfqQuotationExcelBuffer(fileBuffer, scope.items, {
+      quotationDateYmd,
+    });
+    const resolved = await resolveSupplierForQuotationExcelImport(
+      parsed.supplierId,
+      parsed.supplierName
+    );
+    if (resolved) {
+      return reply.send({
+        ...parsed,
+        supplierId: resolved.id,
+        supplierName: resolved.name,
+      });
+    }
+    if (!parsed.supplierId && !parsed.supplierName) {
+      parsed.warnings.push(
+        'Không đọc được NCC từ file — chọn NCC thủ công trước khi lưu báo giá.'
+      );
+    } else {
+      parsed.warnings.push(
+        `Không tìm thấy NCC «${parsed.supplierName ?? parsed.supplierId}» trong hệ thống — chọn NCC thủ công.`
+      );
+    }
+    return reply.send(parsed);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : 'Import Excel thất bại';
+    console.error('importRFQQuotationExcel error:', error);
+    return reply.code(400).send({ error: message });
+  }
+};
+
+/** Excel mẫu báo giá gửi NCC — field_name snake_case để import lại. */
+export const exportRFQExcel = async (
+  request: AuthenticatedRequest,
+  reply: FastifyReply
+) => {
+  try {
+    const userId = request.user?.userId;
+    if (!userId) return reply.code(401).send({ error: 'Unauthorized' });
+
+    const { id } = request.params as { id: string };
+    const { supplierId } = request.query as { supplierId?: string };
+    if (!supplierId?.trim()) {
+      return reply.code(400).send({ error: 'supplierId là bắt buộc (chọn NCC trước khi tải Excel)' });
+    }
+
+    const scope = await loadRfqExportScopeForBuyer(id, userId);
+    if (!scope) return reply.code(404).send({ error: 'RFQ not found' });
+    if ('forbidden' in scope) return reply.code(403).send({ error: 'Access denied' });
+
+    const supplier = await prisma.supplier.findFirst({
+      where: { id: supplierId.trim(), deletedAt: null },
+    });
+    if (!supplier) return reply.code(404).send({ error: 'NCC không tồn tại' });
+
+    const { rfq, items } = scope;
+    const pr = rfq.purchaseRequest;
+
+    const lines = buildRfqNccQuoteLines(items);
+    const buffer = await buildRfqQuotationExcelBuffer({
+      rfqNumber: rfq.rfqNumber,
+      prNumber: pr.prNumber,
+      supplierId: supplier.id,
+      supplierName: supplier.name,
+      lines,
+    });
+    const filename = buildRfqQuotationExcelFilename(rfq.rfqNumber, supplier.name);
+
+    reply
+      .header(
+        'Content-Type',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+      )
+      .header('Content-Disposition', excelContentDisposition(filename))
+      .send(buffer);
+  } catch (error: any) {
+    console.error('exportRFQExcel error:', error);
+    reply.code(500).send({ error: 'Internal server error', message: error.message });
   }
 };
 

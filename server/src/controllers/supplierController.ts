@@ -155,7 +155,7 @@ export const getSuppliers = async (
       orderBy: {
         name: 'asc',
       },
-      take: 500,
+      take: 2000,
     });
 
     const mappedSuppliers = suppliers.map((supplier) => ({
@@ -167,6 +167,8 @@ export const getSuppliers = async (
       address: supplier.address,
       taxCode: supplier.taxCode,
       contactPerson: supplier.contactPerson,
+      bankName: supplier.bankName,
+      bankAccount: supplier.bankAccount,
       notes: supplier.notes,
       quotationsCount: supplier._count.quotations,
       purchaseRequestsCount: supplier._count.purchaseRequests,
@@ -246,6 +248,8 @@ export const getSupplierById = async (
       address: supplier.address,
       taxCode: supplier.taxCode,
       contactPerson: supplier.contactPerson,
+      bankName: supplier.bankName,
+      bankAccount: supplier.bankAccount,
       notes: supplier.notes,
       recentQuotations: supplier.quotations.map((q: any) => ({
         id: q.id,
@@ -404,7 +408,7 @@ export const bulkImportSuppliers = async (
 
     const existingSuppliers = await prisma.supplier.findMany({
       where: { deletedAt: null },
-      select: { id: true, code: true, taxCode: true, name: true },
+      select: { id: true, code: true, taxCode: true, name: true, bankName: true, bankAccount: true },
     });
 
     const existingCodeSet = new Set(
@@ -476,6 +480,27 @@ export const bulkImportSuppliers = async (
       });
     }
 
+    const existingByCode = new Map(
+      existingSuppliers
+        .filter((s) => s.code?.trim())
+        .map((s) => [s.code!.trim().toLowerCase(), s.id])
+    );
+    let bankFieldsUpdated = 0;
+    for (const supplier of dedupedSuppliers) {
+      const codeKey = supplier.code?.toLowerCase();
+      if (!codeKey) continue;
+      const existingId = existingByCode.get(codeKey);
+      if (!existingId) continue;
+      if (!supplier.bankName && !supplier.bankAccount) continue;
+      const patch: { bankName?: string | null; bankAccount?: string | null; updatedAt: Date } = {
+        updatedAt: now,
+      };
+      if (supplier.bankName) patch.bankName = supplier.bankName;
+      if (supplier.bankAccount) patch.bankAccount = supplier.bankAccount;
+      await prisma.supplier.update({ where: { id: existingId }, data: patch });
+      bankFieldsUpdated += 1;
+    }
+
     await auditCreate(
       'suppliers',
       `bulk-import-${now.getTime()}`,
@@ -484,6 +509,7 @@ export const bulkImportSuppliers = async (
         dedupedInPayload: dedupedSuppliers.length,
         inserted: toCreate.length,
         skipped: dedupedSuppliers.length - toCreate.length,
+        bankFieldsUpdated,
       },
       { userId }
     );
@@ -494,6 +520,7 @@ export const bulkImportSuppliers = async (
       dedupedInPayload: dedupedSuppliers.length,
       inserted: toCreate.length,
       skipped: dedupedSuppliers.length - toCreate.length,
+      bankFieldsUpdated,
     });
   } catch (error: any) {
     if (error instanceof z.ZodError) {
@@ -552,6 +579,8 @@ export const updateSupplier = async (
     if (body.address !== undefined) updateData.address = body.address || null;
     if (body.taxCode !== undefined) updateData.taxCode = body.taxCode || null;
     if (body.contactPerson !== undefined) updateData.contactPerson = body.contactPerson || null;
+    if (body.bankName !== undefined) updateData.bankName = body.bankName?.trim() || null;
+    if (body.bankAccount !== undefined) updateData.bankAccount = body.bankAccount?.trim() || null;
     if (body.notes !== undefined) updateData.notes = body.notes || null;
 
     const updatedSupplier = await prisma.supplier.update({
@@ -577,6 +606,8 @@ export const updateSupplier = async (
       address: updatedSupplier.address,
       taxCode: updatedSupplier.taxCode,
       contactPerson: updatedSupplier.contactPerson,
+      bankName: updatedSupplier.bankName,
+      bankAccount: updatedSupplier.bankAccount,
       notes: updatedSupplier.notes,
       updatedAt: updatedSupplier.updatedAt.toISOString(),
     });

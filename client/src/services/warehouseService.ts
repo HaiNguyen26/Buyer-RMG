@@ -339,6 +339,28 @@ export const warehouseService = {
         },
       }
     );
+    return {
+      rows: data.rows,
+      poGrns: data.poGrns ?? {},
+      poProgress: data.poProgress ?? {},
+    };
+  },
+
+  exportIncomingPOsExcel: async (params?: {
+    vendor?: string;
+    from?: string;
+    to?: string;
+    status?: 'all' | 'pending' | 'partial' | 'delayed';
+  }): Promise<Blob> => {
+    const { data } = await api.get('/warehouse/incoming/pos/export/excel', {
+      params: {
+        ...(params?.vendor ? { vendor: params.vendor } : {}),
+        ...(params?.from ? { from: params.from } : {}),
+        ...(params?.to ? { to: params.to } : {}),
+        ...(params?.status && params.status !== 'all' ? { status: params.status } : {}),
+      },
+      responseType: 'blob',
+    });
     return data;
   },
 
@@ -347,9 +369,8 @@ export const warehouseService = {
       `/warehouse/incoming/pos/${encodeURIComponent(poId)}/view`
     );
     return {
-      rows: data.rows,
-      poGrns: data.poGrns ?? {},
-      poProgress: data.poProgress ?? {},
+      ...data,
+      existingGrns: data.existingGrns ?? [],
     };
   },
 

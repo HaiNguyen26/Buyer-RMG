@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
-import { Truck } from 'lucide-react';
+import { FileSpreadsheet, Loader2, Truck } from 'lucide-react';
 import {
   warehouseService,
   type IncomingLineDisplayStatus,
@@ -30,6 +30,8 @@ import {
   saasTableHeadCellClass,
   saasTableRootClass,
 } from '../../constants/saasDataTable';
+import { useToast } from '../../contexts/ToastContext';
+import { downloadBlob } from '../../utils/downloadBlob';
 
 function formatDisplayDate(iso: string | null): string {
   if (!iso) return '—';
@@ -127,6 +129,8 @@ function summarizeStatusBadge(lines: IncomingPOLineRow[]): {
 }
 
 const IncomingPurchaseOrders = () => {
+  const { showSuccess, showError } = useToast();
+  const [excelLoading, setExcelLoading] = useState(false);
   const [vendor, setVendor] = useState('');
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
@@ -169,6 +173,21 @@ const IncomingPurchaseOrders = () => {
   const INCOMING_PO_ROWS_VISIBLE = 10;
   const incomingPoTableViewportHeight = `calc(2.75rem + ${INCOMING_PO_ROWS_VISIBLE} * 3.5rem)`;
   const compactTable = poCount <= INCOMING_PO_ROWS_VISIBLE;
+
+  const handleExportExcel = async () => {
+    setExcelLoading(true);
+    try {
+      const blob = await warehouseService.exportIncomingPOsExcel(queryParams);
+      const stamp = new Date().toISOString().slice(0, 10);
+      downloadBlob(blob, `PO_Warehouse_Incoming_${stamp}.xlsx`);
+      showSuccess('Đã xuất Excel PO chờ nhận (đủ trường, mỗi dòng hàng một row).');
+    } catch (e) {
+      console.error(e);
+      showError('Không xuất được Excel. Vui lòng thử lại.');
+    } finally {
+      setExcelLoading(false);
+    }
+  };
 
   return (
     <div className={warehouseWorkspacePageShellClass}>
@@ -225,6 +244,20 @@ const IncomingPurchaseOrders = () => {
               <option value="delayed">Delayed (quá ETA)</option>
             </select>
           </label>
+          <button
+            type="button"
+            disabled={excelLoading || isLoading}
+            onClick={() => void handleExportExcel()}
+            className="inline-flex shrink-0 items-center gap-2 rounded-lg border border-teal-200 bg-teal-50 px-3 py-2 text-sm font-semibold text-teal-900 shadow-sm transition-colors hover:bg-teal-100 disabled:cursor-not-allowed disabled:opacity-50"
+            title="Xuất Excel — đủ trường PO và từng dòng hàng"
+          >
+            {excelLoading ? (
+              <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+            ) : (
+              <FileSpreadsheet className="h-4 w-4" aria-hidden />
+            )}
+            Xuất Excel
+          </button>
         </div>
 
         <div className={warehouseWorkspaceTableRegionClass}>

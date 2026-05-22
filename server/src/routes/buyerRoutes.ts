@@ -16,6 +16,8 @@ import {
   updateRFQ,
   sendRFQ,
   exportRFQ,
+  exportRFQExcel,
+  importRFQQuotationExcel,
   completeRFQ,
 } from '../controllers/rfqController';
 import {
@@ -42,6 +44,7 @@ import {
   markPOConfirmed,
   updateSupplierConfirmation,
   requestCancelPO,
+  exportBuyerPOExcel,
 } from '../controllers/poController';
 
 export default async function buyerRoutes(fastify: FastifyInstance) {
@@ -66,6 +69,8 @@ export default async function buyerRoutes(fastify: FastifyInstance) {
   fastify.post('/rfqs', createRFQ);
   fastify.get('/rfqs', { compress: false }, getRFQs);
   // More specific routes should be registered before generic ones
+  fastify.get('/rfqs/:id/export/excel', exportRFQExcel);
+  fastify.post('/rfqs/:id/import/quotation-excel', importRFQQuotationExcel);
   fastify.get('/rfqs/:id/export', exportRFQ);
   fastify.post('/rfqs/:id/send', sendRFQ);
   fastify.post('/rfqs/:id/complete', completeRFQ);
@@ -102,6 +107,7 @@ export default async function buyerRoutes(fastify: FastifyInstance) {
   fastify.get('/po/prs/:prId/detail', { compress: false }, getPRDetailForPO);
   fastify.post('/po/create-from-pr/:prId', createDraftPOs);
   fastify.get('/po/list', { compress: false }, getPOList);
+  fastify.get('/po/export/excel', { compress: false }, exportBuyerPOExcel);
   fastify.post('/po/:poId/mark-sent', markPOSent);
   fastify.post('/po/:poId/mark-confirmed', markPOConfirmed);
   fastify.patch('/po/:poId/supplier-confirmation', updateSupplierConfirmation);

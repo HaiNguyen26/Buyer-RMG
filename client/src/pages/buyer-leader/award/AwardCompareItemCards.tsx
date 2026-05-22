@@ -12,8 +12,14 @@ import {
   TrendingDown,
   Truck,
   Wrench,
+  Zap,
   type LucideIcon,
 } from 'lucide-react';
+import {
+  formatQuotationLeadTimeDisplay,
+  formatWarrantyDisplay,
+  resolveQuotationLineLeadDays,
+} from '../../../utils/quotationLeadTime';
 
 type QuotationOption = {
   q: any;
@@ -146,7 +152,8 @@ function AwardCompareItemRow({
           {options.map((o) => {
             const isSelected = selected === o.q.id;
             const isLowest = lowest?.q.id === o.q.id;
-            const isFastest = parseLead(o.q.leadTime) === minLead;
+            const lineLead = resolveQuotationLineLeadDays(o.line, o.q.leadTime) ?? 999;
+            const isFastest = lineLead === minLead;
             const rating = formatRating(o.q.supplier?.rating);
 
             return (
@@ -179,13 +186,15 @@ function AwardCompareItemRow({
                 </p>
                 <div className="mt-2 flex flex-wrap gap-1.5">
                   {isLowest ? (
-                    <span className="rounded-md bg-emerald-100 px-2 py-0.5 text-[10px] font-bold uppercase text-emerald-800">
-                      Lowest
+                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-bold text-emerald-800 ring-1 ring-emerald-200/90 shadow-sm">
+                      <TrendingDown className="h-3.5 w-3.5 shrink-0" strokeWidth={2.5} aria-hidden />
+                      Giá thấp nhất
                     </span>
                   ) : null}
                   {isFastest ? (
-                    <span className="rounded-md bg-sky-100 px-2 py-0.5 text-[10px] font-bold uppercase text-sky-800">
-                      Fastest
+                    <span className="inline-flex items-center gap-1 rounded-full bg-sky-50 px-2.5 py-1 text-[10px] font-bold text-sky-800 ring-1 ring-sky-200/90 shadow-sm">
+                      <Zap className="h-3.5 w-3.5 shrink-0 fill-sky-400/30" strokeWidth={2.5} aria-hidden />
+                      Giao nhanh nhất
                     </span>
                   ) : null}
                 </div>
@@ -196,11 +205,15 @@ function AwardCompareItemRow({
                   </div>
                   <div>
                     <dt className="font-medium text-slate-500">Bảo hành</dt>
-                    <dd className="font-semibold text-slate-800">{o.q.warranty || '—'}</dd>
+                    <dd className="font-semibold text-slate-800">
+                      {formatWarrantyDisplay(o.line?.warrantyMonths ?? o.q.warranty)}
+                    </dd>
                   </div>
                   <div>
                     <dt className="font-medium text-slate-500">Thời gian giao</dt>
-                    <dd className="font-semibold text-slate-800">{o.q.leadTime || '—'}</dd>
+                    <dd className="font-semibold text-slate-800">
+                      {formatQuotationLeadTimeDisplay(o.q.leadTime, o.line?.leadTimeDays)}
+                    </dd>
                   </div>
                   <div>
                     <dt className="font-medium text-slate-500">Đánh giá</dt>
@@ -268,10 +281,10 @@ export function AwardCompareItemCards({
       <header className="flex flex-col gap-3 border-b border-slate-100 pb-4 sm:flex-row sm:items-end sm:justify-between">
         <div className="min-w-0">
           <h2 className="text-sm font-black uppercase tracking-[0.14em] text-slate-900 sm:text-base">
-            So sánh nhà cung cấp chi tiết
+            So sánh NCC
           </h2>
           <p className="mt-1 text-sm text-slate-600">
-            Nhấn từng dòng để xổ báo giá — dòng đầu mở sẵn để làm quen.
+            Mở rộng từng dòng để xem đầy đủ điều khoản, bảo hành và đánh giá NCC.
           </p>
         </div>
         <div className="relative w-full sm:max-w-xs">
@@ -305,7 +318,13 @@ export function AwardCompareItemCards({
             );
             const lowestPrice = lowest ? Number(lowest.line.unitPrice) : null;
             const minLead =
-              options.length > 0 ? Math.min(...options.map((o) => parseLead(o.q.leadTime))) : 999;
+              options.length > 0
+                ? Math.min(
+                    ...options.map(
+                      (o) => resolveQuotationLineLeadDays(o.line, o.q.leadTime) ?? 999
+                    )
+                  )
+                : 999;
 
             return (
               <AwardCompareItemRow

@@ -18,7 +18,14 @@ export function BudgetAllocationBar({
   monthlySpendPct,
   formatCurrency,
 }: BudgetAllocationBarProps) {
-  const total = branchApprovedValue + buyerProcessingValue || 1;
+  const total = branchApprovedValue + buyerProcessingValue;
+  if (total <= 0) {
+    return (
+      <p className="text-[10px] leading-snug text-slate-500">
+        Chưa có giá trị pipeline — PR trong luồng sẽ hiển thị khi có tổng tiền PR.
+      </p>
+    );
+  }
   const branchPct = Math.round((branchApprovedValue / total) * 100);
   const buyerPct = 100 - branchPct;
 

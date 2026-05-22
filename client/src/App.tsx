@@ -78,7 +78,7 @@ import BuyerLeaderNotifications from './pages/buyer-leader/Notifications';
 import TeamManagement from './pages/buyer-manager/TeamManagement';
 import POApproval from './pages/buyer-manager/POApproval';
 import VendorManagement from './pages/buyer-manager/VendorManagement';
-import PRMonitoring from './pages/buyer-manager/PRMonitoring';
+import ProcurementMonitoringDashboard from './pages/shared/ProcurementMonitoringDashboard';
 import ExceptionMonitoring from './pages/buyer-manager/ExceptionMonitoring';
 import UserManagement from './pages/buyer-manager/UserManagement';
 import ReportsAnalytics from './pages/buyer-manager/ReportsAnalytics';
@@ -157,6 +157,10 @@ function App() {
             <Route path="reports" element={<Reports />} />
             <Route path="system-config" element={<SystemConfiguration />} />
             <Route path="notifications" element={<ManagerNotifications />} />
+            <Route
+              path="procurement-monitoring"
+              element={<ProcurementMonitoringDashboard apiBase="manager" />}
+            />
           </Route>
           <Route path="/dashboard/warehouse" element={<WarehouseDashboard />}>
             <Route index element={<WarehouseDashboardHome />} />
@@ -233,6 +237,10 @@ function App() {
             <Route path="pr-approval" element={<DepartmentHeadPRApproval />} />
             <Route path="department-overview" element={<DepartmentOverview />} />
             <Route
+              path="procurement-monitoring"
+              element={<ProcurementMonitoringDashboard apiBase="department-head" />}
+            />
+            <Route
               path="notifications"
               element={<DepartmentHeadComingSoon title="Thông báo" description="Thông báo hệ thống" />}
             />
@@ -249,12 +257,23 @@ function App() {
             <Route path="pr-history" element={<PRHistory />} />
             <Route path="branch-overview" element={<BranchOverview />} />
             <Route path="notifications" element={<BranchManagerNotifications />} />
+            <Route
+              path="procurement-monitoring"
+              element={<ProcurementMonitoringDashboard apiBase="branch-manager" />}
+            />
           </Route>
           <Route path="/dashboard/buyer-manager" element={<BuyerManagerDashboard />}>
             <Route index element={<BuyerManagerDashboardHome />} />
             <Route path="team-management" element={<TeamManagement />} />
             <Route path="vendor-management" element={<VendorManagement />} />
-            <Route path="pr-monitoring" element={<PRMonitoring />} />
+            <Route
+              path="pr-monitoring"
+              element={<Navigate to="/dashboard/buyer-manager/procurement-monitoring" replace />}
+            />
+            <Route
+              path="procurement-monitoring"
+              element={<ProcurementMonitoringDashboard apiBase="buyer-manager" />}
+            />
             <Route path="exceptions" element={<ExceptionMonitoring />} />
             <Route path="user-management" element={<UserManagement />} />
             <Route path="reports" element={<ReportsAnalytics />} />

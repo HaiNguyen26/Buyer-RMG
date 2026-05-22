@@ -15,6 +15,11 @@ import {
   getBranchOverview,
   getBranchManagerNotifications,
 } from '../controllers/branchManagerController';
+import {
+  getProcurementMonitoring,
+  getProcurementMonitoringExport,
+  getProcurementMonitoringPrDetail,
+} from '../controllers/procurementMonitoringController';
 
 export default async function branchManagerRoutes(fastify: FastifyInstance) {
   fastify.addHook('onRequest', authenticate);
@@ -35,4 +40,7 @@ export default async function branchManagerRoutes(fastify: FastifyInstance) {
   fastify.get('/pr-history', { compress: false }, getPRHistory);
   fastify.get('/branch-overview', { compress: false }, getBranchOverview);
   fastify.get('/notifications', { compress: false }, getBranchManagerNotifications);
+  fastify.get('/procurement-monitor', { compress: false }, getProcurementMonitoring);
+  fastify.get('/procurement-monitor/export', { compress: false }, getProcurementMonitoringExport);
+  fastify.get('/procurement-monitor/:prId', { compress: false }, getProcurementMonitoringPrDetail);
 }

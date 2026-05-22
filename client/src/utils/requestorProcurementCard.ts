@@ -24,15 +24,16 @@ export type CostInsightShape = {
 
 export function isPurchaseCostCompleted(
   insight?: CostInsightShape,
-  snapshot?: ProcurementSnapshotShape | DeliveryReceiptSummaryShape
+  snapshot?: ProcurementSnapshotShape | DeliveryReceiptSummaryShape,
+  opts?: { stockIssuePickupReady?: boolean }
 ): boolean {
+  /** Chỉ tin server — không suy 3/3 từ snapshot khi chưa pickupReady. */
+  if (opts?.stockIssuePickupReady === true && insight?.purchasePhase === 'completed') {
+    return true;
+  }
+  if (opts?.stockIssuePickupReady === true) return false;
   if (insight?.purchasePhase === 'completed') return true;
-  if (!snapshot || !('totalCount' in snapshot)) return false;
-  return (
-    snapshot.totalCount > 0 &&
-    snapshot.receivedCount === snapshot.totalCount &&
-    snapshot.partialCount === 0
-  );
+  return false;
 }
 
 export function procurementCostAmountOf(insight?: CostInsightShape): number | null {
@@ -107,6 +108,8 @@ export type ProcurementSnapshotShape = {
   receivedCount: number;
   totalCount: number;
   partialCount: number;
+  waitingReorderCount?: number;
+  waitingReorderQty?: number;
   hasDelay: boolean;
   delayHint: string | null;
   itemPreview: Array<{
@@ -114,8 +117,12 @@ export type ProcurementSnapshotShape = {
     statusLabel: string;
     statusKey: RequestorItemStatusKey;
     eta: string | null;
+    etaOriginal: string | null;
+    etaRevised: string | null;
     qtyReceived: number;
     qtyCap: number;
+    qtyWaiting?: number;
+    lineCancelReason?: string | null;
   }>;
 };
 
@@ -136,14 +143,15 @@ export function slaTimeSublabel(sla: TrackingSlaShape): string {
 
 export function costBarMetaForCard(
   insight?: CostInsightShape,
-  snapshot?: ProcurementSnapshotShape
+  snapshot?: ProcurementSnapshotShape,
+  opts?: { stockIssuePickupReady?: boolean }
 ): {
   percent: number;
   tone: 'emerald' | 'amber' | 'rose' | 'blue' | 'slate' | 'indigo';
   sublabel: string;
   pulseWhenLow: boolean;
 } {
-  if (isPurchaseCostCompleted(insight, snapshot)) {
+  if (isPurchaseCostCompleted(insight, snapshot, opts)) {
     return costVsProposedMeta(insight);
   }
   if (!insight?.proposedAmount) {
@@ -212,7 +220,12 @@ export function deliveryCardTwoLines(snapshot?: ProcurementSnapshotShape): {
   if (!snapshot || snapshot.totalCount === 0) {
     return { receivedLine: null, etaLine: null };
   }
-  const receivedLine = `Đã nhận ${snapshot.receivedCount}/${snapshot.totalCount} item`;
+  const waitingCount = snapshot.waitingReorderCount ?? 0;
+  const waitingQty = snapshot.waitingReorderQty ?? 0;
+  let receivedLine = `Đã nhận ${snapshot.receivedCount}/${snapshot.totalCount} item`;
+  if (waitingCount > 0 && waitingQty > 0) {
+    receivedLine += ` · chờ ${waitingQty} SL (${waitingCount} item)`;
+  }
   const etaLine = snapshot.nextEta
     ? `ETA item: ${formatEtaDisplay(snapshot.nextEta)}`
     : 'Chưa có ETA item';
@@ -325,9 +338,10 @@ export function purchaseCostSectionDisplay(
   costInsight: CostInsightShape | undefined,
   currency: string,
   snapshot?: ProcurementSnapshotShape | DeliveryReceiptSummaryShape,
-  totalAmount?: number | null
+  totalAmount?: number | null,
+  opts?: { stockIssuePickupReady?: boolean }
 ): PurchaseCostSectionDisplay {
-  const completed = isPurchaseCostCompleted(costInsight, snapshot);
+  const completed = isPurchaseCostCompleted(costInsight, snapshot, opts);
   if (completed) {
     const actual = actualPurchaseAmountOf(costInsight);
     const costMeta = costVsProposedMeta(costInsight);
@@ -406,6 +420,15 @@ export function deliveryTrackingBullets(snapshot?: ProcurementSnapshotShape): st
         : `${snapshot.partialCount} item nhận một phần`
     );
   }
+  const waitingCount = snapshot.waitingReorderCount ?? 0;
+  const waitingQty = snapshot.waitingReorderQty ?? 0;
+  if (waitingCount > 0 && waitingQty > 0) {
+    bullets.push(
+      waitingCount === 1
+        ? `1 item chờ mua lại (${waitingQty} SL)`
+        : `${waitingCount} item chờ mua lại (${waitingQty} SL)`
+    );
+  }
   const awaitingDelivery = Math.max(
     0,
     snapshot.totalCount - snapshot.receivedCount - snapshot.partialCount
@@ -433,6 +456,8 @@ export function deliveryTrackingSummaryLine(snapshot?: ProcurementSnapshotShape)
 export function itemDeliveryHint(statusKey: RequestorItemStatusKey): string {
   if (RECEIVED_ITEM_KEYS.has(statusKey)) return 'Đã nhận';
   if (statusKey === 'PARTIAL_RECEIVED') return 'Nhận một phần';
+  if (statusKey === 'AWAITING_REORDER') return 'Chờ mua lại';
+  if (statusKey === 'LINE_CANCEL_PENDING') return 'Chờ duyệt hủy';
   if (WAITING_DELIVERY_KEYS.has(statusKey)) return 'Chờ giao';
   if (statusKey === 'RFQ' || statusKey === 'SUPPLIER_SELECTED' || statusKey === 'PROCUREMENT') {
     return 'Đang sourcing';
@@ -450,6 +475,16 @@ export function headerProcurementChips(
   }
   if (snapshot.hasDelay) {
     chips.push({ label: 'Trễ hạn', tone: 'rose' });
+  }
+  const waitingCount = snapshot.waitingReorderCount ?? 0;
+  if (waitingCount > 0) {
+    chips.push({
+      label:
+        waitingCount === 1
+          ? '1 item chờ mua lại'
+          : `${waitingCount} item chờ mua lại`,
+      tone: 'amber',
+    });
   }
   return chips;
 }

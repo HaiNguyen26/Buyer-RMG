@@ -117,17 +117,21 @@ export function RequestorProcurementTrackingCard({
   const StatusIcon = statusConfig.icon;
   const slaPct = slaBarPercent(pr.sla);
   const snapshot = pr.procurementSnapshot;
-  const purchaseCompleted = isPurchaseCostCompleted(pr.costInsight, snapshot);
-  const costMeta = costBarMetaForCard(pr.costInsight, snapshot);
+  const pickupReadyServer = pr.stockIssuePickup?.ready === true;
+  const purchaseCompleted = isPurchaseCostCompleted(pr.costInsight, snapshot, {
+    stockIssuePickupReady: pickupReadyServer,
+  });
+  const costMeta = costBarMetaForCard(pr.costInsight, snapshot, {
+    stockIssuePickupReady: pickupReadyServer,
+  });
   const costSection = purchaseCostSectionDisplay(
     pr.costInsight,
     pr.currency,
     snapshot,
-    pr.totalAmount
+    pr.totalAmount,
+    { stockIssuePickupReady: pickupReadyServer }
   );
-  const progressPct = purchaseCompleted
-    ? 100
-    : Math.round(pr.progress.percentage);
+  const progressPct = Math.round(pr.progress.percentage);
   const progressWidth = progressPct > 0 ? Math.max(2, Math.min(100, progressPct)) : 0;
   const extraChips = headerProcurementChips(snapshot);
   const costDeltaLine = costSection.showEstimateDelta
@@ -140,8 +144,7 @@ export function RequestorProcurementTrackingCard({
     (snapshot?.totalCount ?? 0) > 0 ||
     deliveryFallback.length > 0;
 
-  const pickupReady =
-    pr.stockIssuePickup?.ready ?? isFullyReceivedForPickup(snapshot);
+  const pickupReady = pickupReadyServer;
   const linkedIssue: StockIssuePickupLink | null = pr.stockIssuePickup?.linkedStockIssue ?? null;
   const showPickupCta = pickupReady && !linkedIssue;
   const showPickupLinked = pickupReady && linkedIssue != null;

@@ -20,6 +20,7 @@ import {
 } from '../controllers/stockIssueController';
 import {
   listIncomingPurchaseOrders,
+  exportWarehouseIncomingPOExcel,
   getPurchaseOrderForGrn,
   getIncomingPoView,
   submitGoodsReceipt,
@@ -47,6 +48,7 @@ export default async function warehouseRoutes(fastify: FastifyInstance) {
   fastify.post('/stock-issues/:id/ship', shipStockIssue);
 
   fastify.get('/incoming/pos', listIncomingPurchaseOrders);
+  fastify.get('/incoming/pos/export/excel', exportWarehouseIncomingPOExcel);
   fastify.get('/incoming/pos/:poId/view', getIncomingPoView);
   fastify.get('/incoming/pos/:poId', getPurchaseOrderForGrn);
   fastify.post('/incoming/pos/:poId/grn', submitGoodsReceipt);

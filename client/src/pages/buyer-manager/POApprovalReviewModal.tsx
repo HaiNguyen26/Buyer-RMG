@@ -11,6 +11,8 @@ import {
   Copy,
   FileText,
   PieChart,
+  TrendingDown,
+  TrendingUp,
   Loader2,
   MessageSquareWarning,
   Moon,
@@ -24,6 +26,13 @@ import {
 import { poApprovalStatusLabel } from '../../constants/poApprovalQueueFilter';
 import { PO_LINE_STATUS_LABELS } from '../../utils/poDetailUiStrings';
 import { inferVatPercentFromLine } from '../../utils/quotationLine';
+import {
+  formatPoBudgetDeltaLabel,
+  poBudgetUsagePercent,
+  resolvePoBudgetComparison,
+  type PoBudgetComparison,
+} from '../../utils/poBudgetComparison';
+import { PoLineCancelNote } from '../../components/po/PoLineCancelNote';
 
 type TabKey = 'general' | 'items';
 
@@ -322,12 +331,14 @@ export type POApprovalReviewDetail = {
   totalAmount?: number;
   currency?: string;
   prBudget?: number | null;
+  budgetComparison?: PoBudgetComparison | null;
   createdAt?: string;
   submittedAt?: string | null;
   approvedAt?: string | null;
   rejectedAt?: string | null;
   rejectReason?: string | null;
   cancelRequestReason?: string | null;
+  cancelRequestedPoItemIds?: string[] | null;
   paymentTerms?: string | null;
   incoterms?: string | null;
   deliveryDate?: string | null;
@@ -351,6 +362,8 @@ export type POApprovalReviewDetail = {
     qtyReceived?: number;
     qtyRemaining?: number;
     lineStatus?: string;
+    lineCancelReason?: string | null;
+    cancelledRemainingQty?: number | null;
     unitPrice?: number;
     amount?: number;
     vatPercent?: number | null;
@@ -416,6 +429,11 @@ export function POApprovalReviewModal({
     ? poApprovalStatusLabel(detail.status)
     : '—';
   const isCancelFlow = detail?.status === 'CANCEL_REQUESTED';
+  const cancelRequestedIdSet = useMemo(
+    () => new Set(detail?.cancelRequestedPoItemIds ?? []),
+    [detail?.cancelRequestedPoItemIds]
+  );
+  const isLineCancelRequest = isCancelFlow && cancelRequestedIdSet.size > 0;
   const itemCount = detail?.items?.length ?? 0;
   const currency = detail?.currency ?? 'VND';
 
@@ -438,10 +456,20 @@ export function POApprovalReviewModal({
     return `${time} — ${date}`;
   }, [detail?.submittedAt, detail?.createdAt]);
 
-  const budgetPct = useMemo(() => {
-    if (detail?.totalAmount == null || detail?.prBudget == null || detail.prBudget <= 0) return null;
-    return Math.min(100, (Number(detail.totalAmount) / Number(detail.prBudget)) * 100);
-  }, [detail?.totalAmount, detail?.prBudget]);
+  const budgetComp = useMemo(
+    () =>
+      resolvePoBudgetComparison(
+        detail?.totalAmount,
+        detail?.prBudget,
+        detail?.budgetComparison
+      ),
+    [detail?.totalAmount, detail?.prBudget, detail?.budgetComparison]
+  );
+
+  const budgetUsagePct = useMemo(
+    () => (budgetComp ? poBudgetUsagePercent(budgetComp) : null),
+    [budgetComp]
+  );
 
   const vatSummary = useMemo(() => {
     const items = detail?.items ?? [];
@@ -556,6 +584,33 @@ export function POApprovalReviewModal({
           </div>
         ) : (
           <>
+            {budgetComp?.direction === 'over' ? (
+              <div className="flex items-start gap-2 border-b border-rose-200/80 bg-gradient-to-r from-rose-50 to-amber-50/80 px-6 py-3 dark:border-rose-900/50 dark:from-rose-950/50 dark:to-amber-950/30">
+                <TrendingUp className="mt-0.5 h-4 w-4 shrink-0 text-rose-600 dark:text-rose-400" aria-hidden />
+                <div>
+                  <p className="text-xs font-bold text-rose-800 dark:text-rose-200">
+                    PO vượt ngân sách đề xuất PR
+                  </p>
+                  <p className="mt-0.5 text-[11px] font-medium text-rose-700/90 dark:text-rose-300/90">
+                    {formatPoBudgetDeltaLabel(budgetComp)} — xem xét trước khi phê duyệt.
+                  </p>
+                </div>
+              </div>
+            ) : null}
+            {budgetComp?.direction === 'savings' ? (
+              <div className="flex items-start gap-2 border-b border-emerald-200/80 bg-gradient-to-r from-emerald-50 to-teal-50/60 px-6 py-3 dark:border-emerald-900/50 dark:from-emerald-950/40 dark:to-teal-950/30">
+                <TrendingDown className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden />
+                <div>
+                  <p className="text-xs font-bold text-emerald-800 dark:text-emerald-200">
+                    PO thấp hơn ngân sách đề xuất PR
+                  </p>
+                  <p className="mt-0.5 text-[11px] font-medium text-emerald-700/90 dark:text-emerald-300/90">
+                    {formatPoBudgetDeltaLabel(budgetComp)}
+                  </p>
+                </div>
+              </div>
+            ) : null}
+
             {/* KPI banner — icon + gradient + hình trừu tượng */}
             <div className="grid grid-cols-1 border-b border-slate-100 md:grid-cols-3 dark:border-slate-800/60">
               <KpiMetricCell
@@ -583,30 +638,66 @@ export function POApprovalReviewModal({
                 icon={PieChart}
                 label="Ngân sách PR liên kết"
                 footer={
-                  budgetPct != null ? (
-                    <div className="max-w-[180px]">
+                  budgetComp != null && budgetUsagePct != null ? (
+                    <div className="max-w-[220px] space-y-1.5">
                       <div className="h-1 overflow-hidden rounded-full bg-violet-100 dark:bg-violet-950/80">
                         <div
-                          className="h-full rounded-full bg-gradient-to-r from-violet-500 to-indigo-500 transition-all"
-                          style={{ width: `${budgetPct}%` }}
+                          className={`h-full rounded-full transition-all ${
+                            budgetComp.direction === 'over'
+                              ? 'bg-gradient-to-r from-rose-500 to-amber-500'
+                              : budgetComp.direction === 'savings'
+                                ? 'bg-gradient-to-r from-emerald-500 to-teal-500'
+                                : 'bg-gradient-to-r from-violet-500 to-indigo-500'
+                          }`}
+                          style={{ width: `${Math.min(100, budgetUsagePct)}%` }}
                         />
                       </div>
-                      <p className={`mt-1 ${hint}`}>
-                        PO chiếm {budgetPct.toFixed(1)}% ngân sách PR
+                      <p className={`${hint} leading-snug`}>
+                        PO = {budgetUsagePct.toFixed(1)}% ngân sách đề xuất PR
+                      </p>
+                      <p
+                        className={`inline-flex max-w-full items-start gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-bold leading-snug ${
+                          budgetComp.direction === 'over'
+                            ? 'bg-rose-500/10 text-rose-700 dark:bg-rose-500/15 dark:text-rose-300'
+                            : budgetComp.direction === 'savings'
+                              ? 'bg-emerald-500/10 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300'
+                              : 'bg-violet-500/10 text-violet-700 dark:bg-violet-500/15 dark:text-violet-300'
+                        }`}
+                      >
+                        {budgetComp.direction === 'over' ? (
+                          <TrendingUp className="mt-0.5 h-3 w-3 shrink-0" aria-hidden />
+                        ) : budgetComp.direction === 'savings' ? (
+                          <TrendingDown className="mt-0.5 h-3 w-3 shrink-0" aria-hidden />
+                        ) : null}
+                        <span>{formatPoBudgetDeltaLabel(budgetComp)}</span>
                       </p>
                     </div>
-                  ) : null
+                  ) : (
+                    <p className={hint}>Chưa có ngân sách PR để so sánh</p>
+                  )
                 }
               >
-                <div className="flex items-baseline gap-1.5">
-                  <span className={kpiMid}>
-                    {detail.prBudget != null
-                      ? Number(detail.prBudget).toLocaleString('vi-VN')
-                      : '—'}
-                  </span>
-                  {detail.prBudget != null ? (
-                    <span className="text-[10px] font-bold text-violet-600/70 dark:text-violet-400/80">
-                      VND
+                <div className="flex flex-col gap-1">
+                  <div className="flex items-baseline gap-1.5">
+                    <span className={kpiMid}>
+                      {detail.prBudget != null
+                        ? Number(detail.prBudget).toLocaleString('vi-VN')
+                        : '—'}
+                    </span>
+                    {detail.prBudget != null ? (
+                      <span className="text-[10px] font-bold text-violet-600/70 dark:text-violet-400/80">
+                        VND
+                      </span>
+                    ) : null}
+                  </div>
+                  {budgetComp && budgetComp.direction === 'over' ? (
+                    <span className="text-[10px] font-bold text-rose-600 dark:text-rose-400">
+                      Vượt {budgetComp.deltaAmount.toLocaleString('vi-VN')} đ
+                    </span>
+                  ) : null}
+                  {budgetComp && budgetComp.direction === 'savings' ? (
+                    <span className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400">
+                      Tiết kiệm {budgetComp.deltaAmount.toLocaleString('vi-VN')} đ
                     </span>
                   ) : null}
                 </div>
@@ -620,11 +711,42 @@ export function POApprovalReviewModal({
             {isCancelFlow ? (
               <div className="border-b border-rose-100 bg-rose-50/80 px-6 py-3 dark:border-rose-900/40 dark:bg-rose-950/40">
                 <p className="text-xs font-bold uppercase tracking-wide text-rose-700 dark:text-rose-400">
-                  Yêu cầu hủy PO
+                  {isLineCancelRequest ? 'Duyệt hủy dòng PO còn lại' : 'Yêu cầu hủy PO'}
+                </p>
+                <p className={`mt-1 text-xs ${dataSecondary}`}>
+                  {isLineCancelRequest
+                    ? 'Không hủy toàn PO — chỉ các dòng còn thiếu so với đã nhận kho. Sau duyệt, item về PR được phân công (giữ mã PR) để RFQ/PO mới.'
+                    : 'Yêu cầu hủy toàn bộ PO.'}
                 </p>
                 <p className={`mt-2 whitespace-pre-wrap text-sm ${dataSecondary}`}>
+                  <span className="font-semibold text-rose-800 dark:text-rose-300">Lý do: </span>
                   {detail.cancelRequestReason || '—'}
                 </p>
+                {isLineCancelRequest ? (
+                  <ul className="mt-3 max-h-36 space-y-1 overflow-y-auto text-sm text-rose-950 dark:text-rose-100">
+                    {(detail.items ?? [])
+                      .filter((it) => cancelRequestedIdSet.has(it.id))
+                      .map((it) => {
+                        const rem =
+                          it.qtyRemaining ??
+                          Math.max(0, Number(it.qty) - (Number(it.qtyReceived) ?? 0));
+                        return (
+                          <li key={it.id} className="space-y-1">
+                            <span className="font-medium">{it.lineNo}.</span> {it.description}
+                            <PoLineCancelNote
+                              orderedQty={Number(it.qty)}
+                              receivedQty={Number(it.qtyReceived ?? 0)}
+                              cancelledQty={rem}
+                              reason={detail.cancelRequestReason}
+                              pending
+                              unit={it.unit}
+                              className="max-w-full"
+                            />
+                          </li>
+                        );
+                      })}
+                  </ul>
+                ) : null}
               </div>
             ) : null}
 
@@ -679,7 +801,7 @@ export function POApprovalReviewModal({
                         {detail.prCode ? (
                           <div className="flex items-center gap-1.5">
                             <Link
-                              to="/dashboard/buyer-manager/pr-monitoring"
+                              to="/dashboard/buyer-manager/procurement-monitoring"
                               className={`flex items-center gap-0.5 ${linkAccent}`}
                             >
                               {detail.prCode}
@@ -840,10 +962,13 @@ export function POApprovalReviewModal({
                           const lineNo = item.lineNo ?? idx + 1;
                           const unitPrice = Number(item.unitPrice) || 0;
                           const subtitle = poLineSubtitle(item);
+                          const isCancelLine = isLineCancelRequest && cancelRequestedIdSet.has(item.id);
                           return (
                             <tr
                               key={item.id}
-                              className="transition-all hover:bg-slate-50/30 dark:hover:bg-slate-800/20"
+                              className={`transition-all hover:bg-slate-50/30 dark:hover:bg-slate-800/20 ${
+                                isCancelLine ? 'bg-rose-50/60 dark:bg-rose-950/25' : ''
+                              }`}
                             >
                               <td className="px-4 py-3 text-center text-sm font-bold text-slate-400 dark:text-slate-500">
                                 {String(lineNo).padStart(2, '0')}
@@ -853,8 +978,43 @@ export function POApprovalReviewModal({
                                   {item.description?.trim() || '—'}
                                 </span>
                                 {subtitle ? <span className={productSub}>{subtitle}</span> : null}
+                                {isCancelLine ||
+                                item.lineCancelReason ||
+                                String(item.lineStatus ?? '') === 'CANCELLED' ? (
+                                  <PoLineCancelNote
+                                    orderedQty={Number(item.qty)}
+                                    receivedQty={Number(item.qtyReceived ?? 0)}
+                                    cancelledQty={
+                                      item.cancelledRemainingQty ??
+                                      item.qtyRemaining ??
+                                      Math.max(
+                                        0,
+                                        Number(item.qty) - (Number(item.qtyReceived) ?? 0)
+                                      )
+                                    }
+                                    reason={
+                                      item.lineCancelReason ??
+                                      (isCancelLine ? detail.cancelRequestReason : null)
+                                    }
+                                    pending={isCancelLine}
+                                    unit={item.unit}
+                                  />
+                                ) : Number(item.qtyReceived ?? 0) + 1e-9 >= Number(item.qty) &&
+                                  (detail.items ?? []).some(
+                                    (x) =>
+                                      String(x.lineStatus ?? '') === 'CANCELLED' ||
+                                      x.lineCancelReason
+                                  ) ? (
+                                  <PoLineCancelNote
+                                    orderedQty={Number(item.qty)}
+                                    receivedQty={Number(item.qtyReceived ?? 0)}
+                                    unit={item.unit}
+                                  />
+                                ) : null}
                               </td>
-                              <td className={`px-4 py-3 text-right ${dataPrimary}`}>{item.qty}</td>
+                              <td className={`px-4 py-3 text-right ${dataPrimary}`}>
+                                {item.qty}
+                              </td>
                               <td className={`px-4 py-3 text-right tabular-nums ${dataSecondary}`}>
                                 {unitPrice.toLocaleString('vi-VN')}
                               </td>
@@ -927,7 +1087,11 @@ export function POApprovalReviewModal({
                   {rejectPending ? (
                     <Loader2 className="inline h-4 w-4 animate-spin" />
                   ) : (
-                    isCancelFlow ? 'Từ chối hủy' : 'Từ chối'
+                    isCancelFlow
+                      ? isLineCancelRequest
+                        ? 'Từ chối hủy dòng'
+                        : 'Từ chối hủy'
+                      : 'Từ chối'
                   )}
                 </button>
                 <button
@@ -940,7 +1104,11 @@ export function POApprovalReviewModal({
                     <Loader2 className="h-4 w-4 animate-spin" />
                   ) : (
                     <>
-                      {isCancelFlow ? 'Duyệt hủy PO' : 'Phê duyệt PO'}
+                      {isCancelFlow
+                        ? isLineCancelRequest
+                          ? 'Duyệt hủy dòng'
+                          : 'Duyệt hủy PO'
+                        : 'Phê duyệt PO'}
                       <ChevronRight className="h-4 w-4" strokeWidth={2.5} />
                     </>
                   )}

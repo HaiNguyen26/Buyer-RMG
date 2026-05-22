@@ -22,8 +22,10 @@ import {
   isReadyForStockIssuePickup,
   type PurchaseOrderCostInput,
   type SupplierSelectionCostInput,
+  buildSelectedQuotationDeliveryByPrItem,
   deriveItemProcurementRow,
   getRequestorPrStatusLabel,
+  mapRequestorTrackingPoLines,
 } from '../utils/requestorProcurementTracking';
 import { generateFileKey, getFileUrl, uploadFile } from '../config/s3';
 import {
@@ -2236,7 +2238,12 @@ export const getPRProcurementTracking = async (
                 totalAmount: true,
                 items: {
                   where: { deletedAt: null },
-                  select: { purchaseRequestItemId: true, totalPrice: true },
+                  select: {
+                    purchaseRequestItemId: true,
+                    totalPrice: true,
+                    deliveryDate: true,
+                    leadTimeDays: true,
+                  },
                 },
               },
             },
@@ -2275,15 +2282,14 @@ export const getPRProcurementTracking = async (
       ])
     );
 
-    const poLines = pr.purchaseOrders.flatMap((po) =>
-      po.items.map((it) => ({
-        id: it.id,
-        purchaseRequestItemId: it.purchaseRequestItemId,
-        qty: it.qty,
-        confirmedQty: it.confirmedQty,
-        expectedDeliveryDate: it.expectedDeliveryDate,
-        lineStatus: it.lineStatus,
-        purchaseOrder: { poNumber: po.poNumber, status: po.status as string },
+    const poLines = mapRequestorTrackingPoLines(
+      pr.purchaseOrders.map((po) => ({
+        poNumber: po.poNumber,
+        status: po.status,
+        rejectReason: po.rejectReason,
+        cancelRequestedPoItemIds: (po as { cancelRequestedPoItemIds?: string | null })
+          .cancelRequestedPoItemIds,
+        items: po.items,
       }))
     );
 
@@ -2301,6 +2307,11 @@ export const getPRProcurementTracking = async (
     );
 
     const prStatus = String(pr.status ?? '');
+    const quotationDeliveryByPrItem = buildSelectedQuotationDeliveryByPrItem(
+      (pr.supplierSelections || []) as Parameters<
+        typeof buildSelectedQuotationDeliveryByPrItem
+      >[0]
+    );
     const itemRows = pr.items.map((item) =>
       deriveItemProcurementRow(
         {
@@ -2309,6 +2320,7 @@ export const getPRProcurementTracking = async (
           description: item.description,
           partNo: item.partNo,
           qty: item.qty,
+          purchaseQty: item.purchaseQty,
           status: String(item.status ?? 'NEW'),
           departmentItemOutcome: item.departmentItemOutcome,
           branchItemOutcome: item.branchItemOutcome,
@@ -2316,13 +2328,14 @@ export const getPRProcurementTracking = async (
         },
         poLines,
         receivedByPoItemId,
-        prStatus
+        prStatus,
+        quotationDeliveryByPrItem
       )
     );
 
     const timeline = buildBusinessTimeline(prStatus, itemRows, poLines);
     const deliverySummary = buildDeliverySummary(itemRows);
-    const currentStep = buildCurrentStepBadge(prStatus, itemRows, deliverySummary);
+    const currentStep = buildCurrentStepBadge(prStatus, itemRows, deliverySummary, poLines);
     const sla = computeTrackingSla(prStatus, timeline.percentage, pr.createdAt);
 
     const totalAmount = pr.totalAmount ? Number(pr.totalAmount) : null;
@@ -2382,7 +2395,18 @@ export const getPRProcurementTracking = async (
       costInsightBase,
       deliverySummary,
       poLinesForCost,
-      receivedByPoItemId
+      receivedByPoItemId,
+      (pr.purchaseOrders || []).map((po) => ({
+        status: String(po.status ?? ''),
+        totalAmount: po.totalAmount,
+        items: po.items.map((it) => ({
+          qty: it.qty,
+          unitPrice: it.unitPrice,
+          amount: it.amount,
+          confirmedQty: it.confirmedQty,
+        })),
+      })),
+      { prStatus, trackingPoLines: poLines }
     );
 
     return reply.send({
@@ -2444,6 +2468,8 @@ export const getPRTrackingList = async (
           select: {
             poNumber: true,
             status: true,
+            rejectReason: true,
+            cancelRequestedPoItemIds: true,
             totalAmount: true,
             items: {
               select: {
@@ -2456,6 +2482,8 @@ export const getPRTrackingList = async (
                 confirmedQty: true,
                 expectedDeliveryDate: true,
                 lineStatus: true,
+                lineCancelReason: true,
+                cancelledRemainingQty: true,
               },
             },
           },
@@ -2473,7 +2501,12 @@ export const getPRTrackingList = async (
                 totalAmount: true,
                 items: {
                   where: { deletedAt: null },
-                  select: { purchaseRequestItemId: true, totalPrice: true },
+                  select: {
+                    purchaseRequestItemId: true,
+                    totalPrice: true,
+                    deliveryDate: true,
+                    leadTimeDays: true,
+                  },
                 },
               },
             },
@@ -2649,15 +2682,16 @@ export const getPRTrackingList = async (
         }
 
         const prStatus = String(pr.status ?? '');
-        const poLines = (pr.purchaseOrders || []).flatMap((po) =>
-          (po.items || []).map((it) => ({
-            id: it.id,
-            purchaseRequestItemId: it.purchaseRequestItemId,
-            qty: it.qty,
-            confirmedQty: it.confirmedQty,
-            expectedDeliveryDate: it.expectedDeliveryDate,
-            lineStatus: it.lineStatus,
-            purchaseOrder: { poNumber: po.poNumber, status: String(po.status ?? '') },
+        const poLines = mapRequestorTrackingPoLines(
+          (pr.purchaseOrders || []).map((po) => ({
+            poNumber: po.poNumber,
+            status: String(po.status ?? ''),
+            rejectReason: po.rejectReason,
+            cancelRequestedPoItemIds: po.cancelRequestedPoItemIds,
+            items: (po.items || []).map((it) => ({
+              ...it,
+              lineStatus: String(it.lineStatus ?? 'OPEN'),
+            })),
           }))
         );
         const receivedByPoItemId = new Map(
@@ -2669,13 +2703,25 @@ export const getPRTrackingList = async (
           description: item.description,
           partNo: item.partNo,
           qty: item.qty,
+          purchaseQty: item.purchaseQty,
           status: String(item.status ?? 'NEW'),
           departmentItemOutcome: item.departmentItemOutcome,
           branchItemOutcome: item.branchItemOutcome,
           desiredDeliveryDate: item.desiredDeliveryDate,
         }));
+        const quotationDeliveryByPrItem = buildSelectedQuotationDeliveryByPrItem(
+          (pr.supplierSelections || []) as Parameters<
+            typeof buildSelectedQuotationDeliveryByPrItem
+          >[0]
+        );
         const itemRows = prItemInputs.map((item) =>
-          deriveItemProcurementRow(item, poLines, receivedByPoItemId, prStatus)
+          deriveItemProcurementRow(
+            item,
+            poLines,
+            receivedByPoItemId,
+            prStatus,
+            quotationDeliveryByPrItem
+          )
         );
         const { stages, percentage: progressPercentage } =
           itemRows.length > 0 || poLines.length > 0
@@ -2716,7 +2762,8 @@ export const getPRTrackingList = async (
           prStatus,
           prItemInputs,
           poLines,
-          receivedByPoItemId
+          receivedByPoItemId,
+          quotationDeliveryByPrItem
         );
         const poLinesForCost = poLines.map((l) => {
           const src = (pr.purchaseOrders || [])
@@ -2740,7 +2787,18 @@ export const getPRTrackingList = async (
             partialCount: procurementSnapshot.partialCount,
           },
           poLinesForCost,
-          receivedByPoItemId
+          receivedByPoItemId,
+          (pr.purchaseOrders || []).map((po) => ({
+            status: String(po.status ?? ''),
+            totalAmount: po.totalAmount,
+            items: (po.items || []).map((it) => ({
+              qty: it.qty,
+              unitPrice: it.unitPrice,
+              amount: it.amount,
+              confirmedQty: it.confirmedQty,
+            })),
+          })),
+          { prStatus, trackingPoLines: poLines }
         );
         if (items.length > 0 && procurementSnapshot.totalCount === 0 && procurementSnapshot.itemPreview.length === 0) {
           procurementSnapshot = {
@@ -2786,12 +2844,18 @@ export const getPRTrackingList = async (
           procurementSnapshot,
           salesOrder: serializePRSalesOrder(pr),
           stockIssuePickup: {
-            ready: isReadyForStockIssuePickup({
-              receivedCount: procurementSnapshot.receivedCount,
-              totalCount: procurementSnapshot.totalCount,
-              partialCount: procurementSnapshot.partialCount,
-              nextEta: procurementSnapshot.nextEta,
-            }),
+            ready: isReadyForStockIssuePickup(
+              {
+                receivedCount: procurementSnapshot.receivedCount,
+                totalCount: procurementSnapshot.totalCount,
+                partialCount: procurementSnapshot.partialCount,
+                nextEta: procurementSnapshot.nextEta,
+                waitingReorderCount: procurementSnapshot.waitingReorderCount,
+                waitingReorderQty: procurementSnapshot.waitingReorderQty,
+              },
+              prStatus,
+              poLines
+            ),
             linkedStockIssue: latestStockIssueByPrId.get(pr.id) ?? null,
           },
         };

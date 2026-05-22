@@ -329,12 +329,12 @@ const BuyerManagerDashboardHome = () => {
                 aria-hidden
               />
             </Link>
-            <Link to="/dashboard/buyer-manager/pr-monitoring" className={buyerMgrActionCtaSecondaryClass}>
+            <Link to="/dashboard/buyer-manager/procurement-monitoring" className={buyerMgrActionCtaSecondaryClass}>
               <span
                 className="pointer-events-none absolute inset-0 rounded-2xl bg-gradient-to-br from-indigo-50/0 to-violet-50/40 opacity-0 transition-opacity duration-300 group-hover:opacity-100"
                 aria-hidden
               />
-              <span className="relative">Giám sát PR ngay</span>
+              <span className="relative">Giám sát mua hàng</span>
               <ChevronRight
                 className="relative h-4 w-4 shrink-0 text-indigo-600 transition-transform duration-300 group-hover:translate-x-0.5"
                 aria-hidden

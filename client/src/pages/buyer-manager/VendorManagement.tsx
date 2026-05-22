@@ -3,6 +3,8 @@ import { createPortal } from 'react-dom';
 import * as XLSX from 'xlsx';
 import { useQueryClient } from '@tanstack/react-query';
 import { buyerService } from '../../services/buyerService';
+import { useToast } from '../../contexts/ToastContext';
+import { SUPPLIERS_QUERY_KEY } from '../../constants/supplierQuery';
 import { 
   Building2, 
   Search, 
@@ -220,7 +222,7 @@ const safeReferenceHref = (url: string | null | undefined): string | null => {
   return `https://${trimmed}`;
 };
 
-// LocalStorage key
+/** Key cũ trên trình duyệt — chỉ dùng để xóa khi load trang (không còn lưu NCC vào đây). */
 const VENDORS_STORAGE_KEY = 'buyer-manager-vendors';
 
 const VENDOR_DETAIL_TABS = [
@@ -232,10 +234,12 @@ const VENDOR_DETAIL_TABS = [
   { id: 'history', label: 'Lịch sử', icon: History },
 ] as const;
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 const VendorManagement = () => {
   const queryClient = useQueryClient();
+  const { showSuccess, showError } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const hasAutoSyncedVendorsRef = useRef(false);
   const [vendors, setVendors] = useState<Vendor[]>([]);
   const [dbSupplierCount, setDbSupplierCount] = useState<number | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -295,55 +299,8 @@ const VendorManagement = () => {
     bankAccountNo: s.bankAccount ?? undefined,
   });
 
-  const reloadVendorsFromApi = useCallback(async () => {
-    const { suppliers } = await buyerService.getSuppliers();
-    setDbSupplierCount(suppliers?.length ?? 0);
-    if (!suppliers?.length) return;
-    setVendors(suppliers.map(mapApiSupplierToVendor));
-    await queryClient.invalidateQueries({ queryKey: ['suppliers'] });
-  }, [queryClient]);
-
-  // Load vendors from localStorage on mount
-  useEffect(() => {
-    const stored = localStorage.getItem(VENDORS_STORAGE_KEY);
-    if (stored) {
-      try {
-        const parsed = JSON.parse(stored) as Vendor[];
-        // Migrate legacy vendor code (e.g. VND-001) to new format without requiring re-import.
-        const migrated = parsed.map((vendor, index) => {
-          if (!vendor.code || isLegacyVendorCode(vendor.code)) {
-            const nextCode = `VND-${toCountryCode(vendor.country)}-${toCategoryCode(vendor.category)}-${String(index + 1).padStart(5, '0')}`;
-            return { ...vendor, code: nextCode };
-          }
-          return vendor;
-        });
-
-        setVendors(migrated);
-      } catch (error) {
-        console.error('Failed to parse vendors from localStorage:', error);
-      }
-    }
-  }, []);
-
-  // Nguồn chính cho Buyer: API /suppliers (database). localStorage chỉ để bootstrap + auto-sync.
-  useEffect(() => {
-    void reloadVendorsFromApi().catch((err) => console.error('Load suppliers from API failed:', err));
-  }, [reloadVendorsFromApi]);
-
-  // Save vendors to localStorage whenever it changes
-  useEffect(() => {
-    if (vendors.length > 0) {
-      localStorage.setItem(VENDORS_STORAGE_KEY, JSON.stringify(vendors));
-    }
-  }, [vendors]);
-
-  // Auto-sync existing local vendors to DB once per page load.
-  // This lets previously imported browser data become system-wide without re-importing the Excel file.
-  useEffect(() => {
-    if (hasAutoSyncedVendorsRef.current || vendors.length === 0) return;
-
-    hasAutoSyncedVendorsRef.current = true;
-    const suppliersForDb = vendors.map((vendor) => ({
+  const vendorsToBulkPayload = useCallback((list: Vendor[]) => {
+    return list.map((vendor) => ({
       name: vendor.name,
       code: !vendor.code || isLegacyVendorCode(vendor.code) ? undefined : vendor.code,
       country: vendor.country || undefined,
@@ -354,18 +311,39 @@ const VendorManagement = () => {
       bankName: vendor.bankName || undefined,
       bankAccount: vendor.bankAccountNo || undefined,
     }));
+  }, []);
 
-    buyerService.importSuppliersBulk(suppliersForDb).then((result) => {
-      console.log(
-        `✅ Auto-sync vendors to DB: inserted=${result.inserted}, skipped=${result.skipped}, total=${result.totalReceived}`
-      );
-      void reloadVendorsFromApi();
-    }).catch((error) => {
-      console.error('❌ Auto-sync vendors to DB failed:', error);
-      // Allow next vendors change to retry if first auto-sync fails.
-      hasAutoSyncedVendorsRef.current = false;
-    });
-  }, [vendors]);
+  const reloadVendorsFromApi = useCallback(async () => {
+    const { suppliers } = await buyerService.getSuppliers();
+    setDbSupplierCount(suppliers?.length ?? 0);
+    if (!suppliers?.length) return;
+    setVendors(suppliers.map(mapApiSupplierToVendor));
+    await queryClient.invalidateQueries({ queryKey: [...SUPPLIERS_QUERY_KEY] });
+  }, [queryClient]);
+
+  /** Nguồn duy nhất: database (API). Không đọc/ghi localStorage. */
+  const initializeVendors = useCallback(async () => {
+    try {
+      localStorage.removeItem(VENDORS_STORAGE_KEY);
+    } catch {
+      /* ignore */
+    }
+    try {
+      const res = await buyerService.getSuppliers();
+      const apiSuppliers = res.suppliers ?? [];
+      setDbSupplierCount(apiSuppliers.length);
+      setVendors(apiSuppliers.map(mapApiSupplierToVendor));
+      await queryClient.invalidateQueries({ queryKey: [...SUPPLIERS_QUERY_KEY] });
+    } catch (err) {
+      console.error('Load suppliers from API failed:', err);
+      setVendors([]);
+      setDbSupplierCount(0);
+    }
+  }, [queryClient]);
+
+  useEffect(() => {
+    void initializeVendors();
+  }, [initializeVendors]);
 
   // Lock body scroll when import modal is open
   useEffect(() => {
@@ -396,11 +374,35 @@ const VendorManagement = () => {
     setEditValue(currentValue || '');
   };
 
-  // Save edited field
-  const saveEdit = (field: keyof Vendor) => {
-    if (selectedVendorId) {
-      updateVendorField(selectedVendorId, field, editValue);
+  // Save edited field (ngân hàng → DB để PO / RFQ dùng chung)
+  const saveEdit = async (field: keyof Vendor) => {
+    if (!selectedVendorId) return;
+    updateVendorField(selectedVendorId, field, editValue);
+
+    const bankPersistMap: Partial<
+      Record<keyof Vendor, 'bankName' | 'bankAccount'>
+    > = {
+      bankName: 'bankName',
+      bankAccountNo: 'bankAccount',
+    };
+    const apiKey = bankPersistMap[field];
+    if (apiKey && UUID_RE.test(selectedVendorId)) {
+      try {
+        await buyerService.updateSupplier(selectedVendorId, {
+          [apiKey]: editValue.trim() || undefined,
+        });
+        await queryClient.invalidateQueries({ queryKey: [...SUPPLIERS_QUERY_KEY] });
+        showSuccess('Đã lưu thông tin ngân hàng NCC');
+      } catch (err: unknown) {
+        const msg =
+          (err as { response?: { data?: { error?: string; message?: string } } })?.response
+            ?.data?.error ||
+          (err as { response?: { data?: { message?: string } } })?.response?.data?.message ||
+          'Không lưu được thông tin ngân hàng';
+        showError(msg);
+      }
     }
+
     setEditingField(null);
     setEditValue('');
   };
@@ -530,12 +532,14 @@ const VendorManagement = () => {
             ),
             bankName: getValue(
               row,
-              'Bank Name', 'Tên ngân hàng', 'Bank',
+              'Bank Name', 'Tên ngân hàng', 'Ten ngan hang', 'Ngân hàng', 'Ngan hang',
+              'Tên NH', 'Ten NH', 'Bank',
               'bank_name', 'bankName'
             ),
             bankAccountNo: getValue(
               row,
-              'Bank Account No', 'Số tài khoản', 'Account No', 'Account Number',
+              'Bank Account No', 'Số tài khoản', 'So tai khoan', 'STK', 'Số TK', 'So TK',
+              'Account No', 'Account Number',
               'bank_account_no', 'bankAccountNo', 'account_no', 'account_number'
             ),
             tags: tagsArray,
@@ -547,22 +551,18 @@ const VendorManagement = () => {
           };
         });
 
-        const suppliersForDb = importedVendors.map((vendor) => ({
-          name: vendor.name,
-          code: !vendor.code || isLegacyVendorCode(vendor.code) ? undefined : vendor.code,
-          country: vendor.country || undefined,
-          category: vendor.category?.[0] || undefined,
-          address: vendor.address || undefined,
-          taxCode: vendor.taxCode || undefined,
-          contactPerson: vendor.legalRepresentative || undefined,
-          bankName: vendor.bankName || undefined,
-          bankAccount: vendor.bankAccountNo || undefined,
-        }));
-
-        const importResult = await buyerService.importSuppliersBulk(suppliersForDb);
-        console.log(
-          `✅ Imported suppliers to DB: inserted=${importResult.inserted}, skipped=${importResult.skipped}, total=${importResult.totalReceived}`
+        const importResult = await buyerService.importSuppliersBulk(
+          vendorsToBulkPayload(importedVendors)
         );
+        const bankUpdated = (importResult as { bankFieldsUpdated?: number }).bankFieldsUpdated ?? 0;
+        console.log(
+          `✅ Imported suppliers to DB: inserted=${importResult.inserted}, skipped=${importResult.skipped}, bankUpdated=${bankUpdated}`
+        );
+        if (bankUpdated > 0) {
+          showSuccess(`Import xong — đã cập nhật TK ngân hàng cho ${bankUpdated} NCC có sẵn trong hệ thống`);
+        } else {
+          showSuccess('Import NCC thành công');
+        }
 
         await reloadVendorsFromApi();
         setIsImportModalOpen(false);
@@ -1130,6 +1130,13 @@ const VendorManagement = () => {
               </div>
 
               <VendorDetailTabPanel title="Thông tin ngân hàng" className="mt-4">
+                {!selectedVendor.bankName?.trim() && !selectedVendor.bankAccountNo?.trim() ? (
+                  <p className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-950">
+                    Chưa có TK ngân hàng trên master NCC — PO Buyer và phê duyệt PO sẽ hiện「Chưa cập nhật」.
+                    Nhập và Lưu tại đây, hoặc import lại file Excel (cột Tên ngân hàng / Số tài khoản).
+                    Dữ liệu dùng chung toàn hệ thống.
+                  </p>
+                ) : null}
                 <div className="space-y-5">
                   <div className="group">
                     <VendorFieldLabel icon={Landmark}>Tên ngân hàng</VendorFieldLabel>

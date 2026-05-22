@@ -35,7 +35,7 @@ export async function syncPurchaseRequestAfterGoodsReceipt(
       status: true,
       items: {
         where: { deletedAt: null },
-        select: { id: true, status: true, departmentItemOutcome: true },
+        select: { id: true, status: true, departmentItemOutcome: true, purchaseQty: true },
       },
     },
   });
@@ -69,8 +69,15 @@ export async function syncPurchaseRequestAfterGoodsReceipt(
   const fulfilledPrItemIds = new Set<string>();
   let itemsMarkedFulfilled = 0;
 
+  const prItemById = new Map(pr.items.map((i) => [i.id, i]));
+
   for (const row of poItems) {
     if (row.lineStatus === 'CANCELLED') {
+      const pri = prItemById.get(row.purchaseRequestItemId);
+      const reopenQty = Number(pri?.purchaseQty ?? 0);
+      if (String(pri?.status ?? '') === 'ASSIGNED' && reopenQty > 1e-9) {
+        continue;
+      }
       fulfilledPrItemIds.add(row.purchaseRequestItemId);
       continue;
     }

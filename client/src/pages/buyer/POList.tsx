@@ -8,6 +8,7 @@ import {
   CircleDollarSign,
   ClipboardList,
   Eye,
+  FileSpreadsheet,
   FileText,
   Inbox,
   Loader2,
@@ -15,6 +16,7 @@ import {
   UserRound,
 } from 'lucide-react';
 import { buyerService } from '../../services/buyerService';
+import { downloadBlob } from '../../utils/downloadBlob';
 import { downloadPurchaseOrderPdf } from '../../utils/poPdf';
 import { getStoredPoDisplayLang } from '../../utils/poDisplayLang';
 import { poDetailUi } from '../../utils/poDetailUiStrings';
@@ -84,6 +86,7 @@ const POList = () => {
   const navigate = useNavigate();
   const { showSuccess, showError } = useToast();
   const [pdfLoadingId, setPdfLoadingId] = useState<string | null>(null);
+  const [excelLoading, setExcelLoading] = useState(false);
   const [poCode, setPoCode] = useState('');
   const [prCode, setPrCode] = useState('');
   const [supplier, setSupplier] = useState('');
@@ -105,6 +108,26 @@ const POList = () => {
 
   const pos = data?.pos || [];
   const isInitialLoading = isLoading && data === undefined;
+
+  const handleExportExcel = async () => {
+    setExcelLoading(true);
+    try {
+      const blob = await buyerService.exportPOListExcel({
+        poCode: poCode || undefined,
+        prCode: prCode || undefined,
+        supplier: supplier || undefined,
+        status: status || undefined,
+      });
+      const stamp = new Date().toISOString().slice(0, 10);
+      downloadBlob(blob, `PO_Buyer_${stamp}.xlsx`);
+      showSuccess('Đã xuất Excel danh sách PO (mỗi dòng hàng một row).');
+    } catch (e) {
+      console.error(e);
+      showError('Không xuất được Excel. Vui lòng thử lại.');
+    } finally {
+      setExcelLoading(false);
+    }
+  };
 
   const getStatusBadge = (s: string) => {
     const colors: Record<string, string> = {
@@ -210,6 +233,20 @@ const POList = () => {
               title="Làm mới"
             >
               <Search className="w-4 h-4" />
+            </button>
+            <button
+              type="button"
+              disabled={excelLoading || isInitialLoading}
+              onClick={() => void handleExportExcel()}
+              className="inline-flex shrink-0 items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-semibold text-emerald-800 shadow-sm transition-colors hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-50"
+              title="Xuất Excel — đủ trường PO và từng dòng hàng"
+            >
+              {excelLoading ? (
+                <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+              ) : (
+                <FileSpreadsheet className="h-4 w-4" aria-hidden />
+              )}
+              Xuất Excel
             </button>
           </div>
         </div>

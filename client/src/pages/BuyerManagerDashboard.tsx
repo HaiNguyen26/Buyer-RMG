@@ -11,6 +11,7 @@ import {
   Settings,
   Building2,
   FileText,
+  Radar,
 } from 'lucide-react';
 import DashboardHeader from '../components/DashboardHeader';
 import { StandardDashboardSidebar } from '../components/StandardDashboardSidebar';
@@ -71,7 +72,11 @@ const BuyerManagerDashboard = () => {
       items: [
         { icon: Users, label: 'Quản lý đội Buyer', path: '/dashboard/buyer-manager/team-management' },
         { icon: Building2, label: 'Quản lý Vendor', path: '/dashboard/buyer-manager/vendor-management' },
-        { icon: ClipboardCheck, label: 'Giám sát PR', path: '/dashboard/buyer-manager/pr-monitoring' },
+        {
+          icon: Radar,
+          label: 'Giám sát mua hàng',
+          path: '/dashboard/buyer-manager/procurement-monitoring',
+        },
         { icon: FileText, label: 'Duyệt PO', path: '/dashboard/buyer-manager/po-approval' },
         { icon: AlertTriangle, label: 'Ngoại lệ & rủi ro', path: '/dashboard/buyer-manager/exceptions' },
         { icon: UserCog, label: 'Quản lý người dùng & vai trò', path: '/dashboard/buyer-manager/user-management' },
@@ -98,8 +103,8 @@ const BuyerManagerDashboard = () => {
       return 'Quản lý đội Buyer';
     } else if (location.pathname.includes('/vendor-management')) {
       return 'Quản lý Vendor';
-    } else if (location.pathname.includes('/pr-monitoring')) {
-      return 'Giám sát PR';
+    } else if (location.pathname.includes('/procurement-monitoring')) {
+      return 'Giám sát mua hàng';
     } else if (location.pathname.includes('/po-approval')) {
       return 'Duyệt PO';
     } else if (location.pathname.includes('/exceptions')) {
@@ -121,8 +126,8 @@ const BuyerManagerDashboard = () => {
       return 'Quản lý và theo dõi hiệu suất đội Buyer';
     } else if (location.pathname.includes('/vendor-management')) {
       return 'Quản lý nhà cung cấp, master data & hiệu suất';
-    } else if (location.pathname.includes('/pr-monitoring')) {
-      return 'Theo dõi PR toàn hệ thống (chỉ xem)';
+    } else if (location.pathname.includes('/procurement-monitoring')) {
+      return 'Theo dõi PR/PO, SLA, trễ giao và mua lại — trung tâm vận hành';
     } else if (location.pathname.includes('/po-approval')) {
       return 'Duyệt hoặc từ chối PO do Buyer gửi lên';
     } else if (location.pathname.includes('/exceptions')) {
@@ -145,6 +150,7 @@ const BuyerManagerDashboard = () => {
   };
 
   const isBuyerManagerOverviewHome = location.pathname === '/dashboard/buyer-manager';
+  const isBuyerManagerProcurementMonitor = location.pathname.includes('/procurement-monitoring');
 
   /** layout-shell-viewport-wrapper.md §2–§3 — một scroll trên main, outlet full chiều cao vùng cuộn */
   const buyerManagerMainScrollClass = [
@@ -156,7 +162,9 @@ const BuyerManagerDashboard = () => {
       ? dashboardMainPaddingBottomOverviewClass
       : buyerDashboardWorkspaceScrollBottomClass,
     isBuyerManagerOverviewHome ? 'bg-slate-50' : buyerShellScrollCanvasClass,
-    !isBuyerManagerOverviewHome ? buyerDashboardWorkspaceScrollRoundedBottomClass : '',
+    !isBuyerManagerOverviewHome && !isBuyerManagerProcurementMonitor
+      ? buyerDashboardWorkspaceScrollRoundedBottomClass
+      : '',
   ]
     .filter(Boolean)
     .join(' ');

@@ -23,16 +23,19 @@ import {
 } from '../utils/poApprovalQueue';
 import { inferVatPercentFromLine } from '../utils/quotationLine';
 import {
+  comparePoTotalToPrProposedBudget,
+  computePrProposedBudgetAmount,
+} from '../utils/prProposedBudget';
+import {
   applySupplierTaxCodeOnPoApproval,
   mapSupplierTaxForPoView,
 } from '../utils/poSupplierTax';
 import {
-  buildLineCancelApprovalRows,
-  isPoLifecycleComplete,
-  lineStatusAfterCancelApproval,
-  resolveOperationalPoStatusAfterLineCancel,
-  type PoLineCancelSnapshot,
-} from '../utils/poPartialLineCancel';
+  executePoPartialLineCancel,
+  formatPoPartialLineCancelMessage,
+  resolveAllLegacyCancelRequestedPos,
+  resolveLegacyCancelRequestedPo,
+} from '../utils/executePoPartialLineCancel';
 
 // Validation schemas
 const assignPRSchema = z.object({
@@ -891,6 +894,9 @@ export const compareQuotations = async (
             unitPrice: Number(item.unitPrice),
             totalPrice: Number(item.totalPrice),
             purchaseRequestItemId: item.purchaseRequestItemId,
+            leadTimeDays: item.leadTimeDays != null ? Number(item.leadTimeDays) : null,
+            warrantyMonths: item.warrantyMonths != null ? Number(item.warrantyMonths) : null,
+            deliveryDate: item.deliveryDate?.toISOString?.() ?? null,
             baselineUnitPrice: bi?.baselineUnitPrice ?? null,
             overBaseline: bi?.overBaseline ?? false,
           };
@@ -3060,6 +3066,10 @@ export const getPOsPendingApproval = async (
             ? { rejectedAt: 'desc' as const }
             : { updatedAt: 'desc' as const };
 
+    if (queue === 'pending') {
+      await resolveAllLegacyCancelRequestedPos();
+    }
+
     const pos = await prisma.purchaseOrder.findMany({
       where,
       include: {
@@ -3105,10 +3115,21 @@ export const getPODetailForApproval = async (
     if (!userId) return reply.code(401).send({ error: 'Unauthorized' });
     const { poId } = request.params as { poId: string };
 
-    const po = await prisma.purchaseOrder.findFirst({
+    let po = await prisma.purchaseOrder.findFirst({
       where: { id: poId, deletedAt: null },
       include: {
-        purchaseRequest: { select: { id: true, prNumber: true, totalAmount: true, currency: true } },
+        purchaseRequest: {
+          select: {
+            id: true,
+            prNumber: true,
+            totalAmount: true,
+            currency: true,
+            items: {
+              where: { deletedAt: null },
+              select: { qty: true, unitPrice: true, estimatedUnitPriceVnd: true },
+            },
+          },
+        },
         supplier: true,
         createdBy: { select: { username: true } },
         items: true,
@@ -3116,6 +3137,32 @@ export const getPODetailForApproval = async (
     });
 
     if (!po) return reply.code(404).send({ error: 'PO not found' });
+
+    if (String(po.status) === 'CANCEL_REQUESTED') {
+      await resolveLegacyCancelRequestedPo(po.id, userId);
+      po = await prisma.purchaseOrder.findFirst({
+        where: { id: poId, deletedAt: null },
+        include: {
+          purchaseRequest: {
+          select: {
+            id: true,
+            prNumber: true,
+            totalAmount: true,
+            currency: true,
+            items: {
+              where: { deletedAt: null },
+              select: { qty: true, unitPrice: true, estimatedUnitPriceVnd: true },
+            },
+          },
+        },
+          supplier: true,
+          createdBy: { select: { username: true } },
+          items: true,
+        },
+      });
+      if (!po) return reply.code(404).send({ error: 'PO not found' });
+    }
+
     const reviewStatus = po.status as string;
     const isPending = reviewStatus === 'SUBMITTED' || reviewStatus === 'CANCEL_REQUESTED';
     const isOwnHistory = po.approvedById === userId || po.rejectedById === userId;
@@ -3160,6 +3207,20 @@ export const getPODetailForApproval = async (
       quotationItems.map((qi) => [qi.id, qi.vatPercent != null ? Number(qi.vatPercent) : null])
     );
 
+    const prItemsForBudget = po.purchaseRequest.items ?? [];
+    const prProposedFromItems = computePrProposedBudgetAmount(prItemsForBudget);
+    const prProposedAmount =
+      prProposedFromItems > 0
+        ? prProposedFromItems
+        : po.purchaseRequest.totalAmount
+          ? Number(po.purchaseRequest.totalAmount)
+          : 0;
+    const poTotalAmount = Number(po.totalAmount);
+    const budgetComparison = comparePoTotalToPrProposedBudget(
+      poTotalAmount,
+      prProposedAmount
+    );
+
     reply.send({
       id: po.id,
       poNumber: po.poNumber,
@@ -3169,7 +3230,7 @@ export const getPODetailForApproval = async (
       prCode: po.purchaseRequest.prNumber,
       supplier: mapSupplierTaxForPoView(po.supplier, po.buyerSupplierTaxCode),
       buyerSupplierTaxCode: po.buyerSupplierTaxCode,
-      totalAmount: Number(po.totalAmount),
+      totalAmount: poTotalAmount,
       currency: po.currency,
       paymentTerms: po.paymentTerms,
       deliveryAddress: po.deliveryAddress,
@@ -3177,7 +3238,8 @@ export const getPODetailForApproval = async (
       projectCode: po.projectCode,
       deliveryDate: po.deliveryDate?.toISOString() ?? null,
       note: po.note,
-      prBudget: po.purchaseRequest.totalAmount ? Number(po.purchaseRequest.totalAmount) : null,
+      prBudget: prProposedAmount > 0 ? prProposedAmount : null,
+      budgetComparison,
       buyer: po.createdBy?.username,
       createdAt: po.createdAt.toISOString(),
       submittedAt: po.submittedAt?.toISOString() ?? null,
@@ -3210,6 +3272,14 @@ export const getPODetailForApproval = async (
           qtyReceived: receivedMap.get(i.id) ?? 0,
           qtyRemaining: Math.max(0, Number(i.qty) - (receivedMap.get(i.id) ?? 0)),
           lineStatus: (i as { lineStatus?: string }).lineStatus ?? 'OPEN',
+          lineCancelReason: (i as { lineCancelReason?: string | null }).lineCancelReason ?? null,
+          cancelledRemainingQty:
+            (i as { cancelledRemainingQty?: { toString(): string } | null }).cancelledRemainingQty !=
+            null
+              ? Number(
+                  (i as { cancelledRemainingQty: { toString(): string } }).cancelledRemainingQty
+                )
+              : null,
         };
       }),
     });
@@ -3270,197 +3340,23 @@ export const approvePO = async (
       });
     }
 
-    const poItems = await prisma.pOItem.findMany({
-      where: { purchaseOrderId: po.id },
-      select: {
-        id: true,
-        purchaseRequestItemId: true,
-        qty: true,
-        confirmedQty: true,
-        lineStatus: true,
-      },
-    });
-    const receivedRows =
-      poItems.length > 0
-        ? await prisma.goodsReceiptLine.groupBy({
-            by: ['poItemId'],
-            where: { poItemId: { in: poItems.map((it) => it.id) } },
-            _sum: { qtyReceived: true },
-          })
-        : [];
-    const receivedMap = new Map<string, number>(
-      receivedRows.map((row) => [row.poItemId, Number(row._sum.qtyReceived || 0)])
-    );
-
-    const { cancelLines, fulfilledNotCancelled, invalidCancelIds } = buildLineCancelApprovalRows(
-      poItems.map((it) => ({
-        id: it.id,
-        purchaseRequestItemId: it.purchaseRequestItemId,
-        qty: it.qty,
-        confirmedQty: it.confirmedQty != null ? Number(it.confirmedQty) : null,
-      })),
-      receivedMap,
-      cancelPoItemIds
-    );
-
-    if (invalidCancelIds.length > 0) {
-      return reply.code(400).send({
-        error: 'Danh sách dòng hủy không hợp lệ hoặc không thuộc PO này.',
-      });
-    }
-    if (cancelLines.length === 0) {
-      return reply.code(400).send({
-        error:
-          'Không có dòng nào còn phần chưa nhận kho trong yêu cầu hủy. Chỉ hủy được phần còn lại của dòng đã chọn.',
-      });
+    const lineCancelReason =
+      typeof po.rejectReason === 'string' ? po.rejectReason.trim() : '';
+    if (!lineCancelReason) {
+      return reply.code(400).send({ error: 'Thiếu lý do hủy dòng trên PO.' });
     }
 
-    const poHeaderBefore = po as {
-      supplierConfirmedAt?: Date | null;
-    };
-
-    await prisma.$transaction(async (tx) => {
-      if (fulfilledNotCancelled.length > 0) {
-        await Promise.all(
-          fulfilledNotCancelled.map((f) =>
-            tx.purchaseRequestItem.update({
-              where: { id: f.purchaseRequestItemId },
-              data: {
-                status: 'FULFILLED' as any,
-                purchaseQty: new Prisma.Decimal(0),
-              },
-            })
-          )
-        );
-        await tx.pOItem.updateMany({
-          where: { id: { in: fulfilledNotCancelled.map((f) => f.id) } },
-          data: { lineStatus: 'FULLY_RECEIVED' } as any,
-        });
-        await tx.supplierSelection.deleteMany({
-          where: {
-            purchaseRequestId: po.purchaseRequestId,
-            purchaseRequestItemId: {
-              in: fulfilledNotCancelled.map((f) => f.purchaseRequestItemId),
-            },
-          },
-        });
-      }
-
-      const reopenPrItemIds = cancelLines.map((c) => c.purchaseRequestItemId);
-      await Promise.all(
-        cancelLines.map((c) =>
-          tx.purchaseRequestItem.update({
-            where: { id: c.purchaseRequestItemId },
-            data: {
-              purchaseQty: new Prisma.Decimal(c.remaining),
-              status: 'ASSIGNED' as any,
-            },
-          })
-        )
-      );
-      await tx.pOItem.updateMany({
-        where: { id: { in: cancelLines.map((c) => c.id) } },
-        data: { lineStatus: 'CANCELLED' } as any,
-      });
-      await tx.supplierSelection.deleteMany({
-        where: {
-          purchaseRequestId: po.purchaseRequestId,
-          purchaseRequestItemId: { in: reopenPrItemIds },
-        },
-      });
-
-      const cancelIdSet = new Set(cancelLines.map((c) => c.id));
-      for (const it of poItems) {
-        if (cancelIdSet.has(it.id)) continue;
-        const received = receivedMap.get(it.id) ?? 0;
-        const nextLineStatus = lineStatusAfterCancelApproval({
-          id: it.id,
-          purchaseRequestItemId: it.purchaseRequestItemId,
-          qty: Number(it.qty),
-          confirmedQty: it.confirmedQty != null ? Number(it.confirmedQty) : null,
-          received,
-          lineStatus: String((it as { lineStatus?: string }).lineStatus ?? 'OPEN'),
-        });
-        await tx.pOItem.update({
-          where: { id: it.id },
-          data: { lineStatus: nextLineStatus as any },
-        });
-      }
-
-      const snapshots: PoLineCancelSnapshot[] = poItems.map((it) => {
-        const received = receivedMap.get(it.id) ?? 0;
-        const lineStatus = cancelIdSet.has(it.id)
-          ? 'CANCELLED'
-          : lineStatusAfterCancelApproval({
-              id: it.id,
-              purchaseRequestItemId: it.purchaseRequestItemId,
-              qty: Number(it.qty),
-              confirmedQty: it.confirmedQty != null ? Number(it.confirmedQty) : null,
-              received,
-              lineStatus: String((it as { lineStatus?: string }).lineStatus ?? 'OPEN'),
-            });
-        return {
-          id: it.id,
-          purchaseRequestItemId: it.purchaseRequestItemId,
-          qty: Number(it.qty),
-          confirmedQty: it.confirmedQty != null ? Number(it.confirmedQty) : null,
-          received,
-          lineStatus,
-        };
-      });
-
-      const poNextStatus = resolveOperationalPoStatusAfterLineCancel(snapshots, {
-        supplierConfirmedAt: poHeaderBefore.supplierConfirmedAt,
-      });
-
-      await tx.purchaseOrder.update({
-        where: { id: po.id },
-        data: {
-          status: poNextStatus as any,
-          approvedAt: new Date(),
-          approvedById: userId,
-          cancelRequestedPoItemIds: null,
-        } as any,
-      });
-
-      const prItemStatuses = await tx.purchaseRequestItem.findMany({
-        where: { purchaseRequestId: po.purchaseRequestId, deletedAt: null },
-        select: { status: true },
-      });
-      const aggregatedStatus = computePRStatusFromItemStatuses(
-        prItemStatuses.map((i) => String(i.status)) as Parameters<
-          typeof computePRStatusFromItemStatuses
-        >[0]
-      );
-      if (aggregatedStatus) {
-        await tx.purchaseRequest.update({
-          where: { id: po.purchaseRequestId },
-          data: { status: aggregatedStatus as any },
-        });
-      }
+    const result = await executePoPartialLineCancel({
+      purchaseOrderId: po.id,
+      cancelPoItemIds,
+      lineCancelReason,
+      actorUserId: userId,
     });
-
-    const cancelledCount = cancelLines.length;
-    const activeRemain = poItems.length - cancelledCount - fulfilledNotCancelled.length;
 
     reply.send({
-      message:
-        activeRemain > 0
-          ? `Đã duyệt hủy ${cancelledCount} dòng PO. PO vẫn active — kho tiếp tục nhận các dòng còn lại. ${cancelledCount} item trả về hàng đợi Buyer (RFQ/PO mới, cùng PR).`
-          : `Đã duyệt hủy ${cancelledCount} dòng. ${cancelledCount} item trả về hàng đợi Buyer để RFQ/PO mới (cùng PR).`,
-      cancelledLineCount: cancelledCount,
-      poRemainsActive: activeRemain > 0 || !isPoLifecycleComplete(
-        poItems.map((it) => ({
-          id: it.id,
-          purchaseRequestItemId: it.purchaseRequestItemId,
-          qty: Number(it.qty),
-          confirmedQty: it.confirmedQty != null ? Number(it.confirmedQty) : null,
-          received: receivedMap.get(it.id) ?? 0,
-          lineStatus: cancelLines.some((c) => c.id === it.id)
-            ? 'CANCELLED'
-            : String((it as { lineStatus?: string }).lineStatus ?? 'OPEN'),
-        }))
-      ),
+      message: formatPoPartialLineCancelMessage(result),
+      cancelledLineCount: result.cancelledLineCount,
+      poRemainsActive: result.poRemainsActive,
     });
   } catch (error: any) {
     console.error('Approve PO error:', error);

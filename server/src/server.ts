@@ -31,7 +31,8 @@ let io: ReturnType<typeof initializeSocket> | null = null;
 // Register CORS
 fastify.register(cors, {
     origin: true,
-    credentials: true
+    credentials: true,
+    exposedHeaders: ['Content-Disposition'],
 });
 
 // Compression disabled globally to prevent "stream closed prematurely" errors.

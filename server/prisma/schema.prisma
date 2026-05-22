@@ -655,6 +655,9 @@ model QuotationItem {
   unitPrice             Decimal   @map("unit_price") @db.Decimal(15, 2)
   vatPercent            Decimal?  @map("vat_percent") @db.Decimal(5, 2)
   totalPrice            Decimal   @map("total_price") @db.Decimal(15, 2)
+  leadTimeDays          Int?      @map("lead_time_days")
+  warrantyMonths        Int?      @map("warranty_months")
+  deliveryDate          DateTime? @map("delivery_date") @db.Date
   notes                 String?
   createdAt             DateTime  @default(now()) @map("created_at")
   updatedAt             DateTime  @updatedAt @map("updated_at")
@@ -817,6 +820,10 @@ model POItem {
   /// ETA theo dòng sau confirm NCC
   expectedDeliveryDate  DateTime? @map("expected_delivery_date")
   supplierConfirmedAt   DateTime? @map("supplier_confirmed_at")
+  /// Lý do Buyer nhập khi yêu cầu hủy phần còn lại (sau duyệt Trưởng phòng)
+  lineCancelReason      String?   @map("line_cancel_reason") @db.Text
+  /// SL còn lại đã hủy trên dòng PO (audit cho Requestor tracking)
+  cancelledRemainingQty Decimal?  @map("cancelled_remaining_qty") @db.Decimal(10, 2)
   createdAt             DateTime @default(now()) @map("created_at")
   updatedAt             DateTime @updatedAt @map("updated_at")
 

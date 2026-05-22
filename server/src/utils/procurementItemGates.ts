@@ -34,6 +34,15 @@ export async function getProcurementCompletePrItemIdsForPurchaseRequests(
   });
   for (const r of deptExcluded) closed.add(r.id);
 
+  const prItems = await prisma.purchaseRequestItem.findMany({
+    where: {
+      purchaseRequestId: { in: purchaseRequestIds },
+      deletedAt: null,
+    },
+    select: { id: true, status: true, purchaseQty: true },
+  });
+  const prItemById = new Map(prItems.map((r) => [r.id, r]));
+
   const poItems = await prisma.pOItem.findMany({
     where: {
       purchaseOrder: { purchaseRequestId: { in: purchaseRequestIds }, deletedAt: null },
@@ -50,6 +59,11 @@ export async function getProcurementCompletePrItemIdsForPurchaseRequests(
   const got = new Map(sums.map((s) => [s.poItemId, Number(s._sum.qtyReceived || 0)]));
   for (const row of poItems) {
     if (row.lineStatus === 'CANCELLED') {
+      const pri = prItemById.get(row.purchaseRequestItemId);
+      const reopenQty = Number(pri?.purchaseQty ?? 0);
+      if (String(pri?.status ?? '') === 'ASSIGNED' && reopenQty > 1e-9) {
+        continue;
+      }
       closed.add(row.purchaseRequestItemId);
       continue;
     }

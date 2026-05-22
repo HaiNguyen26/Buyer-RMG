@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import type { LucideIcon } from 'lucide-react';
 import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
@@ -6,6 +6,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Upload,
   FileText,
+  FileSpreadsheet,
   CheckCircle,
   XCircle,
   Filter,
@@ -34,6 +35,7 @@ import {
   TimerOff,
   CircleDot,
 } from 'lucide-react';
+import axios from 'axios';
 import { buyerService } from '../../services/buyerService';
 import { useToast } from '../../contexts/ToastContext';
 import { BuyerPageHero } from '../../components/BuyerPageHero';
@@ -56,17 +58,33 @@ import {
 import {
   PAYMENT_TERMS_PERCENT_OPTIONS,
   WARRANTY_MONTHS_OPTIONS,
-  LEAD_TIME_DAYS_OPTIONS,
   VAT_PERCENT_OPTIONS,
   DEFAULT_VAT_PERCENT,
 } from '../../constants/quotationEvaluation';
+import { isQuotationFormReady } from '../../utils/quotationCommercialValidation';
 import {
-  validateQuotationCommercialFields,
-  isQuotationCommercialComplete,
-} from '../../utils/quotationCommercialValidation';
+  computeLeadTimeDaysFromDelivery,
+  formatDdMmYyyyFromYmd,
+  coerceToValidCalendarYmd,
+  todayYmdLocal,
+} from '../../utils/quotationLeadTime';
+import { DdMmYyyyDateInput } from '../../components/DdMmYyyyDateInput';
 import CustomSelect from '../../components/CustomSelect';
 import { VndIntegerInput } from '../../components/VndIntegerInput';
 import { quotationLineAmounts, normalizeVatPercentString, roundQuotationQty } from '../../utils/quotationLine';
+import { applyRfqQuotationExcelImport } from '../../utils/applyRfqQuotationExcelImport';
+
+/** Ngày giao NCC: mặc định = yêu cầu PR; chỉ coi là đã sửa khi state khác yêu cầu. */
+function resolveItemDeliveryYmd(
+  desiredDeliveryDate: string | null | undefined,
+  stateRaw: string | undefined
+) {
+  const buyerYmd = coerceToValidCalendarYmd(String(desiredDeliveryDate || '').slice(0, 10));
+  const stateYmd = coerceToValidCalendarYmd((stateRaw ?? '').trim());
+  const deliveryYmd = stateYmd || buyerYmd;
+  const changed = Boolean(buyerYmd && stateYmd && stateYmd !== buyerYmd);
+  return { buyerYmd, deliveryYmd, changed };
+}
 
 /** Badge trạng thái RFQ — icon + màu (parity RFQManagement) */
 const RFQ_STATUS_ROW_UI: Record<string, { label: string; Icon: LucideIcon; className: string }> = {
@@ -109,16 +127,7 @@ const rfqStatusRowFallback: { Icon: LucideIcon; className: string } = {
   className: 'bg-slate-50 text-slate-700 ring-slate-200/80 border-slate-200/70',
 };
 
-const PR_STATUS_AFTER_AWARD = new Set([
-  'SUPPLIER_SELECTED',
-  'RFQ_COMPLETED',
-  'PO_PENDING',
-  'PO_IN_PROGRESS',
-  'PO_ISSUED',
-  'CLOSED',
-  'BUDGET_EXCEPTION',
-  'BUDGET_APPROVED',
-]);
+import { isPrPastRfqApprovalPhase, isRfqAwardComplete } from '../../utils/rfqAwardDisplay';
 
 const AWARDED_STATUS_ROW_UI = {
   label: 'Đã chọn NCC',
@@ -143,10 +152,14 @@ const QuotationManagement = () => {
   const [quotationNumber, setQuotationNumber] = useState<string>('');
   const [itemPrices, setItemPrices] = useState<Record<string, number | undefined>>({}); // prItemId -> đơn giá NCC (VND)
   const [itemVatPercents, setItemVatPercents] = useState<Record<string, string>>({}); // prItemId -> VAT %
+  const [itemNotes, setItemNotes] = useState<Record<string, string>>({});
   const [bulkVatPercent, setBulkVatPercent] = useState<string>(DEFAULT_VAT_PERCENT);
-  const [leadTime, setLeadTime] = useState<string>('');
+  const [importingExcel, setImportingExcel] = useState(false);
+  const importExcelInputRef = useRef<HTMLInputElement>(null);
+  const [quotationDateYmd, setQuotationDateYmd] = useState(() => todayYmdLocal());
   const [paymentTerms, setPaymentTerms] = useState<string>('');
-  const [warranty, setWarranty] = useState<string>('');
+  const [itemDeliveryDates, setItemDeliveryDates] = useState<Record<string, string>>({});
+  const [itemWarrantyMonths, setItemWarrantyMonths] = useState<Record<string, string>>({});
   const [isCreatingNew, setIsCreatingNew] = useState(true); // true = create new, false = upload to existing
   
   // Create new supplier modal
@@ -213,20 +226,73 @@ const QuotationManagement = () => {
       setQuotationNumber('');
       setItemPrices({});
       setItemVatPercents({});
+      setItemNotes({});
       setBulkVatPercent(DEFAULT_VAT_PERCENT);
-      setLeadTime('');
+      setQuotationDateYmd(todayYmdLocal());
       setPaymentTerms('');
-      setWarranty('');
+      setItemDeliveryDates({});
+      setItemWarrantyMonths({});
       setUploadFiles([]);
       setIsCreatingNew(true);
       setSelectedQuotationId('');
     }
   }, [showUploadModal]);
 
+  useEffect(() => {
+    if (showUploadModal && isCreatingNew) {
+      setQuotationDateYmd(todayYmdLocal());
+    }
+  }, [showUploadModal, isCreatingNew]);
+
+  const prItemIds = useMemo(
+    () => (rfqDetails?.purchaseRequest?.items ?? []).map((item: { id: string }) => item.id),
+    [rfqDetails?.purchaseRequest?.items]
+  );
+
+  const headerCommercialPreview = useMemo(() => {
+    const items = rfqDetails?.purchaseRequest?.items ?? [];
+    const resolveDeliveryYmd = (item: { id: string; desiredDeliveryDate?: string | null }) => {
+      const fromState = itemDeliveryDates[item.id]?.trim();
+      const raw = fromState || String(item.desiredDeliveryDate || '').slice(0, 10);
+      return coerceToValidCalendarYmd(raw);
+    };
+
+    const leadDays = items
+      .map((item: { id: string; desiredDeliveryDate?: string | null }) =>
+        computeLeadTimeDaysFromDelivery(resolveDeliveryYmd(item), quotationDateYmd)
+      )
+      .filter((d: number | null): d is number => d != null);
+
+    let finalDeliveryDateYmd = '';
+    for (const item of items) {
+      const ymd = resolveDeliveryYmd(item);
+      if (!ymd) continue;
+      if (!finalDeliveryDateYmd || ymd > finalDeliveryDateYmd) finalDeliveryDateYmd = ymd;
+    }
+
+    const warrantyVals = prItemIds
+      .map((id: string) => Number(itemWarrantyMonths[id]))
+      .filter((n: number) => Number.isFinite(n));
+
+    return {
+      leadTimeGiaoHang: leadDays.length ? Math.max(...leadDays) : null,
+      finalDeliveryDateYmd: finalDeliveryDateYmd || null,
+      warrantyMax: warrantyVals.length ? Math.max(...warrantyVals) : null,
+    };
+  }, [
+    rfqDetails?.purchaseRequest?.items,
+    prItemIds,
+    itemDeliveryDates,
+    itemWarrantyMonths,
+    quotationDateYmd,
+  ]);
+
   // Reset item prices / VAT when RFQ changes
   useEffect(() => {
     if (!selectedRFQId || !rfqDetails?.purchaseRequest?.items) {
       setItemPrices({});
+      setItemDeliveryDates({});
+      setItemWarrantyMonths({});
       setItemVatPercents({});
       return;
     }
@@ -245,6 +311,29 @@ const QuotationManagement = () => {
         }
       });
       return next;
+    });
+    setItemDeliveryDates((prev) => {
+      const next = { ...prev };
+      let changed = false;
+      rfqDetails.purchaseRequest.items.forEach((item: any) => {
+        if (!item.id) return;
+        if (!(item.id in next)) {
+          const buyerYmd = coerceToValidCalendarYmd(
+            String(item.desiredDeliveryDate || '').slice(0, 10)
+          );
+          if (buyerYmd) {
+            next[item.id] = buyerYmd;
+            changed = true;
+          }
+          return;
+        }
+        const fixed = coerceToValidCalendarYmd(next[item.id]);
+        if (fixed && next[item.id] !== fixed) {
+          next[item.id] = fixed;
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
     });
   }, [selectedRFQId, rfqDetails?.purchaseRequest?.items, bulkVatPercent]);
 
@@ -428,13 +517,14 @@ const QuotationManagement = () => {
   }, [rfqsRows, filteredQuotations.length]);
 
   const toggleValidityMutation = useMutation({
-    mutationFn: async ({ id, isValid }: { id: string; isValid: boolean }) => {
-      // TODO: Replace with actual API call
-      // return buyerService.toggleQuotationValidity(id, isValid);
-      throw new Error('API not implemented yet');
-    },
-    onSuccess: () => {
+    mutationFn: ({ id, isValid }: { id: string; isValid: boolean }) =>
+      buyerService.validateQuotation(id, isValid),
+    onSuccess: (_data, { isValid }) => {
       queryClient.invalidateQueries({ queryKey: ['buyer-quotations'] });
+      showSuccess(isValid ? 'Đã đánh dấu báo giá hợp lệ' : 'Đã đánh dấu báo giá không hợp lệ');
+    },
+    onError: (error: any) => {
+      showError(error.response?.data?.error || error.message || 'Không cập nhật được trạng thái báo giá');
     },
   });
 
@@ -471,6 +561,28 @@ const QuotationManagement = () => {
         const safeUnitPrice = Math.round(itemPrices[item.id] ?? 0);
         const qty = roundQuotationQty(Number(item.qty || 1));
         const vatPercent = Number(getItemVatPercent(item.id));
+        const deliveryDate = resolveItemDeliveryYmd(
+          item.desiredDeliveryDate,
+          itemDeliveryDates[item.id]
+        ).deliveryYmd;
+        if (!deliveryDate) {
+          throw new Error(
+            `Dòng ${item.lineNo || index + 1}: nhập ngày giao NCC hợp lệ (dd/mm/yyyy)`
+          );
+        }
+        const leadTimeDays = computeLeadTimeDaysFromDelivery(
+          deliveryDate,
+          quotationDateYmd
+        );
+        if (!leadTimeDays) {
+          throw new Error(
+            `Dòng ${item.lineNo || index + 1}: ngày giao NCC phải sau ngày nhập báo giá (${formatDdMmYyyyFromYmd(quotationDateYmd)})`
+          );
+        }
+        const warrantyMonths = Number(itemWarrantyMonths[item.id]);
+        if (!Number.isFinite(warrantyMonths)) {
+          throw new Error(`Dòng ${item.lineNo || index + 1}: chọn bảo hành (tháng)`);
+        }
         return {
           purchaseRequestItemId: item.id,
           lineNo: item.lineNo || index + 1,
@@ -479,7 +591,10 @@ const QuotationManagement = () => {
           unit: item.unit,
           unitPrice: safeUnitPrice,
           vatPercent,
-          notes: '',
+          deliveryDate,
+          leadTimeDays,
+          warrantyMonths,
+          notes: itemNotes[item.id] || '',
         };
       });
 
@@ -487,9 +602,6 @@ const QuotationManagement = () => {
       if (missing.length > 0) {
         throw new Error('Vui lòng nhập đơn giá NCC cho tất cả các item (không nhập tổng)');
       }
-
-      const commercialErr = validateQuotationCommercialFields(leadTime, paymentTerms, warranty);
-      if (commercialErr) throw new Error(commercialErr);
 
       const totalAmount = items.reduce((sum: number, i: { qty: number; unitPrice: number; vatPercent: number }) => {
         const line = quotationLineAmounts(i.qty, i.unitPrice, i.vatPercent);
@@ -502,9 +614,8 @@ const QuotationManagement = () => {
         quotationNumber: quotationNumber || undefined,
         totalAmount,
         currency: rfqDetails.purchaseRequest?.currency || 'VND',
-        leadTime: parseInt(leadTime, 10),
         paymentTerms: `${paymentTerms}%`,
-        warranty: `${warranty} tháng`,
+        quotationDate: quotationDateYmd,
         items,
       };
 
@@ -527,7 +638,12 @@ const QuotationManagement = () => {
     },
     onError: (error: any) => {
       console.error('Create quotation error:', error);
-      const errorMessage = error.response?.data?.error || error.message || 'Tạo báo giá thất bại. Vui lòng thử lại.';
+      const data = error.response?.data;
+      const errorMessage =
+        data?.error ||
+        data?.message ||
+        error.message ||
+        'Tạo báo giá thất bại. Vui lòng thử lại.';
       showError(errorMessage);
     },
   });
@@ -568,13 +684,15 @@ const QuotationManagement = () => {
   });
 
   const formatPrice = (price: number | null | undefined) => {
-    if (price === null || price === undefined || Number.isNaN(Number(price))) {
+    const n = Number(price);
+    if (price === null || price === undefined || !Number.isFinite(n)) {
       return '—';
     }
     return new Intl.NumberFormat('vi-VN', {
       style: 'currency',
       currency: 'VND',
-    }).format(Number(price));
+      maximumFractionDigits: 0,
+    }).format(Math.round(n));
   };
 
   const rfqList = useMemo(() => rfqsRows ?? [], [rfqsRows]);
@@ -740,7 +858,14 @@ const QuotationManagement = () => {
                   </thead>
                   <tbody className={buyerInteractiveTableBodyClass}>
                   {rfqList.map((rfq: any, rfqIdx: number) => {
-                    const awardedDone = PR_STATUS_AFTER_AWARD.has(rfq.prStatus);
+                    const awardedDone =
+                      rfq.awardComplete === true ||
+                      isRfqAwardComplete({
+                        rfqStatus: rfq.status,
+                        prStatus: rfq.prStatus,
+                        itemIds: rfq.itemIds,
+                      }) ||
+                      isPrPastRfqApprovalPhase(rfq.prStatus);
                     const preset = awardedDone ? AWARDED_STATUS_ROW_UI : RFQ_STATUS_ROW_UI[rfq.status];
                     const StatusIcon = preset?.Icon ?? rfqStatusRowFallback.Icon;
                     const statusLabel = preset?.label ?? (awardedDone ? 'Đã chọn NCC' : rfq.status);
@@ -931,7 +1056,12 @@ const QuotationManagement = () => {
               const isExpanded = expandedRFQs.has(rfqGroup.rfqId);
               const quotationsCount = rfqGroup.quotations.length;
               const rfqStatus = rfqGroup.rfqStatus || 'DRAFT';
-              const awardedDone = PR_STATUS_AFTER_AWARD.has(String(rfqGroup.prStatus || ''));
+              const awardedDone =
+                isPrPastRfqApprovalPhase(rfqGroup.prStatus) ||
+                isRfqAwardComplete({
+                  rfqStatus: rfqStatus,
+                  prStatus: rfqGroup.prStatus,
+                });
 
               return (
                 <div key={rfqGroup.rfqId} className="transition-colors hover:bg-slate-50/50">
@@ -1302,6 +1432,9 @@ const QuotationManagement = () => {
                         <label className="block text-sm font-medium text-slate-700 mb-2">
                           Nhà cung cấp <span className="text-red-500">*</span>
                         </label>
+                        <p className="text-xs text-slate-500 mb-2">
+                          Có thể <strong>Import Excel NCC</strong> trước — hệ thống tự nhận NCC từ file mẫu đã tải.
+                        </p>
                         <div className="flex gap-2">
                           <CustomSelect
                             value={supplierId}
@@ -1335,6 +1468,122 @@ const QuotationManagement = () => {
                             Tạo mới
                           </button>
                         </div>
+                        <div className="mt-3 flex flex-wrap items-center gap-2">
+                          <input
+                            ref={importExcelInputRef}
+                            type="file"
+                            accept=".xlsx,.xls"
+                            className="hidden"
+                            onChange={async (e) => {
+                              const file = e.target.files?.[0];
+                              e.target.value = '';
+                              if (!file || !selectedRFQId) return;
+                              setImportingExcel(true);
+                              try {
+                                const data = await buyerService.importRFQQuotationExcel(
+                                  selectedRFQId,
+                                  file,
+                                  quotationDateYmd
+                                );
+                                const applied = applyRfqQuotationExcelImport(data);
+                                if (data.supplierId) {
+                                  setSupplierId(data.supplierId);
+                                }
+                                setQuotationNumber(applied.quotationNumber);
+                                setPaymentTerms(applied.paymentTerms);
+                                setQuotationDateYmd(applied.quotationDateYmd);
+                                setItemPrices((prev) => ({ ...prev, ...applied.itemPrices }));
+                                setItemVatPercents((prev) => ({
+                                  ...prev,
+                                  ...applied.itemVatPercents,
+                                }));
+                                setItemDeliveryDates((prev) => {
+                                  const next = { ...prev };
+                                  for (const [itemId, ymd] of Object.entries(
+                                    applied.itemDeliveryDates
+                                  )) {
+                                    if (ymd) next[itemId] = ymd;
+                                  }
+                                  return next;
+                                });
+                                setItemWarrantyMonths((prev) => ({
+                                  ...prev,
+                                  ...applied.itemWarrantyMonths,
+                                }));
+                                setItemNotes((prev) => ({ ...prev, ...applied.itemNotes }));
+                                const nccLabel = data.supplierName
+                                  ? `NCC: ${data.supplierName}. `
+                                  : '';
+                                if (data.warnings.length) {
+                                  showInfo(
+                                    `${nccLabel}Đã import ${data.items.length} dòng. ${data.warnings.join(' ')}`
+                                  );
+                                } else {
+                                  showSuccess(
+                                    `${nccLabel}Đã import ${data.items.length} dòng từ file Excel.`
+                                  );
+                                }
+                              } catch (err: unknown) {
+                                const msg =
+                                  axios.isAxiosError(err) &&
+                                  typeof err.response?.data?.error === 'string'
+                                    ? err.response.data.error
+                                    : err instanceof Error
+                                      ? err.message
+                                      : 'Import Excel thất bại';
+                                showError(msg);
+                              } finally {
+                                setImportingExcel(false);
+                              }
+                            }}
+                          />
+                          <button
+                            type="button"
+                            disabled={!selectedRFQId || importingExcel}
+                            onClick={() => importExcelInputRef.current?.click()}
+                            className="inline-flex items-center gap-2 rounded-soft border border-indigo-200 bg-indigo-50 px-3 py-2 text-sm font-medium text-indigo-800 transition hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            <FileSpreadsheet className="h-4 w-4" />
+                            {importingExcel ? 'Đang import…' : 'Import Excel NCC'}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={!selectedRFQId || !supplierId}
+                            onClick={async () => {
+                              if (!selectedRFQId || !supplierId) {
+                                showWarning('Chọn RFQ và NCC trước khi tải mẫu Excel');
+                                return;
+                              }
+                              try {
+                                const rfqRow = rfqsRows.find((r: { id: string }) => r.id === selectedRFQId);
+                                const supplierRow = suppliers.find(
+                                  (s: { id: string }) => s.id === supplierId
+                                );
+                                await buyerService.downloadRFQQuotationExcel(
+                                  selectedRFQId,
+                                  supplierId,
+                                  {
+                                    rfqNumber:
+                                      rfqRow?.rfqNumber ?? rfqDetails?.rfqNumber ?? selectedRFQId,
+                                    supplierName: supplierRow?.name ?? 'NCC',
+                                  }
+                                );
+                                showSuccess('Đã tải file mẫu Excel gửi NCC');
+                              } catch (err: unknown) {
+                                showError(
+                                  err instanceof Error ? err.message : 'Tải Excel thất bại'
+                                );
+                              }
+                            }}
+                            className="inline-flex items-center gap-2 rounded-soft border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            <FileText className="h-4 w-4" />
+                            Tải mẫu Excel
+                          </button>
+                          <p className="w-full text-xs text-slate-500">
+                            File 2 sheet: huong_dan + bao_gia. NCC điền xong → import tại đây.
+                          </p>
+                        </div>
                       </div>
 
                       <div>
@@ -1355,7 +1604,8 @@ const QuotationManagement = () => {
                           Nhập đơn giá NCC từng item <span className="text-red-500">*</span>
                         </label>
                         <p className="text-xs text-slate-500 mb-2">
-                          Nhập đơn giá chưa VAT. Chọn VAT 3%, 5%, 8% hoặc 10% cho từng dòng hoặc áp dụng cho tất cả.
+                          Ngày nhập báo giá: <strong>{formatDdMmYyyyFromYmd(quotationDateYmd)}</strong>.
+                          Lead time mỗi dòng = số ngày từ ngày này đến <strong>ngày giao NCC</strong> (vd 21/5 → 30/5 = 9 ngày).
                         </p>
                         <div className="mb-3 flex flex-wrap items-end gap-2 rounded-soft border border-slate-200 bg-slate-50/80 px-3 py-2.5">
                           <div className="min-w-[120px] flex-1">
@@ -1380,14 +1630,17 @@ const QuotationManagement = () => {
                         </div>
                         <div className="border border-slate-200 rounded-soft overflow-hidden">
                           <div className={buyerWorkspaceTableViewportClass}>
-                          <table className={`${buyerInteractiveTableClass} w-full min-w-[720px] text-sm`}>
+                          <table className={`${buyerInteractiveTableClass} w-full min-w-[980px] text-sm`}>
                             <thead className="sticky top-0 z-10 border-b border-slate-200 bg-slate-100">
                               <tr>
                                 <th className="bg-slate-100 px-3 py-2 text-left font-semibold text-slate-700">Item</th>
-                                <th className="bg-slate-100 px-3 py-2 text-right font-semibold text-slate-700">Số lượng</th>
-                                <th className="bg-slate-100 px-3 py-2 text-right font-semibold text-slate-700">Đơn giá (chưa VAT)</th>
-                                <th className="bg-slate-100 px-3 py-2 text-center font-semibold text-slate-700 w-24">VAT</th>
-                                <th className="bg-slate-100 px-3 py-2 text-right font-semibold text-slate-700">Thành tiền (có VAT)</th>
+                                <th className="bg-slate-100 px-3 py-2 text-right font-semibold text-slate-700">SL</th>
+                                <th className="bg-slate-100 px-3 py-2 text-right font-semibold text-slate-700">Đơn giá</th>
+                                <th className="bg-slate-100 px-3 py-2 text-center font-semibold text-slate-700 w-20">VAT</th>
+                                <th className="bg-slate-100 px-3 py-2 text-center font-semibold text-slate-700 min-w-[130px]">Ngày giao NCC</th>
+                                <th className="bg-slate-100 px-3 py-2 text-center font-semibold text-slate-700 w-24">Lead time</th>
+                                <th className="bg-slate-100 px-3 py-2 text-center font-semibold text-slate-700 w-28">BH (tháng)</th>
+                                <th className="bg-slate-100 px-3 py-2 text-right font-semibold text-slate-700">Thành tiền</th>
                               </tr>
                             </thead>
                             <tbody className={buyerInteractiveTableBodyClass}>
@@ -1396,6 +1649,17 @@ const QuotationManagement = () => {
                                 const qty = roundQuotationQty(Number(item.qty || 1));
                                 const vat = Number(getItemVatPercent(item.id));
                                 const line = quotationLineAmounts(qty, unitPriceNum, vat);
+                                const { buyerYmd, deliveryYmd, changed: nccChangedDate } =
+                                  resolveItemDeliveryYmd(
+                                    item.desiredDeliveryDate,
+                                    itemDeliveryDates[item.id]
+                                  );
+                                const leadDays = deliveryYmd
+                                  ? computeLeadTimeDaysFromDelivery(
+                                      deliveryYmd,
+                                      quotationDateYmd
+                                    )
+                                  : null;
                                 return (
                                   <tr key={item.id} className={`group ${buyerTableDataRowVisual(itemIdx)}`}>
                                     <td className="relative px-3 py-2 text-slate-800">
@@ -1432,6 +1696,66 @@ const QuotationManagement = () => {
                                         ))}
                                       </CustomSelect>
                                     </td>
+                                    <td className="px-3 py-2">
+                                      <div className={buyerTableCellWrapClass}>
+                                        <div
+                                          className={
+                                            nccChangedDate && buyerYmd
+                                              ? 'overflow-hidden rounded-md border border-red-300/90 ring-1 ring-red-200/60'
+                                              : ''
+                                          }
+                                        >
+                                          {nccChangedDate && buyerYmd ? (
+                                            <div
+                                              className="border-b border-red-300/80 bg-red-500 px-2 py-1 text-center text-[10px] font-semibold leading-snug text-white"
+                                              role="note"
+                                              aria-label={`Ngày yêu cầu ban đầu ${formatDdMmYyyyFromYmd(buyerYmd)}`}
+                                            >
+                                              Yêu cầu: {formatDdMmYyyyFromYmd(buyerYmd)}
+                                            </div>
+                                          ) : null}
+                                          <DdMmYyyyDateInput
+                                            valueYmd={deliveryYmd}
+                                            minYmd={quotationDateYmd}
+                                            onChangeYmd={(ymd) =>
+                                              setItemDeliveryDates((p) => ({
+                                                ...p,
+                                                [item.id]: ymd,
+                                              }))
+                                            }
+                                            className={`w-full min-w-[8.5rem] px-2 py-1.5 text-sm text-center ${
+                                              nccChangedDate && buyerYmd
+                                                ? 'rounded-b-md border-0 bg-white'
+                                                : 'rounded border border-slate-300'
+                                            }`}
+                                          />
+                                        </div>
+                                      </div>
+                                    </td>
+                                    <td className="px-3 py-2 text-center text-slate-700">
+                                      {leadDays != null ? (
+                                        <span className="font-semibold text-indigo-700">{leadDays} ngày</span>
+                                      ) : (
+                                        <span className="text-slate-400">—</span>
+                                      )}
+                                    </td>
+                                    <td className="px-3 py-2">
+                                      <CustomSelect
+                                        value={itemWarrantyMonths[item.id] ?? ''}
+                                        onChange={(e) =>
+                                          setItemWarrantyMonths((p) => ({
+                                            ...p,
+                                            [item.id]: e.target.value,
+                                          }))
+                                        }
+                                        className="w-full px-2 py-1.5 border border-slate-300 rounded text-sm"
+                                      >
+                                        <option value="">--</option>
+                                        {WARRANTY_MONTHS_OPTIONS.filter((o) => o.value).map((opt) => (
+                                          <option key={opt.value} value={opt.value}>{opt.label}</option>
+                                        ))}
+                                      </CustomSelect>
+                                    </td>
                                     <td className="px-3 py-2 text-right font-medium text-slate-800">
                                       <div className={buyerTableCellWrapClass}>
                                         {unitPriceNum > 0 ? formatPrice(line.total) : '-'}
@@ -1462,36 +1786,35 @@ const QuotationManagement = () => {
                         </div>
                       </div>
 
-                      <div className="grid grid-cols-2 gap-4">
+                      <div className="rounded-soft border border-indigo-100 bg-indigo-50/60 px-4 py-3 text-sm text-slate-700">
                         <div>
-                          <label className="block text-sm font-medium text-slate-700 mb-2">
-                            Lead time (ngày) <span className="text-red-600">*</span>
-                          </label>
-                          <CustomSelect
-                            value={leadTime}
-                            onChange={(e) => setLeadTime(e.target.value)}
-                            required
-                            className="w-full px-4 py-2 border border-slate-300 rounded-soft focus:outline-none focus:ring-2 focus:ring-blue-600/20 focus:border-blue-600"
-                          >
-                            {LEAD_TIME_DAYS_OPTIONS.map((opt) => (
-                              <option key={opt.value || 'empty'} value={opt.value}>{opt.label}</option>
-                            ))}
-                          </CustomSelect>
+                          <strong>Tổng hợp (tự tính từ các dòng):</strong>
                         </div>
-                        <div>
-                          <label className="block text-sm font-medium text-slate-700 mb-2">
-                            Bảo hành (tháng) <span className="text-red-600">*</span>
-                          </label>
-                          <CustomSelect
-                            value={warranty}
-                            onChange={(e) => setWarranty(e.target.value)}
-                            required
-                            className="w-full px-4 py-2 border border-slate-300 rounded-soft focus:outline-none focus:ring-2 focus:ring-blue-600/20 focus:border-blue-600"
-                          >
-                            {WARRANTY_MONTHS_OPTIONS.map((opt) => (
-                              <option key={opt.value || 'empty'} value={opt.value}>{opt.label}</option>
-                            ))}
-                          </CustomSelect>
+                        <div className="mt-1 flex flex-wrap gap-x-6 gap-y-1">
+                          <span>
+                            Lead time giao hàng (cuối cùng):{' '}
+                            <strong className="text-indigo-800">
+                              {headerCommercialPreview.leadTimeGiaoHang != null
+                                ? `${headerCommercialPreview.leadTimeGiaoHang} ngày`
+                                : '—'}
+                            </strong>
+                          </span>
+                          <span>
+                            Ngày giao hàng cuối cùng:{' '}
+                            <strong className="text-indigo-800">
+                              {headerCommercialPreview.finalDeliveryDateYmd
+                                ? formatDdMmYyyyFromYmd(headerCommercialPreview.finalDeliveryDateYmd)
+                                : '—'}
+                            </strong>
+                          </span>
+                          <span>
+                            Bảo hành (max):{' '}
+                            <strong className="text-indigo-800">
+                              {headerCommercialPreview.warrantyMax != null
+                                ? `${headerCommercialPreview.warrantyMax} tháng`
+                                : '—'}
+                            </strong>
+                          </span>
                         </div>
                       </div>
 
@@ -1615,7 +1938,14 @@ const QuotationManagement = () => {
                         !rfqDetails.purchaseRequest.items.every(
                           (item: any) => (itemPrices[item.id] ?? 0) > 0
                         ) ||
-                        !isQuotationCommercialComplete(leadTime, paymentTerms, warranty)
+                        !isQuotationFormReady(
+                          paymentTerms,
+                          prItemIds,
+                          itemDeliveryDates,
+                          itemWarrantyMonths,
+                          quotationDateYmd,
+                          itemPrices
+                        )
                       }
                       className="flex-1 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 px-4 py-2.5 font-semibold text-white shadow-lg shadow-indigo-200 transition-all hover:-translate-y-0.5 hover:from-indigo-700 hover:to-violet-700 disabled:cursor-not-allowed disabled:opacity-50"
                     >

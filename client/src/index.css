@@ -19,6 +19,46 @@
     transform-origin: center;
     will-change: transform;
   }
+
+  /** Ẩn thanh cuộn — dùng trên main dashboard và khối cuộn nội bộ */
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+    width: 0;
+    height: 0;
+  }
+
+  .scrollbar-hide::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+}
+
+/**
+ * Shell dashboard 100dvh: cuộn chỉ trong [data-dashboard-main-scroll], không hiện scrollbar viewport.
+ */
+html:has([data-dashboard-shell]),
+html:has([data-dashboard-shell]) body {
+  overflow-y: hidden;
+  height: 100%;
+}
+
+[data-dashboard-main-scroll] {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+[data-dashboard-main-scroll]::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+[data-dashboard-main-scroll]::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 @media (prefers-reduced-motion: reduce) {

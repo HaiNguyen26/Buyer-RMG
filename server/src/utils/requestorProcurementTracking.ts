@@ -4,6 +4,7 @@ import {
   lineReceiveCap,
   toPoNum,
 } from './poLineConfirmation';
+import { parsePoItemIdsJson } from './procurementItemGates';
 import { normalizeVatPercent } from './quotationLine';
 
 /** PO đã lập giá (CREATED+) — dùng cho giá trị procurement. */
@@ -44,7 +45,9 @@ export type RequestorItemStatusKey =
   | 'RFQ'
   | 'PENDING_APPROVAL'
   | 'PROCUREMENT'
-  | 'CANCELLED';
+  | 'CANCELLED'
+  | 'LINE_CANCEL_PENDING'
+  | 'AWAITING_REORDER';
 
 export type RequestorProcurementItemRow = {
   itemId: string;
@@ -53,10 +56,21 @@ export type RequestorProcurementItemRow = {
   qtyOrdered: number;
   qtyReceived: number;
   qtyCap: number;
+  /** SL còn chờ (sau hủy dòng PO hoặc đang chờ duyệt hủy). */
+  qtyWaiting: number;
+  /** ETA hiện tại (ưu tiên PO xác nhận → báo giá NCC → ngày yêu cầu PR). */
   eta: string | null;
+  /** Ngày giao requestor ghi khi tạo/sửa PR (yyyy-mm-dd). */
+  etaOriginal: string | null;
+  /** ETA thực tế từ báo giá/PO khi khác etaOriginal. */
+  etaRevised: string | null;
   statusKey: RequestorItemStatusKey;
   statusLabel: string;
   poNumber: string | null;
+  /** Lý do Buyer nhập khi hủy phần còn lại trên PO. */
+  lineCancelReason: string | null;
+  /** SL đã hủy trên dòng PO (phần còn lại chưa nhận). */
+  cancelledRemainingQty: number | null;
 };
 
 export type BusinessTimelineStage = {
@@ -78,6 +92,10 @@ export type RequestorDeliverySummary = {
   totalCount: number;
   nextEta: string | null;
   partialCount: number;
+  /** Số dòng PR còn chờ mua lại / chờ duyệt hủy dòng PO. */
+  waitingReorderCount: number;
+  /** Tổng SL còn chờ (sum qtyWaiting). */
+  waitingReorderQty: number;
 };
 
 const APPROVAL_PENDING_STATUSES = new Set([
@@ -110,6 +128,59 @@ const PROCUREMENT_PR_STATUSES = new Set([
   ...APPROVED_PR_STATUSES,
 ]);
 
+/** PR còn chờ Buyer lập/gửi PO — Requestor không coi nhập kho / FULFILLED DB là "Hoàn tất". */
+export const PR_STATUSES_AWAITING_PO_CREATION = new Set([
+  'RFQ_COMPLETED',
+  'PO_PENDING',
+  'SUPPLIER_SELECTED',
+  'QUOTATION_RECEIVED',
+]);
+
+/** PO đã gửi NCC trở đi — mới phản ánh tiến độ nhận kho trên tracking Requestor. */
+const PO_STATUSES_WAREHOUSE_PROGRESS = new Set([
+  'SENT',
+  'ISSUED',
+  'CONFIRMED',
+  'PARTIAL_RECEIVED',
+  'FULLY_RECEIVED',
+  'CLOSED',
+]);
+
+function poLinesAreAllPreSent(poLines: PoLineInput[]): boolean {
+  const active = poLines.filter((l) => l.lineStatus !== 'CANCELLED');
+  if (active.length === 0) return true;
+  return active.every((l) => !PO_STATUSES_WAREHOUSE_PROGRESS.has(l.purchaseOrder.status));
+}
+
+/** Chưa giai đoạn nhập kho: chờ tạo PO, hoặc mới có PO draft/chờ duyệt (mọi trạng thái PR). */
+export function isPreWarehouseReceiptPhase(prStatus: string, poLines: PoLineInput[]): boolean {
+  if (['CLOSED', 'PAYMENT_DONE'].includes(prStatus)) return false;
+  if (PR_STATUSES_AWAITING_PO_CREATION.has(prStatus)) return true;
+  if (poLines.length > 0 && poLinesAreAllPreSent(poLines)) return true;
+  return false;
+}
+
+function prAllowsWarehouseCompletion(prStatus: string, poLines: PoLineInput[]): boolean {
+  return !isPreWarehouseReceiptPhase(prStatus, poLines);
+}
+
+function warehouseProgressEligible(poLine: PoLineInput | null): boolean {
+  if (!poLine) return false;
+  return PO_STATUSES_WAREHOUSE_PROGRESS.has(poLine.purchaseOrder.status);
+}
+
+function lineWarehouseFullyReceived(
+  trackingLine: PoLineInput | null,
+  received: number,
+  qtyCap: number
+): boolean {
+  return (
+    warehouseProgressEligible(trackingLine) &&
+    qtyCap > 0 &&
+    received + 1e-9 >= qtyCap
+  );
+}
+
 const ITEM_STATUS_LABELS: Record<RequestorItemStatusKey, string> = {
   REVISION_REQUIRED: 'Cần chỉnh sửa',
   REJECTED: 'Từ chối',
@@ -128,6 +199,8 @@ const ITEM_STATUS_LABELS: Record<RequestorItemStatusKey, string> = {
   PENDING_APPROVAL: 'Chờ duyệt',
   PROCUREMENT: 'Đang mua hàng',
   CANCELLED: 'Đã hủy',
+  LINE_CANCEL_PENDING: 'Chờ duyệt hủy dòng',
+  AWAITING_REORDER: 'Chờ mua lại',
 };
 
 export function getRequestorPrStatusLabel(status: string): string {
@@ -162,21 +235,31 @@ type PrItemInput = {
   description: string;
   partNo: string | null;
   qty: Prisma.Decimal | number;
+  purchaseQty?: Prisma.Decimal | number;
   status: string;
   departmentItemOutcome: string | null;
   branchItemOutcome: string | null;
   desiredDeliveryDate: Date | null;
 };
 
-type PoLineInput = {
+export type RequestorTrackingPoLineInput = {
   id: string;
   purchaseRequestItemId: string;
-  qty: Prisma.Decimal;
+  qty: Prisma.Decimal | number;
   confirmedQty: Prisma.Decimal | null;
   expectedDeliveryDate: Date | null;
   lineStatus: string;
-  purchaseOrder: { poNumber: string; status: string };
+  lineCancelReason?: string | null;
+  cancelledRemainingQty?: number | null;
+  purchaseOrder: {
+    poNumber: string;
+    status: string;
+    cancelRequestReason?: string | null;
+    cancelRequestedPoItemIds?: string[] | null;
+  };
 };
+
+type PoLineInput = RequestorTrackingPoLineInput;
 
 function itemLabel(partNo: string | null, description: string): string {
   return (partNo?.trim() || description?.trim() || '—').trim();
@@ -187,15 +270,64 @@ function isoDateOnly(d: Date | null | undefined): string | null {
   return d.toISOString().slice(0, 10);
 }
 
+export type QuotationDeliverySelectionInput = {
+  purchaseRequestItemId: string | null;
+  quotation: {
+    items: Array<{
+      purchaseRequestItemId: string | null;
+      deliveryDate: Date | null;
+      leadTimeDays: number | null;
+    }>;
+  };
+};
+
+/** Ngày giao theo dòng từ NCC đã được Buyer Leader chọn (quotation item). */
+export function buildSelectedQuotationDeliveryByPrItem(
+  selections: QuotationDeliverySelectionInput[]
+): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const sel of selections) {
+    const prItemId = sel.purchaseRequestItemId;
+    if (!prItemId) continue;
+    const qLine = sel.quotation.items.find(
+      (it) => it.purchaseRequestItemId === prItemId
+    );
+    if (!qLine) continue;
+    const ymd = isoDateOnly(qLine.deliveryDate);
+    if (ymd) map.set(prItemId, ymd);
+  }
+  return map;
+}
+
+function resolveItemEtaFields(
+  item: PrItemInput,
+  trackingLine: PoLineInput | null,
+  quotationDeliveryByPrItem?: Map<string, string>
+): { eta: string | null; etaOriginal: string | null; etaRevised: string | null } {
+  const etaOriginal = isoDateOnly(item.desiredDeliveryDate);
+  const poEta = isoDateOnly(trackingLine?.expectedDeliveryDate);
+  const quotationEta = quotationDeliveryByPrItem?.get(item.id) ?? null;
+  const etaCurrent = poEta ?? quotationEta ?? etaOriginal;
+  const etaRevised =
+    etaOriginal && etaCurrent && etaOriginal !== etaCurrent ? etaCurrent : null;
+  return {
+    eta: etaCurrent,
+    etaOriginal,
+    etaRevised,
+  };
+}
+
 function pickPrimaryPoLine(
   prItemId: string,
   poLines: PoLineInput[]
 ): PoLineInput | null {
-  const matches = poLines.filter((l) => l.purchaseRequestItemId === prItemId);
+  const matches = poLines.filter(
+    (l) => l.purchaseRequestItemId === prItemId && l.lineStatus !== 'CANCELLED'
+  );
   if (!matches.length) return null;
   const rank = (s: string) => {
     if (['CONFIRMED', 'PARTIAL_RECEIVED', 'SENT', 'ISSUED'].includes(s)) return 0;
-    if (['CREATED', 'SUBMITTED', 'APPROVED'].includes(s)) return 1;
+    if (['CREATED', 'SUBMITTED', 'APPROVED', 'CANCEL_REQUESTED'].includes(s)) return 1;
     return 2;
   };
   matches.sort(
@@ -206,25 +338,96 @@ function pickPrimaryPoLine(
   return matches[0]!;
 }
 
+function pickCancelledPoLine(prItemId: string, poLines: PoLineInput[]): PoLineInput | null {
+  const matches = poLines.filter(
+    (l) => l.purchaseRequestItemId === prItemId && l.lineStatus === 'CANCELLED'
+  );
+  if (!matches.length) return null;
+  return matches[matches.length - 1]!;
+}
+
+function findPendingCancelPoLine(prItemId: string, poLines: PoLineInput[]): PoLineInput | null {
+  for (const l of poLines) {
+    if (l.purchaseRequestItemId !== prItemId) continue;
+    if (l.purchaseOrder.status !== 'CANCEL_REQUESTED') continue;
+    const ids = l.purchaseOrder.cancelRequestedPoItemIds;
+    if (ids?.includes(l.id)) return l;
+  }
+  return null;
+}
+
+/** Map PR purchase orders → tracking PO lines (cancel reason + pending cancel meta). */
+export function mapRequestorTrackingPoLines(
+  purchaseOrders: Array<{
+    poNumber: string;
+    status: string | { toString(): string };
+    rejectReason?: string | null;
+    cancelRequestedPoItemIds?: string | null;
+    items: Array<{
+      id: string;
+      purchaseRequestItemId: string;
+      qty: Prisma.Decimal | number;
+      confirmedQty: Prisma.Decimal | null;
+      expectedDeliveryDate: Date | null;
+      lineStatus: string;
+      lineCancelReason?: string | null;
+      cancelledRemainingQty?: Prisma.Decimal | number | null;
+    }>;
+  }>
+): RequestorTrackingPoLineInput[] {
+  return purchaseOrders.flatMap((po) => {
+    const poStatus = String(po.status);
+    const cancelIds = parsePoItemIdsJson(po.cancelRequestedPoItemIds);
+    const cancelRequestReason = poStatus === 'CANCEL_REQUESTED' ? po.rejectReason ?? null : null;
+    return po.items.map((it) => ({
+      id: it.id,
+      purchaseRequestItemId: it.purchaseRequestItemId,
+      qty: it.qty,
+      confirmedQty: it.confirmedQty,
+      expectedDeliveryDate: it.expectedDeliveryDate,
+      lineStatus: String(it.lineStatus ?? 'OPEN'),
+      lineCancelReason: it.lineCancelReason ?? null,
+      cancelledRemainingQty:
+        it.cancelledRemainingQty != null ? toPoNum(it.cancelledRemainingQty as Prisma.Decimal) : null,
+      purchaseOrder: {
+        poNumber: po.poNumber,
+        status: poStatus,
+        cancelRequestReason,
+        cancelRequestedPoItemIds: cancelIds,
+      },
+    }));
+  });
+}
+
 export function deriveItemProcurementRow(
   item: PrItemInput,
   poLines: PoLineInput[],
   receivedByPoItemId: Map<string, number>,
-  prStatus: string
+  prStatus: string,
+  quotationDeliveryByPrItem?: Map<string, string>
 ): RequestorProcurementItemRow {
   const qtyOrdered = toPoNum(item.qty as Prisma.Decimal);
+  const purchaseQtyOpen = toPoNum((item.purchaseQty ?? 0) as Prisma.Decimal);
+  const cancelledLine = pickCancelledPoLine(item.id, poLines);
+  const pendingCancelLine = findPendingCancelPoLine(item.id, poLines);
   const poLine = pickPrimaryPoLine(item.id, poLines);
-  const received = poLine ? receivedByPoItemId.get(poLine.id) ?? 0 : 0;
+  const trackingLine = poLine ?? pendingCancelLine ?? cancelledLine;
+  const received = trackingLine ? receivedByPoItemId.get(trackingLine.id) ?? 0 : 0;
   const confirmed =
-    poLine?.confirmedQty != null ? toPoNum(poLine.confirmedQty) : null;
-  const qtyCap = poLine
-    ? lineReceiveCap(poLine.confirmedQty, poLine.qty)
+    trackingLine?.confirmedQty != null ? toPoNum(trackingLine.confirmedQty) : null;
+  const qtyCap = trackingLine
+    ? lineReceiveCap(trackingLine.confirmedQty, trackingLine.qty)
     : qtyOrdered;
-  const eta =
-    isoDateOnly(poLine?.expectedDeliveryDate) ??
-    isoDateOnly(item.desiredDeliveryDate);
+  const { eta, etaOriginal, etaRevised } = resolveItemEtaFields(
+    item,
+    trackingLine,
+    quotationDeliveryByPrItem
+  );
 
+  let qtyWaiting = 0;
+  let lineCancelReason: string | null = null;
   let statusKey: RequestorItemStatusKey = 'PROCUREMENT';
+  let poNumber: string | null = trackingLine?.purchaseOrder.poNumber ?? null;
 
   if (prStatus === 'CANCELLED') statusKey = 'CANCELLED';
   else if (
@@ -240,9 +443,54 @@ export function deriveItemProcurementRow(
   else if (item.departmentItemOutcome === 'ON_HOLD' || item.branchItemOutcome === 'ON_HOLD')
     statusKey = 'ON_HOLD';
   else if (item.status === 'FROM_STOCK') statusKey = 'FROM_STOCK';
-  else if (item.status === 'FULFILLED' || (qtyCap > 0 && received + 1e-9 >= qtyCap))
+  else if (isPreWarehouseReceiptPhase(prStatus, poLines)) {
+    /** Chờ tạo PO / PO nháp — không coi FULFILLED DB hay GRN cũ là đã về kho. */
+    if (pendingCancelLine) {
+      qtyWaiting = Math.max(0, qtyCap - received);
+      lineCancelReason = pendingCancelLine.purchaseOrder.cancelRequestReason?.trim() || null;
+      statusKey = 'LINE_CANCEL_PENDING';
+      poNumber = pendingCancelLine.purchaseOrder.poNumber;
+    } else if (item.status === 'ASSIGNED' && purchaseQtyOpen > 1e-9) {
+      qtyWaiting = purchaseQtyOpen;
+      lineCancelReason = cancelledLine?.lineCancelReason?.trim() || null;
+      statusKey = 'AWAITING_REORDER';
+      poNumber = cancelledLine?.purchaseOrder.poNumber ?? poNumber;
+    } else if (poLine) {
+      const st = poLine.purchaseOrder.status;
+      if (st === 'SENT' || st === 'ISSUED') statusKey = 'PO_SENT';
+      else if (confirmed != null && confirmed > 0) statusKey = 'VENDOR_CONFIRMED';
+      else if (['DRAFT', 'SUBMITTED', 'APPROVED', 'CREATED'].includes(st)) statusKey = 'PROCUREMENT';
+      else statusKey = 'PROCUREMENT';
+    } else if (item.status === 'SUPPLIER_SELECTED' || item.status === 'FULFILLED')
+      statusKey = 'SUPPLIER_SELECTED';
+    else if (
+      ['RFQ_CREATED', 'RFQ_SUBMITTED', 'READY_FOR_REVIEW', 'ASSIGNED'].includes(item.status)
+    )
+      statusKey = 'RFQ';
+    else if (APPROVAL_PENDING_STATUSES.has(prStatus)) statusKey = 'PENDING_APPROVAL';
+    else statusKey = 'PROCUREMENT';
+  } else if (
+    ['CLOSED', 'PAYMENT_DONE'].includes(prStatus) &&
+    item.status === 'FULFILLED'
+  )
     statusKey = 'FULFILLED';
-  else if (poLine) {
+  else if (lineWarehouseFullyReceived(trackingLine, received, qtyCap))
+    statusKey = 'FULFILLED';
+  else if (item.status === 'FULFILLED' && poLine && !warehouseProgressEligible(poLine))
+    statusKey = 'PROCUREMENT';
+  else if (item.status === 'FULFILLED' && !poLine)
+    statusKey = 'SUPPLIER_SELECTED';
+  else if (pendingCancelLine) {
+    qtyWaiting = Math.max(0, qtyCap - received);
+    lineCancelReason = pendingCancelLine.purchaseOrder.cancelRequestReason?.trim() || null;
+    statusKey = 'LINE_CANCEL_PENDING';
+    poNumber = pendingCancelLine.purchaseOrder.poNumber;
+  } else if (item.status === 'ASSIGNED' && purchaseQtyOpen > 1e-9) {
+    qtyWaiting = purchaseQtyOpen;
+    lineCancelReason = cancelledLine?.lineCancelReason?.trim() || null;
+    statusKey = 'AWAITING_REORDER';
+    poNumber = cancelledLine?.purchaseOrder.poNumber ?? poNumber;
+  } else if (poLine) {
     const display = computeIncomingLineDisplayStatus({
       poHeaderStatus: poLine.purchaseOrder.status,
       confirmedQty: confirmed,
@@ -250,8 +498,10 @@ export function deriveItemProcurementRow(
       expectedDate: eta,
     });
     if (display === 'Received') statusKey = 'RECEIVED';
-    else if (display === 'Partial') statusKey = 'PARTIAL_RECEIVED';
-    else if (display === 'Delayed') statusKey = 'DELAYED';
+    else if (display === 'Partial') {
+      statusKey = 'PARTIAL_RECEIVED';
+      qtyWaiting = Math.max(0, qtyCap - received);
+    } else if (display === 'Delayed') statusKey = 'DELAYED';
     else if (display === 'Incoming') statusKey = 'INCOMING';
     else if (display === 'AwaitingConfirm') statusKey = 'AWAITING_VENDOR_CONFIRM';
     else if (
@@ -267,17 +517,35 @@ export function deriveItemProcurementRow(
     statusKey = 'RFQ';
   else if (APPROVAL_PENDING_STATUSES.has(prStatus)) statusKey = 'PENDING_APPROVAL';
 
+  const displayReceived =
+    statusKey === 'AWAITING_REORDER' && cancelledLine
+      ? receivedByPoItemId.get(cancelledLine.id) ?? 0
+      : received;
+
   return {
     itemId: item.id,
     lineNo: item.lineNo,
     label: itemLabel(item.partNo, item.description),
     qtyOrdered,
-    qtyReceived: received,
+    qtyReceived: displayReceived,
     qtyCap,
+    qtyWaiting,
     eta,
+    etaOriginal,
+    etaRevised,
     statusKey,
     statusLabel: ITEM_STATUS_LABELS[statusKey],
-    poNumber: poLine?.purchaseOrder.poNumber ?? null,
+    poNumber,
+    lineCancelReason:
+      cancelledLine?.lineCancelReason?.trim() ||
+      pendingCancelLine?.purchaseOrder.cancelRequestReason?.trim() ||
+      lineCancelReason,
+    cancelledRemainingQty:
+      cancelledLine?.cancelledRemainingQty != null
+        ? cancelledLine.cancelledRemainingQty
+        : pendingCancelLine && qtyWaiting > 0
+          ? qtyWaiting
+          : null,
   };
 }
 
@@ -347,7 +615,8 @@ function timelineFlags(
   const completed =
     prStatus === 'PAYMENT_DONE' ||
     prStatus === 'CLOSED' ||
-    (purchaseItems.length > 0 &&
+    (!isPreWarehouseReceiptPhase(prStatus, poLines) &&
+      purchaseItems.length > 0 &&
       purchaseItems.every((i) => ['FULFILLED', 'RECEIVED', 'FROM_STOCK', 'CANCELLED'].includes(i.statusKey)));
 
   return { submitted, approved, procurement, poSent, vendorConfirmed, incoming, completed };
@@ -406,8 +675,12 @@ export type ProcurementListItemPreview = {
   statusLabel: string;
   statusKey: RequestorItemStatusKey;
   eta: string | null;
+  etaOriginal: string | null;
+  etaRevised: string | null;
   qtyReceived: number;
   qtyCap: number;
+  qtyWaiting: number;
+  lineCancelReason: string | null;
 };
 
 export type ProcurementListSnapshot = {
@@ -425,6 +698,8 @@ const ITEM_PREVIEW_SORT_RANK: Partial<Record<RequestorItemStatusKey, number>> = 
   REVISION_REQUIRED: 1,
   ON_HOLD: 2,
   PARTIAL_RECEIVED: 3,
+  LINE_CANCEL_PENDING: 3,
+  AWAITING_REORDER: 3,
   INCOMING: 4,
   AWAITING_VENDOR_CONFIRM: 5,
   PO_SENT: 6,
@@ -443,10 +718,11 @@ export function buildProcurementListSnapshot(
   prStatus: string,
   items: PrItemInput[],
   poLines: PoLineInput[],
-  receivedByPoItemId: Map<string, number>
+  receivedByPoItemId: Map<string, number>,
+  quotationDeliveryByPrItem?: Map<string, string>
 ): ProcurementListSnapshot {
   const itemRows = items.map((item) =>
-    deriveItemProcurementRow(item, poLines, receivedByPoItemId, prStatus)
+    deriveItemProcurementRow(item, poLines, receivedByPoItemId, prStatus, quotationDeliveryByPrItem)
   );
   const delivery = buildDeliverySummary(itemRows);
   const delayedCount = itemRows.filter((i) => i.statusKey === 'DELAYED').length;
@@ -468,8 +744,12 @@ export function buildProcurementListSnapshot(
     statusLabel: r.statusLabel,
     statusKey: r.statusKey,
     eta: r.eta,
+    etaOriginal: r.etaOriginal,
+    etaRevised: r.etaRevised,
     qtyReceived: r.qtyReceived,
     qtyCap: r.qtyCap,
+    qtyWaiting: r.qtyWaiting,
+    lineCancelReason: r.lineCancelReason,
   }));
 
   return {
@@ -497,17 +777,34 @@ export function buildDeliverySummary(
     ['FULFILLED', 'RECEIVED'].includes(i.statusKey)
   ).length;
   const partialCount = trackable.filter((i) => i.statusKey === 'PARTIAL_RECEIVED').length;
+  const waitingRows = trackable.filter((i) =>
+    ['AWAITING_REORDER', 'LINE_CANCEL_PENDING'].includes(i.statusKey)
+  );
+  const waitingReorderCount = waitingRows.length;
+  const waitingReorderQty = waitingRows.reduce((s, i) => s + i.qtyWaiting, 0);
   const openEtas = trackable
     .filter((i) => i.eta && !['FULFILLED', 'RECEIVED'].includes(i.statusKey))
     .map((i) => i.eta!)
     .sort();
   const nextEta = openEtas[0] ?? null;
 
-  return { receivedCount, totalCount, nextEta, partialCount };
+  return {
+    receivedCount,
+    totalCount,
+    nextEta,
+    partialCount,
+    waitingReorderCount,
+    waitingReorderQty,
+  };
 }
 
 /** PR đã nhập kho đủ — requestor tạo phiếu xuất để nhận hàng tại kho. */
-export function isReadyForStockIssuePickup(delivery: RequestorDeliverySummary): boolean {
+export function isReadyForStockIssuePickup(
+  delivery: RequestorDeliverySummary,
+  prStatus: string,
+  poLines: PoLineInput[] = []
+): boolean {
+  if (!prAllowsWarehouseCompletion(prStatus, poLines)) return false;
   return (
     delivery.totalCount > 0 &&
     delivery.receivedCount === delivery.totalCount &&
@@ -518,7 +815,8 @@ export function isReadyForStockIssuePickup(delivery: RequestorDeliverySummary): 
 export function buildCurrentStepBadge(
   prStatus: string,
   items: RequestorProcurementItemRow[],
-  delivery: RequestorDeliverySummary
+  delivery: RequestorDeliverySummary,
+  poLines: PoLineInput[] = []
 ): RequestorCurrentStep {
   if (prStatus === 'DRAFT') {
     return { label: 'Nháp', detail: 'Chưa gửi duyệt', iconKey: 'file', tone: 'slate' };
@@ -526,8 +824,25 @@ export function buildCurrentStepBadge(
   if (prStatus === 'CANCELLED') {
     return { label: 'Đã hủy', detail: null, iconKey: 'alert', tone: 'slate' };
   }
-  if (delivery.receivedCount === delivery.totalCount && delivery.totalCount > 0) {
+  if (
+    prAllowsWarehouseCompletion(prStatus, poLines) &&
+    delivery.receivedCount === delivery.totalCount &&
+    delivery.totalCount > 0 &&
+    items.some((i) => ['RECEIVED', 'FULFILLED'].includes(i.statusKey))
+  ) {
     return { label: 'Hoàn tất nhận hàng', detail: null, iconKey: 'check', tone: 'emerald' };
+  }
+
+  if (isPreWarehouseReceiptPhase(prStatus, poLines) && delivery.receivedCount === 0) {
+    const awaitingPo = PR_STATUSES_AWAITING_PO_CREATION.has(prStatus);
+    return {
+      label: awaitingPo ? 'Chờ tạo PO' : 'Đang tạo PO',
+      detail: awaitingPo
+        ? getRequestorPrStatusLabel(prStatus)
+        : 'PO nháp — chờ gửi duyệt và gửi NCC',
+      iconKey: 'clock',
+      tone: 'amber',
+    };
   }
 
   const delayed = items.find((i) => i.statusKey === 'DELAYED');
@@ -540,6 +855,23 @@ export function buildCurrentStepBadge(
       detail: etaFmt ? `ETA ${etaFmt}` : null,
       iconKey: 'alert',
       tone: 'rose',
+    };
+  }
+
+  const waitingAfterCancel = items.filter((i) =>
+    ['AWAITING_REORDER', 'LINE_CANCEL_PENDING'].includes(i.statusKey)
+  );
+  if (waitingAfterCancel.length > 0) {
+    const qty = waitingAfterCancel.reduce((s, i) => s + i.qtyWaiting, 0);
+    const pending = waitingAfterCancel.some((i) => i.statusKey === 'LINE_CANCEL_PENDING');
+    return {
+      label: pending ? 'Chờ duyệt hủy dòng PO' : 'Chờ mua lại',
+      detail:
+        waitingAfterCancel.length === 1
+          ? `Còn ${qty} SL chờ${pending ? ' (duyệt hủy)' : ''}`
+          : `${waitingAfterCancel.length} item · còn ${qty} SL`,
+      iconKey: 'clock',
+      tone: 'amber',
     };
   }
 
@@ -780,6 +1112,16 @@ export function isDeliveryFullyReceived(delivery: DeliveryReceiptSummary): boole
   );
 }
 
+/** Chỉ coi nhập kho đủ khi PR đã qua phase gửi PO (không phải mới tạo PO draft). */
+export function isWarehouseDeliveryComplete(
+  prStatus: string,
+  poLines: PoLineInput[],
+  delivery: DeliveryReceiptSummary
+): boolean {
+  if (!prAllowsWarehouseCompletion(prStatus, poLines)) return false;
+  return isDeliveryFullyReceived(delivery);
+}
+
 /**
  * Giá trị đã nhập kho = Σ (SL GRN × đơn giá chưa VAT).
  * Không dùng tổng PO / thành tiền có VAT — khớp thao tác nhập GRN.
@@ -807,29 +1149,64 @@ export function sumActualReceivedPurchaseValue(
   return Math.round(sum);
 }
 
+/** PO đã đóng — không còn nhận thêm trên chứng từ đó (kể cả nhận một phần rồi hủy dòng). */
+export function allPurchaseOrdersSettledForReceipt(
+  purchaseOrders: PurchaseOrderCostInput[] | undefined
+): boolean {
+  if (!purchaseOrders?.length) return false;
+  return purchaseOrders.every((po) => {
+    const s = String(po.status ?? '').toUpperCase();
+    return s === 'CLOSED' || s === 'CANCELLED';
+  });
+}
+
 export function enrichProcurementCostInsight(
   insight: ProcurementCostInsight,
   delivery: DeliveryReceiptSummary,
   poLines: PoLineReceivedCostInput[],
-  receivedByPoItemId: Map<string, number>
+  receivedByPoItemId: Map<string, number>,
+  purchaseOrders?: PurchaseOrderCostInput[],
+  opts?: { prStatus?: string; trackingPoLines?: PoLineInput[] }
 ): ProcurementCostInsight {
   const actualReceivedAmount = sumActualReceivedPurchaseValue(poLines, receivedByPoItemId);
-  if (!isDeliveryFullyReceived(delivery)) {
+  const prStatus = opts?.prStatus ?? '';
+  const trackingPoLines = opts?.trackingPoLines ?? [];
+  const deliveryComplete = isWarehouseDeliveryComplete(prStatus, trackingPoLines, delivery);
+  const posSettled = allPurchaseOrdersSettledForReceipt(purchaseOrders);
+
+  if (deliveryComplete) {
+    return {
+      ...insight,
+      purchasePhase: 'completed',
+      actualReceivedAmount: actualReceivedAmount > 0 ? actualReceivedAmount : null,
+      finalPurchaseAmount: actualReceivedAmount > 0 ? actualReceivedAmount : null,
+      procurementCostAmount:
+        actualReceivedAmount > 0 ? actualReceivedAmount : insight.procurementCostAmount,
+      buyerTargetAmount:
+        actualReceivedAmount > 0 ? actualReceivedAmount : insight.buyerTargetAmount,
+      isFinalized: true,
+      awaitingVendorConfirm: false,
+    };
+  }
+
+  if (posSettled && actualReceivedAmount > 0) {
     return {
       ...insight,
       purchasePhase: 'sourcing',
-      actualReceivedAmount: actualReceivedAmount > 0 ? actualReceivedAmount : null,
-      finalPurchaseAmount: null,
+      procurementCostAmount: actualReceivedAmount,
+      buyerTargetAmount: actualReceivedAmount,
+      actualReceivedAmount,
+      finalPurchaseAmount: actualReceivedAmount,
+      isFinalized: true,
+      awaitingVendorConfirm: false,
     };
   }
 
   return {
     ...insight,
-    purchasePhase: 'completed',
+    purchasePhase: 'sourcing',
     actualReceivedAmount: actualReceivedAmount > 0 ? actualReceivedAmount : null,
-    finalPurchaseAmount: actualReceivedAmount > 0 ? actualReceivedAmount : null,
-    isFinalized: true,
-    awaitingVendorConfirm: false,
+    finalPurchaseAmount: null,
   };
 }
 

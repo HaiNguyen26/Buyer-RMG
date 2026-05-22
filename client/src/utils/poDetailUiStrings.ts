@@ -1,12 +1,20 @@
 import { PO_STATUS_BADGE_LABEL } from '../constants/poApprovalQueueFilter';
 import type { PoDisplayLang } from './poDisplayLang';
 
-const PO_LINE_STATUS_BADGE_LABEL: Record<string, string> = {
+const PO_LINE_STATUS_BADGE_LABEL_EN: Record<string, string> = {
   OPEN: 'Open',
   CONFIRMED: 'Confirmed',
   PARTIAL: 'Partial',
   FULLY_RECEIVED: 'Received',
   CANCELLED: 'Cancelled',
+};
+
+const PO_LINE_STATUS_BADGE_LABEL_VI: Record<string, string> = {
+  OPEN: 'Mở',
+  CONFIRMED: 'Đã xác nhận',
+  PARTIAL: 'Nhận một phần',
+  FULLY_RECEIVED: 'Đã nhận đủ',
+  CANCELLED: 'Đã hủy dòng',
 };
 
 export const PO_STATUS_LABELS: Record<PoDisplayLang, Record<string, string>> = {
@@ -15,8 +23,8 @@ export const PO_STATUS_LABELS: Record<PoDisplayLang, Record<string, string>> = {
 };
 
 export const PO_LINE_STATUS_LABELS: Record<PoDisplayLang, Record<string, string>> = {
-  vi: PO_LINE_STATUS_BADGE_LABEL,
-  en: PO_LINE_STATUS_BADGE_LABEL,
+  vi: PO_LINE_STATUS_BADGE_LABEL_VI,
+  en: PO_LINE_STATUS_BADGE_LABEL_EN,
 };
 
 export type PoDetailUi = {
@@ -36,6 +44,14 @@ export type PoDetailUi = {
   markSent: string;
   markConfirmed: string;
   requestCancel: string;
+  requestCancelLine: string;
+  cancelLineRowAction: string;
+  thActions: string;
+  partialReceiveBannerTitle: string;
+  partialReceiveBannerBody: string;
+  cancelPendingBannerTitle: string;
+  cancelPendingBannerBody: string;
+  lineCancelPendingBadge: string;
   cancelReasonLabel: string;
   cancelReasonPlaceholder: string;
   cancelWarning: string;
@@ -134,10 +150,21 @@ const VI: PoDetailUi = {
   markSent: 'Mark as Sent',
   markConfirmed: 'NCC đã xác nhận',
   requestCancel: 'Yêu cầu hủy PO',
-  cancelReasonLabel: 'Lý do hủy PO',
-  cancelReasonPlaceholder: 'Ví dụ: NCC không giao hàng được / hết hàng / lý do khác...',
-  cancelWarning: 'Phần chưa nhận sẽ được trả về PR để xử lý RFQ và tạo PO mới.',
-  toastCancelRequestedOk: 'Đã gửi yêu cầu hủy PO để Trưởng phòng Mua hàng duyệt.',
+  requestCancelLine: 'Hủy dòng còn lại',
+  cancelLineRowAction: 'Hủy dòng',
+  thActions: 'Thao tác',
+  partialReceiveBannerTitle: 'Kho nhận thiếu — cần xử lý với NCC',
+  partialReceiveBannerBody:
+    'Sau khi NCC xác nhận hết hàng / không giao được phần còn lại: chọn Hủy dòng còn lại (không hủy toàn PO). Hủy có hiệu lực ngay — item trở về PR được phân công (cùng mã PR) để RFQ và PO mới.',
+  cancelPendingBannerTitle: 'PO đang chờ xử lý hủy dòng (dữ liệu cũ)',
+  cancelPendingBannerBody:
+    'Trưởng phòng Mua hàng cần duyệt một lần trong hàng chờ PO, hoặc Buyer hủy lại sau khi đã xử lý.',
+  lineCancelPendingBadge: 'Chờ xử lý hủy',
+  cancelReasonLabel: 'Lý do hủy dòng (NCC hết hàng / không giao được)',
+  cancelReasonPlaceholder: 'Ví dụ: NCC hết hàng, không giao được phần còn lại sau khi kho nhận thiếu…',
+  cancelWarning:
+    'Chỉ hủy phần chưa nhận kho. Sau khi xác nhận, item về màn PR được phân công — giữ nguyên mã PR, tạo RFQ/PO mới.',
+  toastCancelRequestedOk: 'Đã hủy dòng PO còn lại. Item chờ mua lại đã trả về PR.',
   postLeaderHint:
     'Đã duyệt nội bộ — chỉ xem; xuất PDF, gửi NCC ngoài hệ thống, rồi Mark as Sent để kho nhận hàng.',
   metaPr: 'PR',
@@ -193,10 +220,11 @@ const VI: PoDetailUi = {
   toastSubmitOk: 'PO đã được gửi duyệt',
   toastMarkSentOk: 'Đã đánh dấu đã gửi NCC (SENT). Kho sẽ thấy PO trong màn PO chờ nhận.',
   toastMarkConfirmedOk: 'Đã cập nhật CONFIRMED.',
-  cancelModalTitle: 'Yêu cầu hủy / kết thúc phần còn lại',
-  cancelModalSelectHint: 'Chọn các dòng PO còn thiếu so với đã nhận kho (mặc định: tất cả dòng còn thiếu).',
+  cancelModalTitle: 'Hủy dòng PO còn lại (không hủy toàn PO)',
+  cancelModalSelectHint:
+    'Chọn dòng còn thiếu so với đã nhận kho. Mặc định chọn tất cả dòng đủ điều kiện.',
   cancelModalReason: 'Lý do',
-  cancelModalSubmit: 'Gửi yêu cầu',
+  cancelModalSubmit: 'Xác nhận hủy dòng',
   cancelModalClose: 'Đóng',
   thReceived: 'Đã nhận',
   thRemaining: 'Còn lại',
@@ -236,10 +264,22 @@ const EN: PoDetailUi = {
   markSent: 'Mark as Sent',
   markConfirmed: 'Supplier confirmed',
   requestCancel: 'Request PO cancellation',
-  cancelReasonLabel: 'Cancellation reason',
-  cancelReasonPlaceholder: 'Example: supplier cannot deliver / out of stock / other reason...',
-  cancelWarning: 'The unreceived quantity will be returned to PR for re-sourcing and a new PO.',
-  toastCancelRequestedOk: 'Cancellation request submitted to Buyer Manager.',
+  requestCancelLine: 'Cancel remaining lines',
+  cancelLineRowAction: 'Cancel line',
+  thActions: 'Actions',
+  partialReceiveBannerTitle: 'Short receipt — follow up with supplier',
+  partialReceiveBannerBody:
+    'After the supplier confirms they cannot deliver the remainder: use Cancel remaining lines (not the whole PO). Takes effect immediately — items return to assigned PR for a new RFQ/PO.',
+  cancelPendingBannerTitle: 'PO pending line cancel (legacy)',
+  cancelPendingBannerBody:
+    'Buyer Manager must approve once in the PO queue, or Buyer can retry after it is processed.',
+  lineCancelPendingBadge: 'Cancel pending',
+  cancelReasonLabel: 'Reason (out of stock / cannot deliver)',
+  cancelReasonPlaceholder:
+    'Example: supplier out of stock; cannot deliver remainder after partial warehouse receipt…',
+  cancelWarning:
+    'Only the unreceived quantity is cancelled. Items return to assigned PR immediately — same PR number, new RFQ/PO.',
+  toastCancelRequestedOk: 'Remaining PO lines cancelled. Items returned to PR for re-sourcing.',
   postLeaderHint:
     'Internally approved — view only; export PDF, contact supplier, then Mark as Sent for warehouse receiving.',
   metaPr: 'PR',
@@ -295,11 +335,11 @@ const EN: PoDetailUi = {
   toastSubmitOk: 'PO submitted for approval',
   toastMarkSentOk: 'Marked as sent (SENT). Warehouse will see the PO for receiving.',
   toastMarkConfirmedOk: 'Updated to CONFIRMED.',
-  cancelModalTitle: 'Request cancellation / close remainder',
+  cancelModalTitle: 'Cancel remaining PO lines (not the whole PO)',
   cancelModalSelectHint:
-    'Select PO lines still short vs warehouse received (default: all lines with a remaining balance).',
+    'Select lines still short vs warehouse received. Default: all eligible lines.',
   cancelModalReason: 'Reason',
-  cancelModalSubmit: 'Submit request',
+  cancelModalSubmit: 'Confirm cancel lines',
   cancelModalClose: 'Close',
   thReceived: 'Received',
   thRemaining: 'Remaining',

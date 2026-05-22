@@ -1,6 +1,14 @@
 import { FastifyReply } from 'fastify';
 import { prisma } from '../config/database';
 import { AuthenticatedRequest } from '../middleware/auth';
+import {
+  BUYER_MANAGER_PIPELINE_PR_STATUSES,
+  PIPELINE_BRANCH_GATE_STATUSES,
+  PIPELINE_BUYER_PROCESSING_STATUSES,
+  PIPELINE_FUNNEL_APPROVAL_STATUSES,
+  PIPELINE_FUNNEL_PO_STATUSES,
+  PIPELINE_FUNNEL_SOURCING_STATUSES,
+} from '../constants/buyerManagerPipelineStatuses';
 
 /** Định mức tối đa PR đang xử lý / buyer — vượt = quá tải (cấu hình doanh nghiệp). */
 const WORKLOAD_OVERLOAD_THRESHOLD = 15;
@@ -26,55 +34,10 @@ export const getBuyerManagerDashboard = async (
     const now = new Date();
 
     // Total PR Value — tổng giá trị PR đang trong pipeline mua hàng (đã vào luồng duyệt/chờ mua)
-    const PIPELINE_STATUSES = [
-      'BUYER_LEADER_PENDING',
-      'BRANCH_MANAGER_APPROVED',
-      'ASSIGNED_TO_BUYER',
-      'RFQ_IN_PROGRESS',
-      'QUOTATION_RECEIVED',
-      'SUPPLIER_SELECTED',
-      'RFQ_COMPLETED',
-      'PO_PENDING',
-      'PO_IN_PROGRESS',
-    ] as const;
-
-    const BRANCH_APPROVED_STATUSES = new Set<string>([
-      'BUYER_LEADER_PENDING',
-      'BRANCH_MANAGER_APPROVED',
-      'BRANCH_MANAGER_PENDING',
-    ]);
-
-    const BUYER_PROCESSING_STATUSES = new Set<string>([
-      'ASSIGNED_TO_BUYER',
-      'RFQ_IN_PROGRESS',
-      'QUOTATION_RECEIVED',
-      'SUPPLIER_SELECTED',
-      'RFQ_COMPLETED',
-      'PO_PENDING',
-      'PO_IN_PROGRESS',
-    ]);
-
-    const FUNNEL_APPROVAL_STATUSES = new Set<string>([
-      'BUYER_LEADER_PENDING',
-      'BRANCH_MANAGER_PENDING',
-      'BRANCH_MANAGER_APPROVED',
-    ]);
-    const FUNNEL_SOURCING_STATUSES = new Set<string>([
-      'ASSIGNED_TO_BUYER',
-      'RFQ_IN_PROGRESS',
-      'QUOTATION_RECEIVED',
-    ]);
-    const FUNNEL_PO_STATUSES = new Set<string>([
-      'SUPPLIER_SELECTED',
-      'RFQ_COMPLETED',
-      'PO_PENDING',
-      'PO_IN_PROGRESS',
-    ]);
-
     const prsInProgress = await prisma.purchaseRequest.findMany({
       where: {
         deletedAt: null,
-        status: { in: [...PIPELINE_STATUSES] },
+        status: { in: [...BUYER_MANAGER_PIPELINE_PR_STATUSES] },
       },
       select: {
         totalAmount: true,
@@ -93,8 +56,8 @@ export const getBuyerManagerDashboard = async (
     let prValueBuyerProcessing = 0;
     for (const pr of prsInProgress) {
       const amt = pr.totalAmount ? Number(pr.totalAmount) : 0;
-      if (BRANCH_APPROVED_STATUSES.has(pr.status)) prValueBranchApproved += amt;
-      else if (BUYER_PROCESSING_STATUSES.has(pr.status)) prValueBuyerProcessing += amt;
+      if (PIPELINE_BRANCH_GATE_STATUSES.has(pr.status)) prValueBranchApproved += amt;
+      else if (PIPELINE_BUYER_PROCESSING_STATUSES.has(pr.status)) prValueBuyerProcessing += amt;
     }
 
     const avgAgeDays = (subset: typeof prsInProgress) => {
@@ -107,9 +70,15 @@ export const getBuyerManagerDashboard = async (
       );
     };
 
-    const funnelApprovalDays = avgAgeDays(prsInProgress.filter((p) => FUNNEL_APPROVAL_STATUSES.has(p.status)));
-    const funnelSourcingDays = avgAgeDays(prsInProgress.filter((p) => FUNNEL_SOURCING_STATUSES.has(p.status)));
-    const funnelPoDays = avgAgeDays(prsInProgress.filter((p) => FUNNEL_PO_STATUSES.has(p.status)));
+    const funnelApprovalDays = avgAgeDays(
+      prsInProgress.filter((p) => PIPELINE_FUNNEL_APPROVAL_STATUSES.has(p.status))
+    );
+    const funnelSourcingDays = avgAgeDays(
+      prsInProgress.filter((p) => PIPELINE_FUNNEL_SOURCING_STATUSES.has(p.status))
+    );
+    const funnelPoDays = avgAgeDays(
+      prsInProgress.filter((p) => PIPELINE_FUNNEL_PO_STATUSES.has(p.status))
+    );
 
     const funnelStages = [
       { key: 'approval', label: 'Duyệt PR', days: funnelApprovalDays },

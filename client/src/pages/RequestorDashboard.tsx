@@ -7,6 +7,7 @@ import { StandardDashboardSidebar } from '../components/StandardDashboardSidebar
 import { useMobileDashboardNav, mainMarginForSidebar240 } from '../hooks/useMobileDashboardNav';
 import {
   dashboardMainOutletFlushClass,
+  dashboardMainScrollChrome,
 } from '../constants/dashboardLayout';
 import { requestorMainShellPaddingClass } from '../constants/requestorLayout';
 
@@ -122,8 +123,22 @@ const RequestorDashboard = () => {
     return '';
   };
 
+  const requestorMainScrollClass = [
+    'h-full min-h-0 min-w-0 flex-1',
+    dashboardMainScrollChrome,
+    'bg-[#f1f5f9]',
+  ].join(' ');
+
+  const requestorMainUsesScroll =
+    !requestorMainInnerScrollLayout ||
+    isRequestorPRList ||
+    isRequestorPRCreate ||
+    isRequestorStockIssues ||
+    isRequestorPRTracking;
+
   return (
     <div
+      data-dashboard-shell
       className="flex h-[100dvh] max-h-[100dvh] min-w-0 flex-col overflow-hidden bg-[#F8FAFC]"
       style={{ minHeight: '100dvh' }}
     >
@@ -164,6 +179,7 @@ const RequestorDashboard = () => {
         </div>
 
         <div
+          {...(requestorMainUsesScroll ? { 'data-dashboard-main-scroll': true as const } : {})}
           ref={requestorMainInnerScrollLayout ? undefined : contentScrollRef}
           className={
             requestorMainInnerScrollLayout
@@ -171,9 +187,9 @@ const RequestorDashboard = () => {
                 isRequestorPRCreate ||
                 isRequestorStockIssues ||
                 isRequestorPRTracking
-                ? 'h-full min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden scrollbar-hide touch-pan-y bg-[#f1f5f9]'
+                ? requestorMainScrollClass
                 : `flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-[#f1f5f9] ${requestorMainShellPaddingClass}`
-              : 'h-full min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden scrollbar-hide touch-pan-y bg-[#f1f5f9]'
+              : requestorMainScrollClass
           }
         >
           <div
@@ -184,7 +200,7 @@ const RequestorDashboard = () => {
                 : isRequestorPRTracking
                   ? `dashboard-outlet flex h-full min-h-0 min-w-0 w-full flex-1 flex-col basis-0 overflow-hidden ${dashboardMainOutletFlushClass}`
                   : isRequestorPRList || isRequestorStockIssues
-                    ? `dashboard-outlet flex h-full min-h-full min-w-0 w-full flex-1 flex-col basis-0 overflow-hidden ${dashboardMainOutletFlushClass}`
+                    ? `dashboard-outlet flex h-full min-h-0 min-w-0 w-full flex-1 flex-col basis-0 overflow-hidden ${dashboardMainOutletFlushClass}`
                 : 'dashboard-outlet flex h-full min-h-full w-full min-w-0 flex-1 self-stretch flex-col overflow-x-hidden'
             }
           >

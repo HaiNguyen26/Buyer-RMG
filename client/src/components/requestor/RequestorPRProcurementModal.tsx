@@ -21,6 +21,8 @@ import {
   formatEtaDisplay,
   ITEM_STATUS_BADGE_CLASS,
 } from '../../utils/requestorProcurementLabels';
+import { RequestorEtaDisplay } from './RequestorEtaDisplay';
+import { PoLineCancelNote } from '../po/PoLineCancelNote';
 import {
   isPurchaseCostCompleted,
   purchaseCostSectionDisplay,
@@ -414,18 +416,20 @@ export function RequestorPRProcurementModal({ prId, onClose }: RequestorPRProcur
                       <table className="w-full table-fixed border-collapse text-left text-[11px]">
                         <thead>
                           <tr className="border-b border-slate-200/60 bg-slate-50 text-[9px] font-bold uppercase tracking-wide text-slate-500">
-                            <th className="w-[8%] px-2 py-2 text-center">STT</th>
-                            <th className="w-[32%] px-2 py-2">Hàng hóa</th>
-                            <th className="w-[8%] px-2 py-2 text-center">SL</th>
-                            <th className="w-[22%] px-2 py-2 text-center">Trạng thái</th>
-                            <th className="w-[15%] px-2 py-2 text-right">ETA</th>
-                            <th className="w-[15%] px-2 py-2 text-right">Nhận</th>
+                            <th className="w-[7%] px-2 py-2 text-center">STT</th>
+                            <th className="w-[28%] px-2 py-2">Hàng hóa</th>
+                            <th className="w-[7%] px-2 py-2 text-center">SL</th>
+                            <th className="w-[18%] px-2 py-2 text-center">Trạng thái</th>
+                            <th className="w-[12%] px-2 py-2 text-right">ETA</th>
+                            <th className="w-[12%] px-2 py-2 text-right">Nhận</th>
+                            <th className="w-[10%] px-2 py-2 text-right">Chờ</th>
+                            <th className="w-[16%] px-2 py-2">Lý do hủy / chờ</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100 text-slate-700">
                           {detail.items.length === 0 ? (
                             <tr>
-                              <td colSpan={6} className="px-2 py-6 text-center text-slate-500">
+                              <td colSpan={8} className="px-2 py-6 text-center text-slate-500">
                                 Không có item.
                               </td>
                             </tr>
@@ -444,7 +448,7 @@ export function RequestorPRProcurementModal({ prId, onClose }: RequestorPRProcur
                                   </span>
                                   {row.poNumber ? (
                                     <span className="mt-0.5 block truncate font-mono text-[9px] text-slate-400">
-                                      {row.poNumber}
+                                      PO {row.poNumber}
                                     </span>
                                   ) : null}
                                 </td>
@@ -461,11 +465,40 @@ export function RequestorPRProcurementModal({ prId, onClose }: RequestorPRProcur
                                     {row.statusLabel}
                                   </span>
                                 </td>
-                                <td className="px-2 py-2.5 text-right font-semibold tabular-nums text-slate-800">
-                                  {formatEtaDisplay(row.eta)}
+                                <td className="px-2 py-2.5 text-right text-slate-800">
+                                  <RequestorEtaDisplay
+                                    eta={row.eta}
+                                    etaOriginal={row.etaOriginal}
+                                    etaRevised={row.etaRevised}
+                                    className="text-xs"
+                                  />
                                 </td>
                                 <td className="px-2 py-2.5 text-right font-bold tabular-nums text-slate-800">
                                   {row.qtyReceived}/{row.qtyCap}
+                                </td>
+                                <td
+                                  className={`px-2 py-2.5 text-right font-bold tabular-nums ${
+                                    row.qtyWaiting > 0 ? 'text-rose-700' : 'text-slate-400'
+                                  }`}
+                                >
+                                  {row.qtyWaiting > 0 ? row.qtyWaiting : '—'}
+                                </td>
+                                <td className="px-2 py-2.5 align-top text-[10px] leading-snug text-slate-600">
+                                  {row.lineCancelReason ||
+                                  row.cancelledRemainingQty != null ||
+                                  row.statusKey === 'LINE_CANCEL_PENDING' ? (
+                                    <PoLineCancelNote
+                                      orderedQty={row.qtyCap}
+                                      receivedQty={row.qtyReceived}
+                                      cancelledQty={
+                                        row.cancelledRemainingQty ?? row.qtyWaiting
+                                      }
+                                      reason={row.lineCancelReason}
+                                      pending={row.statusKey === 'LINE_CANCEL_PENDING'}
+                                    />
+                                  ) : (
+                                    <span className="text-slate-400">—</span>
+                                  )}
                                 </td>
                               </tr>
                             ))
@@ -521,6 +554,9 @@ export function RequestorPRProcurementModal({ prId, onClose }: RequestorPRProcur
                           : 'Chưa có ETA dự kiến'}
                         {detail.deliverySummary.partialCount > 0
                           ? ` · ${detail.deliverySummary.partialCount} item nhận một phần`
+                          : ''}
+                        {detail.deliverySummary.waitingReorderCount > 0
+                          ? ` · chờ ${detail.deliverySummary.waitingReorderQty} SL (${detail.deliverySummary.waitingReorderCount} item)`
                           : ''}
                       </p>
                     </div>

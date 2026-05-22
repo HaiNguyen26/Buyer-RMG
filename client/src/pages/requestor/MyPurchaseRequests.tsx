@@ -35,6 +35,8 @@ import {
   departmentHeadTableActionClusterClass,
 } from '../../constants/departmentHeadLayout';
 import { coerceVndNumber } from '../../utils/vndInputFormat';
+import { DdMmYyyyDateInput } from '../../components/DdMmYyyyDateInput';
+import { coerceToValidCalendarYmd } from '../../utils/quotationLeadTime';
 import {
   saasTableRootClass,
   saasTableHeadCellClass,
@@ -1143,11 +1145,16 @@ const MyPurchaseRequests = () => {
                                       </label>
                                       <label className="block text-[11px] font-medium text-slate-600">
                                         Ngày cần giao
-                                        <input
-                                          type="date"
-                                          className="mt-0.5 w-full min-h-[2.25rem] rounded border border-slate-200 bg-white px-2 py-1.5 text-sm text-slate-900 focus:border-violet-500 focus:outline-none focus:ring-2 focus:ring-violet-500/25 [color-scheme:light]"
-                                          value={d.desiredDeliveryDate}
-                                          onChange={set('desiredDeliveryDate')}
+                                        <DdMmYyyyDateInput
+                                          valueYmd={coerceToValidCalendarYmd(d.desiredDeliveryDate)}
+                                          onChangeYmd={(ymd) =>
+                                            setRevisionDraft((prev) => ({
+                                              ...prev,
+                                              [it.id]: { ...prev[it.id]!, desiredDeliveryDate: ymd },
+                                            }))
+                                          }
+                                          placeholder="dd/mm/yyyy"
+                                          className="mt-0.5 w-full min-h-[2.25rem] rounded border border-slate-200 bg-white px-2 py-1.5 text-sm text-center text-slate-900 focus:border-violet-500 focus:outline-none focus:ring-2 focus:ring-violet-500/25"
                                         />
                                       </label>
                                     </div>
@@ -1306,7 +1313,9 @@ const MyPurchaseRequests = () => {
                           if (!fromStockItems.length) return null;
                           const params = new URLSearchParams({
                             prId: prDetails.id,
-                            ...(prDetails.salesOrder?.id ? { salesPoId: prDetails.salesOrder.id } : {}),
+                            ...(prDetails.salesOrder?.salesPOId
+                              ? { salesPoId: prDetails.salesOrder.salesPOId }
+                              : {}),
                           });
                           return (
                             <button

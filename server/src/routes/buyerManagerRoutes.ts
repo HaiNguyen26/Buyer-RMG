@@ -16,6 +16,11 @@ import {
 } from '../controllers/buyerLeaderController';
 import { authenticate } from '../middleware/auth';
 import { requireBuyerManagerPortal } from '../middleware/requireBuyerManagerPortal';
+import {
+  getProcurementMonitoring,
+  getProcurementMonitoringExport,
+  getProcurementMonitoringPrDetail,
+} from '../controllers/procurementMonitoringController';
 
 export default async function buyerManagerRoutes(fastify: FastifyInstance) {
   fastify.addHook('onRequest', authenticate);
@@ -27,6 +32,9 @@ export default async function buyerManagerRoutes(fastify: FastifyInstance) {
   fastify.get('/strategic-reports', { compress: false }, getStrategicReports);
   fastify.get('/policy-guidelines', { compress: false }, getPolicyGuidelines);
   fastify.get('/alerts-risks', { compress: false }, getAlertsRisks);
+  fastify.get('/procurement-monitor', { compress: false }, getProcurementMonitoring);
+  fastify.get('/procurement-monitor/export', { compress: false }, getProcurementMonitoringExport);
+  fastify.get('/procurement-monitor/:prId', { compress: false }, getProcurementMonitoringPrDetail);
 
   // PO duyệt — Trưởng phòng Mua hàng (BUYER_MANAGER)
   fastify.get(

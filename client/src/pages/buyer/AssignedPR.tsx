@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { authService } from '../../services/authService';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   Eye,
@@ -74,6 +75,7 @@ const AssignedPR = () => {
   const [showCreateRFQModal, setShowCreateRFQModal] = useState(false);
   const [selectedItemIds, setSelectedItemIds] = useState<Set<string>>(new Set());
   const [isTableVisible, setIsTableVisible] = useState(false);
+  const [openRepurchaseAfterLoad, setOpenRepurchaseAfterLoad] = useState(false);
 
   // Open modal if prId is in URL
   useEffect(() => {
@@ -102,6 +104,15 @@ const AssignedPR = () => {
       document.body.style.paddingRight = previousPaddingRight;
     };
   }, [isDetailModalOpen, showCreateRFQModal]);
+
+  const { data: currentUser } = useQuery({
+    queryKey: ['user'],
+    queryFn: async () => {
+      const { user } = await authService.getCurrentUser();
+      return user;
+    },
+    staleTime: 5 * 60 * 1000,
+  });
 
   const { data: prsData, isLoading, isFetching, error: prsError } = useQuery({
     queryKey: ['buyer-assigned-prs', statusFilter],
@@ -147,7 +158,7 @@ const AssignedPR = () => {
       queryClient.invalidateQueries({ queryKey: ['buyer-rfqs'] });
       setShowCreateRFQModal(false);
       setSelectedItemIds(new Set());
-      showSuccess(`Đã tạo RFQ: ${data.rfqNumber}`);
+      showSuccess(`Đã tạo RFQ ${data.rfqNumber} — xem tại Quản lý RFQ`);
     },
     onError: (error: any) => {
       const data = error.response?.data;
@@ -155,13 +166,40 @@ const AssignedPR = () => {
     },
   });
 
-  const handleCreateRFQ = () => {
-    if (!selectedPRId) return;
-    // Open modal to select items (can create multiple RFQs for same PR)
+  const handleCreateRFQ = (preselectAwaitingRepurchase = false) => {
+    if (!selectedPRId || !prDetails?.items) return;
     setShowCreateRFQModal(true);
-    // Initialize with no items selected (user must choose)
-    setSelectedItemIds(new Set());
+    if (preselectAwaitingRepurchase) {
+      const selectable = prDetails.items.filter(
+        (item: { id: string; isLocked?: boolean; status?: string; purchaseQty?: number }) =>
+          !item.isLocked &&
+          String(item.status) === 'ASSIGNED' &&
+          Number(item.purchaseQty ?? 0) > 1e-9
+      );
+      setSelectedItemIds(new Set(selectable.map((item: { id: string }) => item.id)));
+    } else {
+      setSelectedItemIds(new Set());
+    }
   };
+
+  const canCreateRepurchaseRfq =
+    (prDetails?.awaitingPurchaseCount ?? 0) > 0 && !!prDetails?.assignment;
+
+  const openRepurchaseFromStatus = (e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    if (!canCreateRepurchaseRfq) return;
+    handleCreateRFQ(true);
+  };
+
+  useEffect(() => {
+    if (!openRepurchaseAfterLoad || !prDetails?.items?.length) return;
+    const n = prDetails.awaitingPurchaseCount ?? 0;
+    if (n > 0 && prDetails.assignment) {
+      handleCreateRFQ(true);
+    }
+    setOpenRepurchaseAfterLoad(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- mở popup RFQ sau khi PR detail load xong
+  }, [openRepurchaseAfterLoad, prDetails]);
 
   const handleConfirmCreateRFQ = () => {
     if (!selectedPRId) return;
@@ -241,16 +279,26 @@ const AssignedPR = () => {
       case 'COLLECTING_QUOTATION':
       case 'RFQ_IN_PROGRESS':
         return 'bg-orange-50 text-orange-700 border-orange-200';
+      case 'AWAITING_REORDER':
+        return 'bg-amber-50 text-amber-800 border-amber-200';
       case 'QUOTATION_COMPLETED':
       case 'QUOTATION_RECEIVED':
       case 'SUPPLIER_SELECTED':
         return 'bg-green-50 text-green-700 border-green-200';
+      case 'AWAITING_PO':
+        return 'bg-violet-50 text-violet-800 border-violet-200';
+      case 'BUDGET_EXCEPTION_PENDING':
+        return 'bg-rose-50 text-rose-800 border-rose-200';
+      case 'PO_IN_PROGRESS':
+        return 'bg-indigo-50 text-indigo-800 border-indigo-200';
+      case 'PO_ISSUED':
+        return 'bg-slate-100 text-slate-800 border-slate-300';
       default:
         return 'bg-slate-50 text-slate-700 border-slate-200';
     }
   };
 
-  const getStatusLabel = (status: string) => {
+  const getStatusLabel = (status: string, awaitingCount?: number) => {
     switch (status) {
       case 'READY_FOR_RFQ':
       case 'ASSIGNED_TO_BUYER':
@@ -258,11 +306,25 @@ const AssignedPR = () => {
       case 'COLLECTING_QUOTATION':
       case 'RFQ_IN_PROGRESS':
         return 'Đang thu thập báo giá';
+      case 'AWAITING_REORDER': {
+        const n = awaitingCount ?? 0;
+        if (n === 1) return 'Còn 1 item cần mua';
+        if (n > 1) return `Còn ${n} item cần mua`;
+        return 'Còn item cần mua';
+      }
       case 'QUOTATION_COMPLETED':
       case 'QUOTATION_RECEIVED':
         return 'Đã hoàn thành báo giá';
       case 'SUPPLIER_SELECTED':
         return 'Đã chọn NCC';
+      case 'AWAITING_PO':
+        return 'Chờ tạo PO';
+      case 'BUDGET_EXCEPTION_PENDING':
+        return 'Vượt NS — chờ GĐ CN';
+      case 'PO_IN_PROGRESS':
+        return 'PO đang xử lý';
+      case 'PO_ISSUED':
+        return 'Đã phát hành PO';
       default:
         return status;
     }
@@ -319,6 +381,7 @@ const AssignedPR = () => {
   }
 
   const prs = prsData?.prs || [];
+  const totalFromApi = prs.length;
   const filteredPRs = prs.filter((pr: any) =>
     pr?.prNumber?.toLowerCase().includes(searchQuery.toLowerCase()) ||
     pr?.scope?.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -360,9 +423,12 @@ const AssignedPR = () => {
               >
                 <option value="all">Tất cả trạng thái</option>
                 <option value="READY_FOR_RFQ">Sẵn sàng hỏi giá</option>
-                <option value="RFQ_IN_PROGRESS">Đang hỏi giá</option>
-                <option value="QUOTATION_RECEIVED">Đã nhận báo giá</option>
-                <option value="SUPPLIER_SELECTED">Đã chọn NCC</option>
+                <option value="COLLECTING_QUOTATION">Đang thu thập báo giá</option>
+                <option value="AWAITING_PO">Chờ tạo PO</option>
+                <option value="BUDGET_EXCEPTION_PENDING">Vượt ngân sách</option>
+                <option value="PO_IN_PROGRESS">PO đang xử lý</option>
+                <option value="QUOTATION_COMPLETED">Đã hoàn thành báo giá</option>
+                <option value="AWAITING_REORDER">Còn item cần mua</option>
               </CustomSelect>
             </div>
           </div>
@@ -436,10 +502,28 @@ const AssignedPR = () => {
                         <div className={buyerTableCellWrapClass}>{pr?.scope || '-'}</div>
                       </td>
                       <td className="whitespace-nowrap px-6 py-4">
-                        <div className={buyerTableCellWrapClass}>
-                          <span className={`rounded-full border px-3 py-1.5 text-xs font-semibold ${getStatusBadge(pr?.status || 'READY_FOR_RFQ')}`}>
-                            {getStatusLabel(pr?.status || 'READY_FOR_RFQ')}
-                          </span>
+                        <div className={buyerTableCellWrapClass} onClick={(e) => e.stopPropagation()}>
+                          {pr?.status === 'AWAITING_REORDER' && (pr?.awaitingPurchaseCount ?? 0) > 0 ? (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedPRId(pr.id);
+                                setIsDetailModalOpen(true);
+                                setOpenRepurchaseAfterLoad(true);
+                              }}
+                              className={`inline-flex items-center gap-1 rounded-full border px-3 py-1.5 text-xs font-semibold transition hover:brightness-95 ${getStatusBadge('AWAITING_REORDER')}`}
+                              title="Tạo RFQ mới"
+                            >
+                              <Plus className="h-3 w-3 shrink-0" strokeWidth={2.5} />
+                              {getStatusLabel('AWAITING_REORDER', pr.awaitingPurchaseCount)}
+                            </button>
+                          ) : (
+                            <span
+                              className={`rounded-full border px-3 py-1.5 text-xs font-semibold ${getStatusBadge(pr?.status || 'READY_FOR_RFQ')}`}
+                            >
+                              {getStatusLabel(pr?.status || 'READY_FOR_RFQ', pr?.awaitingPurchaseCount)}
+                            </span>
+                          )}
                         </div>
                       </td>
                       <td className="whitespace-nowrap px-6 py-4 text-sm font-normal text-slate-600">
@@ -500,8 +584,25 @@ const AssignedPR = () => {
                 <div className="flex flex-1 min-h-[300px] items-center justify-center px-6 py-12 text-center text-slate-500">
                   <div className="flex flex-col items-center gap-2">
                     <FileQuestion className="h-10 w-10 text-slate-300" strokeWidth={1.5} />
-                    <p className="font-medium text-slate-600">Không tìm thấy PR phù hợp</p>
-                    <p className="text-xs text-slate-500">Thử đổi bộ lọc hoặc từ khóa tìm kiếm</p>
+                    <p className="font-medium text-slate-600">
+                      {totalFromApi === 0
+                        ? 'Chưa có PR nào được phân công cho tài khoản này'
+                        : 'Không tìm thấy PR phù hợp'}
+                    </p>
+                    <p className="max-w-sm text-xs text-slate-500">
+                      {totalFromApi === 0 ? (
+                        <>
+                          Đang đăng nhập:{' '}
+                          <span className="font-semibold text-slate-700">
+                            {currentUser?.username ?? '—'}
+                          </span>
+                          . PR chỉ hiện với buyer được Leader giao — kiểm tra đúng tài khoản hoặc nhờ
+                          phân công lại.
+                        </>
+                      ) : (
+                        'Thử đổi bộ lọc hoặc từ khóa tìm kiếm'
+                      )}
+                    </p>
                   </div>
                 </div>
               </div>
@@ -511,7 +612,7 @@ const AssignedPR = () => {
             <div className="text-sm text-slate-600">
               <p>
                 Hiển thị <span className="font-semibold text-slate-900">{filteredPRs.length}</span> /{' '}
-                <span className="font-semibold text-slate-900">{filteredPRs.length}</span> PR
+                <span className="font-semibold text-slate-900">{totalFromApi}</span> PR
               </p>
             </div>
           </div>
@@ -549,10 +650,10 @@ const AssignedPR = () => {
                         <FileQuestion className="h-4 w-4 shrink-0" strokeWidth={2} />
                         <span className="truncate">{prDetails.rfq.rfqNumber}</span>
                       </span>
-                    ) : prDetails.assignment ? (
+                    ) : prDetails.assignment && (canCreateRepurchaseRfq || !prDetails.rfq) ? (
                       <button
                         type="button"
-                        onClick={handleCreateRFQ}
+                        onClick={() => handleCreateRFQ(canCreateRepurchaseRfq)}
                         disabled={createRFQMutation.isPending}
                         className="inline-flex items-center justify-center gap-2 rounded-xl bg-indigo-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-slate-300 sm:px-4 sm:py-2.5 sm:text-sm"
                       >
@@ -649,14 +750,44 @@ const AssignedPR = () => {
                         </p>
                         <DollarSign className="absolute bottom-3 right-3 h-6 w-6 text-white/20" strokeWidth={1.5} />
                       </div>
-                      <div className="relative overflow-hidden rounded-xl bg-gradient-to-br from-violet-500 to-indigo-600 p-4 text-white shadow-md shadow-violet-500/25">
+                      <div
+                        className={`relative overflow-hidden rounded-xl bg-gradient-to-br from-violet-500 to-indigo-600 p-4 text-white shadow-md shadow-violet-500/25 ${
+                          canCreateRepurchaseRfq
+                            ? 'cursor-pointer ring-2 ring-transparent transition hover:ring-white/40'
+                            : ''
+                        }`}
+                        role={canCreateRepurchaseRfq ? 'button' : undefined}
+                        tabIndex={canCreateRepurchaseRfq ? 0 : undefined}
+                        title={
+                          canCreateRepurchaseRfq
+                            ? 'Bấm để tạo RFQ mới cho item cần mua lại'
+                            : undefined
+                        }
+                        onClick={canCreateRepurchaseRfq ? openRepurchaseFromStatus : undefined}
+                        onKeyDown={
+                          canCreateRepurchaseRfq
+                            ? (e) => {
+                                if (e.key === 'Enter' || e.key === ' ') {
+                                  e.preventDefault();
+                                  openRepurchaseFromStatus();
+                                }
+                              }
+                            : undefined
+                        }
+                      >
                         <div className="absolute -right-3 -top-3 h-16 w-16 rounded-full bg-white/10" />
                         <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-violet-100">
                           Trạng thái PR
                         </p>
                         <p className="mt-1 text-sm font-bold leading-snug">
-                          {getStatusLabel(prDetails.status)}
+                          {getStatusLabel(prDetails.status, prDetails.awaitingPurchaseCount)}
                         </p>
+                        {canCreateRepurchaseRfq ? (
+                          <p className="mt-1.5 flex items-center gap-1 text-[10px] font-semibold text-violet-100/95">
+                            <Plus className="h-3 w-3" strokeWidth={2.5} />
+                            Bấm để tạo RFQ mới
+                          </p>
+                        ) : null}
                         <ClipboardList className="absolute bottom-3 right-3 h-6 w-6 text-white/20" strokeWidth={1.5} />
                       </div>
                       <div className="relative overflow-hidden rounded-xl bg-gradient-to-br from-amber-500 to-orange-500 p-4 text-white shadow-md shadow-orange-500/25">
@@ -1070,9 +1201,23 @@ const AssignedPR = () => {
 
                       <div>
                         <p className="text-xs text-indigo-300 mb-1">Trạng thái</p>
-                        <span className={`inline-flex px-3 py-1.5 text-xs font-semibold rounded-full border bg-white/90 ${getStatusBadge(prDetails.status)}`}>
-                          {getStatusLabel(prDetails.status)}
-                        </span>
+                        {canCreateRepurchaseRfq ? (
+                          <button
+                            type="button"
+                            onClick={openRepurchaseFromStatus}
+                            className={`inline-flex max-w-full items-center gap-1.5 rounded-full border px-3 py-1.5 text-left text-xs font-semibold transition hover:brightness-95 ${getStatusBadge(prDetails.status)}`}
+                            title="Tạo RFQ mới cho item cần mua lại"
+                          >
+                            <Plus className="h-3.5 w-3.5 shrink-0" strokeWidth={2.5} />
+                            {getStatusLabel(prDetails.status, prDetails.awaitingPurchaseCount)}
+                          </button>
+                        ) : (
+                          <span
+                            className={`inline-flex px-3 py-1.5 text-xs font-semibold rounded-full border bg-white/90 ${getStatusBadge(prDetails.status)}`}
+                          >
+                            {getStatusLabel(prDetails.status, prDetails.awaitingPurchaseCount)}
+                          </span>
+                        )}
                       </div>
                     </div>
                     </div>
@@ -1141,7 +1286,11 @@ const AssignedPR = () => {
               <div className="min-w-0 flex-1 pr-3">
                 <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-indigo-500">RFQ Workspace</p>
                 <h3 className="truncate text-xl font-black tracking-tight text-slate-900">Tạo RFQ mới</h3>
-                <p className="mt-0.5 text-xs text-slate-500">Nhóm item chưa khóa để tạo RFQ cho PR này.</p>
+                <p className="mt-0.5 text-xs text-slate-500">
+                  {canCreateRepurchaseRfq
+                    ? 'Chọn item cần mua lại (sau hủy dòng PO) — RFQ mới sẽ hiện tại Quản lý RFQ.'
+                    : 'Nhóm item chưa khóa để tạo RFQ cho PR này.'}
+                </p>
               </div>
               <button
                 onClick={() => {

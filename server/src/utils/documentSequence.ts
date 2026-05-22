@@ -123,6 +123,27 @@ export async function scanMaxSalesPOSuffix(db: DbClient, year: number): Promise<
   return max;
 }
 
+/** RFQ gọn: HCM-IT-202605-001 */
+export async function scanMaxRfqSiteDeptMonthSuffix(
+  db: DbClient,
+  site: string,
+  dept: string,
+  yyyymm: string
+): Promise<number> {
+  const prefix = `${site}-${dept}-${yyyymm}-`;
+  const rows = await db.rFQ.findMany({
+    where: { rfqNumber: { startsWith: prefix }, deletedAt: null },
+    select: { rfqNumber: true },
+  });
+  let max = 0;
+  for (const r of rows) {
+    const m = r.rfqNumber.match(/-(\d{3})$/);
+    if (m) max = Math.max(max, parseInt(m[1], 10));
+  }
+  return max;
+}
+
+/** @deprecated Chỉ để đồng bộ số từ format cũ RFQ-PR-… */
 export async function scanMaxRFQPRBuyerSuffix(db: DbClient, prPrefix: string, buyerTag: string): Promise<number> {
   const prefix = `RFQ-PR-${prPrefix}-${buyerTag}-`;
   const rows = await db.rFQ.findMany({
@@ -202,6 +223,11 @@ export function soSequenceKey(year: number): string {
   return `SO:${year}`;
 }
 
+export function rfqSiteDeptMonthSequenceKey(site: string, dept: string, yyyymm: string): string {
+  return `RFQ:${site}:${dept}:${yyyymm}`;
+}
+
+/** @deprecated Format cũ RFQ-PR-{prPrefix}-{buyer}-NNN */
 export function rfqPrBuyerSequenceKey(prPrefix: string, buyerTag: string): string {
   return `RFQ:PR:${prPrefix}:${buyerTag}`;
 }

@@ -87,16 +87,7 @@ const rfqStatusFallback = {
   className: 'bg-slate-50 text-slate-700 ring-slate-200/80 border-slate-200/70',
 } satisfies { Icon: LucideIcon; className: string };
 
-const PR_STATUS_AFTER_AWARD = new Set([
-  'SUPPLIER_SELECTED',
-  'RFQ_COMPLETED',
-  'PO_PENDING',
-  'PO_IN_PROGRESS',
-  'PO_ISSUED',
-  'CLOSED',
-  'BUDGET_EXCEPTION',
-  'BUDGET_APPROVED',
-]);
+import { isPrPastRfqApprovalPhase, isRfqAwardComplete } from '../../utils/rfqAwardDisplay';
 
 const AWARDED_STATUS_UI = {
   label: 'Đã chọn NCC',
@@ -110,7 +101,7 @@ const RFQManagement = () => {
   const { showError, showSuccess } = useToast();
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
-  const [exportPdfRfqId, setExportPdfRfqId] = useState<string | null>(null);
+  const [exportRfqId, setExportRfqId] = useState<string | null>(null);
 
   const { data: rfqsData, isLoading, error: rfqsError } = useQuery({
     queryKey: ['buyer-rfqs', statusFilter],
@@ -179,9 +170,9 @@ const RFQManagement = () => {
   return (
     <div className={`${buyerOutletPageShellClass} animate-fade-in-right fade-in-right-delay-0`}>
       <RfqExportPdfModal
-        open={!!exportPdfRfqId}
-        rfqId={exportPdfRfqId}
-        onClose={() => setExportPdfRfqId(null)}
+        open={!!exportRfqId}
+        rfqId={exportRfqId}
+        onClose={() => setExportRfqId(null)}
       />
       <div className={buyerWorkspacePageStackClass}>
         <BuyerPageHero
@@ -325,7 +316,17 @@ const RFQManagement = () => {
                     <td className="whitespace-nowrap px-6 py-4">
                       <div className={buyerTableCellWrapClass}>
                         {(() => {
-                          const awardedDone = PR_STATUS_AFTER_AWARD.has(rfq.prStatus);
+                          const awardedDone =
+                            rfq.awardComplete === true ||
+                            isRfqAwardComplete({
+                              rfqStatus: rfq.status,
+                              prStatus: rfq.prStatus,
+                              itemIds: rfq.itemIds,
+                              awardComplete: rfq.awardComplete,
+                              hasNonDraftPo: rfq.hasNonDraftPo,
+                              settledItemCount: rfq.settledItemCount,
+                            }) ||
+                            isPrPastRfqApprovalPhase(rfq.prStatus);
                           const preset = awardedDone ? AWARDED_STATUS_UI : RFQ_STATUS_UI[rfq.status];
                           const Icon = preset?.Icon ?? rfqStatusFallback.Icon;
                           const label = preset?.label ?? (awardedDone ? 'Đã chọn NCC' : rfq.status);
@@ -375,7 +376,17 @@ const RFQManagement = () => {
                         {/* Submit RFQ Button */}
                         {(() => {
                           const quotationsCount = rfq.quotationsCount || 0;
-                          const awardedDone = PR_STATUS_AFTER_AWARD.has(rfq.prStatus);
+                          const awardedDone =
+                            rfq.awardComplete === true ||
+                            isRfqAwardComplete({
+                              rfqStatus: rfq.status,
+                              prStatus: rfq.prStatus,
+                              itemIds: rfq.itemIds,
+                              awardComplete: rfq.awardComplete,
+                              hasNonDraftPo: rfq.hasNonDraftPo,
+                              settledItemCount: rfq.settledItemCount,
+                            }) ||
+                            isPrPastRfqApprovalPhase(rfq.prStatus);
                           const canSubmit = (rfq.status === 'SENT' || rfq.status === 'QUOTATION_RECEIVED') && quotationsCount >= 2;
                           const isSubmitted = rfq.status === 'READY_FOR_COMPARISON' || awardedDone;
                           
@@ -417,9 +428,9 @@ const RFQManagement = () => {
                         </button>
                         <button
                           type="button"
-                          onClick={() => setExportPdfRfqId(rfq.id)}
+                          onClick={() => setExportRfqId(rfq.id)}
                           className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-emerald-200/90 bg-gradient-to-b from-emerald-50 to-white text-emerald-700 shadow-md shadow-emerald-200/30 ring-1 ring-white/90 transition hover:border-emerald-300 hover:shadow-lg motion-safe:hover:-translate-y-0.5"
-                          title="Xuất PDF RFQ"
+                          title="Tải file gửi NCC (PDF / Excel)"
                         >
                           <Download className="h-4 w-4" strokeWidth={2} />
                         </button>

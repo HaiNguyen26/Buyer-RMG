@@ -179,6 +179,12 @@ const CustomSelect = React.forwardRef<HTMLSelectElement, CustomSelectProps>(({
   const selectedOption = parsedOptions.find((opt) => String(opt.value) === String(value));
   const displayLabel = selectedOption ? selectedOption.label : (placeholder || 'Chọn...');
 
+  const handleHiddenChange =
+    onChange ??
+    (onValueChange
+      ? (e: React.ChangeEvent<HTMLSelectElement>) => onValueChange(String(e.target.value))
+      : undefined);
+
   // Dropdown rendered via portal to avoid overflow:hidden clipping
   const dropdown = isOpen ? createPortal(
     <div
@@ -262,10 +268,13 @@ const CustomSelect = React.forwardRef<HTMLSelectElement, CustomSelectProps>(({
       <select
         ref={ref}
         value={value}
-        onChange={onChange}
+        onChange={handleHiddenChange}
+        readOnly={!handleHiddenChange}
         name={props.name}
         className="hidden"
         disabled={disabled}
+        tabIndex={-1}
+        aria-hidden
       >
         {parsedOptions.map((opt, i) => (
           <option key={`hidden-${opt.value}-${i}`} value={opt.value} disabled={opt.disabled}>

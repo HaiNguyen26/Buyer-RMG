@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Building2,
   Calendar,
@@ -7,6 +7,7 @@ import {
   ClipboardList,
   FileCheck2,
   FileDown,
+  FileSpreadsheet,
   FileText,
   Coins,
   CreditCard,
@@ -39,6 +40,7 @@ import {
   type RfqPdfItemRow,
 } from '../utils/rfqPdf';
 import type { PRSalesOrderInfo } from '../types/prSalesOrder';
+import { SUPPLIERS_QUERY_KEY } from '../constants/supplierQuery';
 
 type RfqPdfSupplierOption = { id: string; name: string; code?: string | null };
 
@@ -250,6 +252,7 @@ export type RfqExportPdfModalProps = {
 };
 
 export function RfqExportPdfModal({ open, rfqId, onClose }: RfqExportPdfModalProps) {
+  const queryClient = useQueryClient();
   const { data: currentUser } = useCurrentUser();
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ['buyer-rfq-export-pdf', rfqId],
@@ -267,23 +270,27 @@ export function RfqExportPdfModal({ open, rfqId, onClose }: RfqExportPdfModalPro
   const [paymentTermsCustom, setPaymentTermsCustom] = useState('');
   const [deliveryTerms, setDeliveryTerms] = useState('');
   const [noteForNcc, setNoteForNcc] = useState('');
-  const [generating, setGenerating] = useState(false);
+  const [generatingPdf, setGeneratingPdf] = useState(false);
+  const [generatingExcel, setGeneratingExcel] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
   /** Email / SĐT hiển thị trên PDF — mặc định từ profile, buyer có thể sửa trước khi tải */
   const [pdfContactEmail, setPdfContactEmail] = useState('');
   const [pdfContactPhone, setPdfContactPhone] = useState('');
   const [pdfSupplierId, setPdfSupplierId] = useState('');
 
-  const { data: suppliersCatalog, refetch: refetchSuppliersCatalog } = useQuery({
-    queryKey: ['suppliers', 'rfq-export-pdf'],
+  const { data: suppliersCatalog, refetch: refetchSuppliersCatalog, isFetching: suppliersFetching } = useQuery({
+    queryKey: [...SUPPLIERS_QUERY_KEY],
     queryFn: () => buyerService.getSuppliers(),
     enabled: open,
-    staleTime: 30_000,
+    staleTime: 0,
     refetchOnMount: 'always',
   });
 
   useEffect(() => {
-    if (open) void refetchSuppliersCatalog();
-  }, [open, refetchSuppliersCatalog]);
+    if (!open) return;
+    void queryClient.invalidateQueries({ queryKey: [...SUPPLIERS_QUERY_KEY] });
+    void refetchSuppliersCatalog();
+  }, [open, queryClient, refetchSuppliersCatalog]);
 
   const quotationSuppliers = useMemo((): RfqPdfSupplierOption[] => {
     const map = new Map<string, RfqPdfSupplierOption>();
@@ -357,7 +364,13 @@ export function RfqExportPdfModal({ open, rfqId, onClose }: RfqExportPdfModalPro
   }, [data, currentUser]);
 
   useEffect(() => {
-    if (!open || !data) return;
+    if (!open) {
+      setPdfSupplierId('');
+      setExportError(null);
+      return;
+    }
+    if (!data) return;
+    setExportError(null);
     setQuoteDeadline('');
     setPdfSalesOrderCode(resolveSoCodeForRfqPdf(data.purchaseRequest) || '');
     setPaymentTermsSelect('');
@@ -367,7 +380,11 @@ export function RfqExportPdfModal({ open, rfqId, onClose }: RfqExportPdfModalPro
     setNoteForNcc('');
     setPdfContactEmail((currentUser?.email || '').trim());
     setPdfContactPhone((currentUser?.phone || '').trim());
-    setPdfSupplierId(quotationSuppliers.length === 1 ? quotationSuppliers[0].id : '');
+    setPdfSupplierId((prev) => {
+      if (prev) return prev;
+      if (quotationSuppliers.length === 1) return quotationSuppliers[0].id;
+      return '';
+    });
   }, [open, data?.id, currentUser?.email, currentUser?.phone, quotationSuppliers]);
 
   const emailSubjectPreview = locked
@@ -383,9 +400,18 @@ export function RfqExportPdfModal({ open, rfqId, onClose }: RfqExportPdfModalPro
       ? paymentTermsCustom.trim()
       : paymentTermsSelect || paymentTermsCustom.trim();
 
-  const handleDownload = async () => {
+  const supplierRequired = supplierOptions.length > 0;
+  const canPickSupplier = !supplierRequired || !!pdfSupplierId;
+  const busy = generatingPdf || generatingExcel;
+
+  const handleDownloadPdf = async () => {
     if (!locked) return;
-    setGenerating(true);
+    if (supplierRequired && !pdfSupplierId) {
+      setExportError('Vui lòng chọn NCC trước khi tải file.');
+      return;
+    }
+    setGeneratingPdf(true);
+    setExportError(null);
     try {
       await downloadRfqPdf({
         rfqNumber: locked.rfqNumber,
@@ -410,39 +436,70 @@ export function RfqExportPdfModal({ open, rfqId, onClose }: RfqExportPdfModalPro
         supplierName: selectedSupplier?.name?.trim() || '—',
         supplierCode: selectedSupplier?.code?.trim() || undefined,
       });
-      onClose();
     } finally {
-      setGenerating(false);
+      setGeneratingPdf(false);
     }
   };
 
+  const handleDownloadExcel = async () => {
+    if (!rfqId || !pdfSupplierId) {
+      setExportError('Vui lòng chọn NCC — tên NCC sẽ có trong tên file Excel.');
+      return;
+    }
+    setGeneratingExcel(true);
+    setExportError(null);
+    try {
+      await buyerService.downloadRFQQuotationExcel(rfqId, pdfSupplierId, {
+        rfqNumber: locked?.rfqNumber ?? rfqId,
+        supplierName: selectedSupplier?.name ?? 'NCC',
+      });
+    } catch (e: unknown) {
+      const msg =
+        (e as { response?: { data?: { error?: string } } })?.response?.data?.error ||
+        (e instanceof Error ? e.message : 'Tải Excel thất bại');
+      setExportError(msg);
+    } finally {
+      setGeneratingExcel(false);
+    }
+  };
 
   return (
     <AppModal
       open={open}
       onClose={onClose}
       size="3xl"
-      title="Xuất PDF RFQ"
-      subtitle="Kiểm tra dữ liệu khóa từ PR, chỉnh liên hệ & điều kiện thương mại, rồi tải file gửi NCC."
+      title="Tải file gửi NCC"
+      subtitle="Chọn NCC, chỉnh điều kiện PDF nếu cần. Excel chỉ gồm bảng cột báo giá cho NCC điền."
       headerIcon={<FileDown className="h-5 w-5 text-indigo-600" strokeWidth={2} />}
       footer={
         <div className="flex w-full flex-wrap items-center justify-end gap-3 border-t border-slate-200/90 bg-[#F8FAFC] px-4 py-3.5 sm:px-5">
-          <button type="button" onClick={onClose} className={dashboardV3CtaLinkClass}>
+          <button type="button" onClick={onClose} disabled={busy} className={dashboardV3CtaLinkClass}>
             Hủy
           </button>
           <button
             type="button"
-            disabled={
-              generating ||
-              isLoading ||
-              !data ||
-              !locked ||
-              (supplierOptions.length > 0 && !pdfSupplierId)
-            }
-            onClick={() => void handleDownload()}
+            disabled={busy || isLoading || !data || !rfqId || !canPickSupplier}
+            onClick={() => void handleDownloadExcel()}
+            className="inline-flex items-center gap-2 rounded-2xl border border-teal-200 bg-gradient-to-b from-teal-50 to-white px-5 py-2.5 text-sm font-semibold text-teal-800 shadow-sm transition hover:border-teal-300 hover:bg-teal-50 disabled:pointer-events-none disabled:opacity-50"
+          >
+            {generatingExcel ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <FileSpreadsheet className="h-4 w-4" strokeWidth={2} />
+            )}
+            Tải Excel
+          </button>
+          <button
+            type="button"
+            disabled={busy || isLoading || !data || !locked || !canPickSupplier}
+            onClick={() => void handleDownloadPdf()}
             className="inline-flex items-center gap-2 rounded-2xl bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white shadow-md shadow-emerald-600/25 transition hover:bg-emerald-700 hover:shadow-lg disabled:pointer-events-none disabled:opacity-50"
           >
-            {generating ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileDown className="h-4 w-4" strokeWidth={2} />}
+            {generatingPdf ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <FileDown className="h-4 w-4" strokeWidth={2} />
+            )}
             Tải PDF
           </button>
         </div>
@@ -459,6 +516,11 @@ export function RfqExportPdfModal({ open, rfqId, onClose }: RfqExportPdfModalPro
           {(error as Error)?.message || 'Không tải được RFQ.'}
         </p>
       )}
+      {exportError ? (
+        <p className="mb-4 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">
+          {exportError}
+        </p>
+      ) : null}
       {!isLoading && data && locked && (
         <div className="space-y-5 text-sm">
           <div className="relative overflow-hidden rounded-2xl border border-indigo-200/60 bg-gradient-to-br from-indigo-50/90 via-white to-violet-50/80 px-4 py-5 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.9),0_8px_28px_-14px_rgba(79,70,229,0.18)] ring-1 ring-indigo-200/40 backdrop-blur-xl sm:px-6">
@@ -492,7 +554,7 @@ export function RfqExportPdfModal({ open, rfqId, onClose }: RfqExportPdfModalPro
                 </span>
                 <div className="min-w-0">
                   <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-indigo-600">
-                    Xuất RFQ PDF
+                    Tải file gửi NCC
                   </p>
                   <p className="mt-1 truncate font-mono text-lg font-bold tracking-tight text-slate-900 sm:text-xl">
                     {locked.rfqNumber}
@@ -534,37 +596,53 @@ export function RfqExportPdfModal({ open, rfqId, onClose }: RfqExportPdfModalPro
               icon={Building2}
               iconTone="slate"
               title="Nhà cung cấp (NCC)"
-              description="Chọn NCC để in tên trên PDF và tiêu đề email gửi báo giá."
+              description="Chọn NCC cho PDF, Excel mẫu báo giá và tiêu đề email."
             />
             <div className="space-y-3 p-4 sm:p-5">
               <EditableLabel htmlFor="rfq-pdf-supplier" icon={Building2}>
                 Tên NCC trên PDF <span className="text-red-500">*</span>
               </EditableLabel>
-              <CustomSelect
-                id="rfq-pdf-supplier"
-                value={pdfSupplierId}
-                onChange={(e) => setPdfSupplierId(e.target.value)}
-                enableDropdownSearch
-                dropdownSearchPlaceholder="Tìm theo tên hoặc mã NCC..."
-                className={RFQ_PDF_INPUT}
-              >
-                <option value="">-- Chọn nhà cung cấp --</option>
-                {supplierOptions.length === 0 ? (
-                  <option value="" disabled>
-                    Chưa có NCC trong hệ thống — tạo tại Quản lý báo giá hoặc Quản lý NCC.
-                  </option>
-                ) : (
-                  supplierOptions.map((s) => (
+              {supplierOptions.length === 0 ? (
+                <p className="rounded-xl border border-amber-200/90 bg-amber-50/90 px-3.5 py-3 text-sm text-amber-950">
+                  Chưa có NCC trong database. Mở <strong>Buyer Manager → Quản lý NCC</strong> một lần
+                  (hệ thống đồng bộ danh sách vào DB), hoặc tạo/import NCC tại đó, rồi mở lại modal này.
+                </p>
+              ) : (
+                <>
+                <p className="mb-2 text-xs text-slate-500">
+                  {suppliersFetching
+                    ? 'Đang tải danh sách NCC…'
+                    : `${supplierOptions.length} NCC trong database (cùng nguồn Quản lý NCC)`}
+                </p>
+                <CustomSelect
+                  id="rfq-pdf-supplier"
+                  value={pdfSupplierId}
+                  onValueChange={setPdfSupplierId}
+                  enableDropdownSearch
+                  dropdownSearchPlaceholder="Tìm theo tên hoặc mã NCC..."
+                  className={RFQ_PDF_INPUT}
+                >
+                  <option value="">-- Chọn nhà cung cấp --</option>
+                  {supplierOptions.map((s) => (
                     <option key={s.id} value={s.id}>
                       {s.name}
                       {s.code ? ` (${s.code})` : ''}
                     </option>
-                  ))
-                )}
-              </CustomSelect>
+                  ))}
+                </CustomSelect>
+                </>
+              )}
               {emailSubjectPreview ? (
                 <p className="text-xs text-slate-500">
                   Tiêu đề email: <span className="font-medium text-slate-800">{emailSubjectPreview}</span>
+                </p>
+              ) : null}
+              {selectedSupplier && locked ? (
+                <p className="text-xs text-teal-800">
+                  Excel: No, Item, Unit Price, Total Price, Brand, Origin, Lead Time, MOQ, Warranty, Note —{' '}
+                  <span className="font-mono font-medium">
+                    RFQ_{locked.rfqNumber}_{selectedSupplier.name.replace(/\s+/g, '_')}_bao_gia.xlsx
+                  </span>
                 </p>
               ) : null}
             </div>

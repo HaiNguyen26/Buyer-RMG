@@ -6,6 +6,11 @@ import { prisma } from '../config/database';
 import { AuthenticatedRequest } from '../middleware/auth';
 import { getFileUrl } from '../config/s3';
 import { prismaDepartmentOutcomeRowActive } from '../utils/departmentPrItemReview';
+import { BUYER_VISIBLE_PR_STATUSES } from '../constants/buyerAssignedPrStatuses';
+import {
+  computeBuyerPrDisplayStatus,
+  isPrItemAwaitingRepurchase,
+} from '../utils/buyerPrDisplayStatus';
 
 const LOCAL_ATTACHMENT_ROOT = path.resolve(process.cwd(), 'uploads', 'attachments');
 
@@ -137,14 +142,7 @@ export const getAssignedPRs = async (
     const where: any = {
       deletedAt: null,
       status: {
-        in: [
-          'BUYER_LEADER_PENDING',
-          'BRANCH_MANAGER_APPROVED',
-          'ASSIGNED_TO_BUYER',
-          'RFQ_IN_PROGRESS',
-          'QUOTATION_RECEIVED',
-          'SUPPLIER_SELECTED',
-        ],
+        in: [...BUYER_VISIBLE_PR_STATUSES],
       },
       assignments: {
         some: {
@@ -177,7 +175,7 @@ export const getAssignedPRs = async (
         // Mọi dòng chưa xóa (đồng bộ với getPRDetails) — không chỉ NEED_PURCHASE
         items: {
           where: { deletedAt: null, ...prismaDepartmentOutcomeRowActive },
-          select: { id: true },
+          select: { id: true, status: true, purchaseQty: true },
         },
         assignments: {
           where: {
@@ -190,6 +188,11 @@ export const getAssignedPRs = async (
           },
         },
         salesPO: { select: prSalesPOSelect },
+        purchaseOrders: {
+          where: { deletedAt: null },
+          select: { id: true },
+          take: 1,
+        },
       },
       orderBy: {
         createdAt: 'desc',
@@ -197,24 +200,16 @@ export const getAssignedPRs = async (
       take: 100,
     });
 
-    // Compute per-buyer status based on their own RFQs (not the PR-level status)
     const allMappedPRs = prs.map((pr: any) => {
       const buyerRFQs = pr.rfqs || [];
-      let statusLabel = 'READY_FOR_RFQ';
+      const { status: statusLabel, awaitingPurchaseCount } = computeBuyerPrDisplayStatus({
+        buyerRfqs: buyerRFQs,
+        items: pr.items || [],
+        assignments: pr.assignments || [],
+        prStatus: pr.status,
+        hasPurchaseOrders: (pr.purchaseOrders?.length ?? 0) > 0,
+      });
 
-      // Trạng thái per-buyer CHỈ phụ thuộc vào RFQ của chính buyer đó.
-      // PR-level status (QUOTATION_RECEIVED, SUPPLIER_SELECTED, ...) KHÔNG được dùng để
-      // hiển thị "Đã hoàn thành báo giá" cho buyer khác chưa tạo RFQ.
-      if (buyerRFQs.length > 0) {
-        const allDone = buyerRFQs.every((r: any) => r.status === 'READY_FOR_COMPARISON' || r.status === 'CLOSED');
-        if (allDone) {
-          statusLabel = 'QUOTATION_COMPLETED';
-        } else {
-          statusLabel = 'COLLECTING_QUOTATION';
-        }
-      }
-
-      // Phạm vi phụ trách: số dòng được giao cho buyer này / tổng dòng PR (chỉ tính id còn tồn tại)
       const allItemIds: string[] = (pr.items || []).map((it: any) => it.id);
       const itemIdSet = new Set(allItemIds);
       const totalItems = allItemIds.length;
@@ -251,6 +246,7 @@ export const getAssignedPRs = async (
         salesOrder: serializePRSalesOrder(pr as any),
         scope: scopeLabel,
         status: statusLabel,
+        awaitingPurchaseCount,
         assignedDate: pr.createdAt.toISOString(),
         department: pr.department ?? null,
         totalAmount,
@@ -354,6 +350,11 @@ export const getPRDetails = async (
               select: { id: true, fileName: true, fileSize: true, contentType: true },
             },
           },
+        },
+        purchaseOrders: {
+          where: { deletedAt: null },
+          select: { id: true },
+          take: 1,
         },
       },
     });
@@ -507,7 +508,9 @@ export const getPRDetails = async (
           }
         }
       }
-      rfqItemIds.forEach(itemId => {
+      rfqItemIds.forEach((itemId) => {
+        const prItem = assignedItems.find((i) => i.id === itemId);
+        if (prItem && isPrItemAwaitingRepurchase(prItem)) return;
         if (!lockedItemsMap[itemId]) {
           lockedItemsMap[itemId] = {
             rfqId: rfq.id,
@@ -521,17 +524,13 @@ export const getPRDetails = async (
     // Get the first RFQ for backward compatibility (if exists)
     const rfq = allRFQs.length > 0 ? allRFQs[0] : null;
 
-    // Tính trạng thái PR theo GÓC NHÌN của buyer hiện tại (giống getAssignedPRs):
-    // - Chỉ dựa vào RFQ của buyer này, không dùng PR.status tổng thể.
-    let buyerStatus: 'READY_FOR_RFQ' | 'COLLECTING_QUOTATION' | 'QUOTATION_COMPLETED';
-    if (allRFQs.length === 0) {
-      buyerStatus = 'READY_FOR_RFQ';
-    } else {
-      const allDone = allRFQs.every(
-        (r: any) => r.status === 'READY_FOR_COMPARISON' || r.status === 'CLOSED'
-      );
-      buyerStatus = allDone ? 'QUOTATION_COMPLETED' : 'COLLECTING_QUOTATION';
-    }
+    const { status: buyerStatus, awaitingPurchaseCount } = computeBuyerPrDisplayStatus({
+      buyerRfqs: allRFQs,
+      items: assignedItems,
+      assignments: [assignment],
+      prStatus: pr.status,
+      hasPurchaseOrders: (pr.purchaseOrders?.length ?? 0) > 0,
+    });
 
     console.log(`[getPRDetails] Sending response for PR ${prId}. Items count: ${assignedItems.length}`);
 
@@ -573,8 +572,8 @@ export const getPRDetails = async (
       totalAmount:
         Number(pr.totalAmount ?? 0) > 0 ? Number(pr.totalAmount) : (computedAssignedTotal > 0 ? computedAssignedTotal : null), // Giá dự kiến (baseline budget)
       currency: pr.currency,
-      // status: trạng thái per-buyer để hiển thị cho Buyer (READY_FOR_RFQ / COLLECTING_QUOTATION / QUOTATION_COMPLETED)
       status: buyerStatus,
+      awaitingPurchaseCount,
       // prStatus: trạng thái thật của PR (để debug / mở rộng nếu cần)
       prStatus: pr.status,
       requestor: pr.requestor,
@@ -590,6 +589,7 @@ export const getPRDetails = async (
           ? referenceUrlByPartCode.get(item.partNo.trim()) ?? null
           : null,
         qty: Number(item.qty),
+        purchaseQty: Number(item.purchaseQty ?? 0),
         unit: item.unit,
         unitPrice: resolveItemUnitPrice(item),
         amount: resolveItemAmount(item),

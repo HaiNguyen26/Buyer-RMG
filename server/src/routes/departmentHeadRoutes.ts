@@ -8,6 +8,11 @@ import {
   returnPR,
   getDepartmentOverview,
 } from '../controllers/departmentHeadController';
+import {
+  getProcurementMonitoring,
+  getProcurementMonitoringExport,
+  getProcurementMonitoringPrDetail,
+} from '../controllers/procurementMonitoringController';
 
 export default async function departmentHeadRoutes(fastify: FastifyInstance) {
   fastify.addHook('onRequest', authenticate);
@@ -19,4 +24,7 @@ export default async function departmentHeadRoutes(fastify: FastifyInstance) {
   fastify.post('/prs/:id/approve', approvePR);
   fastify.post('/prs/:id/reject', rejectPR);
   fastify.post('/prs/:id/return', returnPR);
+  fastify.get('/procurement-monitor', { compress: false }, getProcurementMonitoring);
+  fastify.get('/procurement-monitor/export', { compress: false }, getProcurementMonitoringExport);
+  fastify.get('/procurement-monitor/:prId', { compress: false }, getProcurementMonitoringPrDetail);
 }

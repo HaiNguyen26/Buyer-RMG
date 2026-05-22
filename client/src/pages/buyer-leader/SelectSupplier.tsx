@@ -6,6 +6,7 @@ import { buyerLeaderService } from '../../services/buyerLeaderService';
 import { useToast } from '../../contexts/ToastContext';
 import { BuyerLeaderPageHero } from '../../components/BuyerLeaderPageHero';
 import { buyerLeaderPageStackClass } from '../../constants/buyerLeaderLayout';
+import { formatQuotationLeadTimeDisplay } from '../../utils/quotationLeadTime';
 
 const formatCurrency = (amount: number | null, currency: string = 'VND') => {
   if (!amount) return 'Chưa có';
@@ -283,7 +284,10 @@ const SelectSupplier = () => {
                   <div className="p-4 bg-slate-50 rounded-xl">
                     <p className="text-xs text-slate-500 mb-1">Thời gian giao hàng</p>
                     <p className="text-lg font-semibold text-slate-900">
-                      {recommendedQuotation.leadTime ? `${recommendedQuotation.leadTime} ngày` : '-'}
+                      {(() => {
+                        const label = formatQuotationLeadTimeDisplay(recommendedQuotation.leadTime);
+                        return label === '—' ? '-' : label;
+                      })()}
                     </p>
                   </div>
                   {recommendedQuotation.paymentTerms && (
@@ -412,7 +416,12 @@ const SelectSupplier = () => {
                             <td className="px-4 py-3 text-sm font-semibold text-slate-900">
                               {formatCurrency(q.totalAmount, q.currency)}
                             </td>
-                            <td className="px-4 py-3 text-sm text-slate-700">{q.leadTime ? `${q.leadTime} ngày` : '-'}</td>
+                            <td className="px-4 py-3 text-sm text-slate-700">
+                              {(() => {
+                                const label = formatQuotationLeadTimeDisplay(q.leadTime);
+                                return label === '—' ? '-' : label;
+                              })()}
+                            </td>
                             <td className="px-4 py-3 text-sm text-slate-700">
                               {q.recommendationScore !== null ? `${q.recommendationScore.toFixed(1)}/100` : '-'}
                             </td>

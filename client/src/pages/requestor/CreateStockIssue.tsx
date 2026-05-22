@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type WheelEvent } from 'react';
 import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
@@ -34,10 +34,48 @@ import { RequestorPageHero } from '../../components/RequestorPageHero';
 import { DepartmentPageHero } from '../../components/DepartmentPageHero';
 import { requestorPanelCardClass } from '../../constants/requestorLayout';
 
+/** Cuộn chính trên vùng main dashboard — trang con không tạo scroll lồng */
 const pageShellClass =
-  'flex h-full min-h-0 w-full flex-1 flex-col overflow-y-auto overflow-x-hidden bg-[#f1f5f9] touch-pan-y [scrollbar-width:thin]';
+  'flex min-h-0 w-full flex-1 flex-col overflow-x-hidden bg-[#f1f5f9]';
 const pageContentClass =
-  'mx-auto flex h-full min-h-0 w-full max-w-[1800px] flex-1 flex-col gap-3 px-2 pb-3 pt-2 sm:gap-4 sm:px-3 sm:pb-4 sm:pt-3 md:px-4';
+  'mx-auto flex w-full max-w-[1800px] flex-1 flex-col gap-3 px-2 pb-3 pt-2 sm:gap-4 sm:px-3 sm:pb-4 sm:pt-3 md:px-4';
+
+/** ~4–5 hạng mục; cuộn nội bộ, hết danh sách thì wheel chuyển sang main (overscroll-y-auto) */
+const stockIssueLinesScrollClass =
+  'min-h-[22rem] max-h-[min(32rem,52dvh)] overflow-y-auto overscroll-y-auto space-y-2.5 [-webkit-overflow-scrolling:touch] scrollbar-hide touch-pan-y';
+
+function findVerticalScrollParent(from: HTMLElement): HTMLElement | null {
+  let node: HTMLElement | null = from.parentElement;
+  while (node) {
+    const { overflowY } = getComputedStyle(node);
+    if (
+      (overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay') &&
+      node.scrollHeight > node.clientHeight + 1
+    ) {
+      return node;
+    }
+    node = node.parentElement;
+  }
+  return null;
+}
+
+function handleNestedListWheel(e: WheelEvent<HTMLDivElement>) {
+  const list = e.currentTarget;
+  const main = findVerticalScrollParent(list);
+  if (!main) return;
+
+  const { scrollTop, scrollHeight, clientHeight } = list;
+  const noInnerOverflow = scrollHeight <= clientHeight + 1;
+  const atTop = scrollTop <= 0;
+  const atBottom = scrollTop + clientHeight >= scrollHeight - 1;
+  const goingUp = e.deltaY < 0;
+  const goingDown = e.deltaY > 0;
+
+  if (noInnerOverflow || (atTop && goingUp) || (atBottom && goingDown)) {
+    main.scrollTop += e.deltaY;
+    e.preventDefault();
+  }
+}
 
 type Line = {
   rowKey: string;
@@ -546,7 +584,7 @@ const CreateStockIssue = () => {
         </div>
 
         <div
-          className={`${requestorPanelCardClass} flex min-h-0 flex-1 flex-col overflow-hidden !p-0 shadow-xl shadow-slate-300/50`}
+          className={`${requestorPanelCardClass} flex flex-col overflow-hidden !p-0 shadow-xl shadow-slate-300/50`}
         >
           {linkedPrId ? (
             <div className="flex shrink-0 items-center justify-between gap-3 border-b border-emerald-200/80 bg-gradient-to-r from-emerald-50 to-teal-50/80 px-4 py-3 sm:px-5">
@@ -575,8 +613,8 @@ const CreateStockIssue = () => {
             </div>
           ) : null}
 
-        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-5 sm:py-5">
-          <div className="space-y-5">
+        <div className="flex flex-col px-4 py-4 sm:px-5 sm:py-5">
+          <div className="shrink-0 space-y-5">
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2 md:gap-5">
               <div className="space-y-1.5">
                 <label className={labelClass}>
@@ -622,8 +660,8 @@ const CreateStockIssue = () => {
               </p>
             ) : null}
 
-            <div className="space-y-3 border-t border-slate-100 pt-4">
-              <div className="flex flex-wrap items-end justify-between gap-3">
+            <div className="mt-1 flex flex-col border-t border-slate-100 pt-4">
+              <div className="shrink-0 flex flex-wrap items-end justify-between gap-3">
                 <div>
                   <h2 className="text-xs font-black uppercase tracking-wider text-slate-900">
                     Danh mục vật tư xuất kho
@@ -649,15 +687,20 @@ const CreateStockIssue = () => {
               </div>
 
               {restrictCatalogToPr && linkedPrLoading ? (
-                <p className="text-xs font-medium text-slate-500">Đang tải vật tư từ PR…</p>
+                <p className="mt-3 shrink-0 text-xs font-medium text-slate-500">
+                  Đang tải vật tư từ PR…
+                </p>
               ) : null}
               {restrictCatalogToPr && !linkedPrLoading && filteredCatalog.length === 0 ? (
-                <p className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                <p className="mt-3 shrink-0 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
                   PR không có dòng nào có mã vật tư (part no) để xuất kho.
                 </p>
               ) : null}
 
-              <div className="space-y-2.5">
+              <div
+                className={`mt-3 ${stockIssueLinesScrollClass}`}
+                onWheel={handleNestedListWheel}
+              >
                 {lines.map((row, idx) => {
                   const code = row.partInternalCode.trim();
                   const av = code ? stockAvailableForCode(code, row.catalogPartId) : 0;
@@ -771,7 +814,7 @@ const CreateStockIssue = () => {
               <button
                 type="button"
                 onClick={addRow}
-                className="flex w-full items-center justify-center gap-1.5 rounded-xl border-2 border-dashed border-slate-200 py-3 text-xs font-bold text-slate-500 transition hover:border-indigo-400 hover:bg-indigo-500/5 hover:text-indigo-600"
+                className="mt-3 flex w-full shrink-0 items-center justify-center gap-1.5 rounded-xl border-2 border-dashed border-slate-200 py-3 text-xs font-bold text-slate-500 transition hover:border-indigo-400 hover:bg-indigo-500/5 hover:text-indigo-600"
               >
                 <Plus className="h-4 w-4" strokeWidth={2.5} />
                 Thêm dòng vật tư yêu cầu

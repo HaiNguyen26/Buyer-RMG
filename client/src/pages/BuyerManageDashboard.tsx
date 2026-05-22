@@ -9,6 +9,7 @@ import {
     BarChart3,
     Settings,
     Bell,
+    Radar,
 } from 'lucide-react';
 import DashboardHeader from '../components/DashboardHeader';
 import { StandardDashboardSidebar } from '../components/StandardDashboardSidebar';
@@ -47,6 +48,11 @@ const BuyerManageDashboard = () => {
         {
             title: 'Giám sát',
             items: [
+                {
+                    icon: Radar,
+                    label: 'Giám sát mua hàng',
+                    path: '/dashboard/buyer-manage/procurement-monitoring',
+                },
                 { icon: ClipboardCheck, label: 'Tổng quan PR', path: '/dashboard/buyer-manage/pr-overview' },
                 { icon: Handshake, label: 'Tổng quan NCC', path: '/dashboard/buyer-manage/supplier-overview' },
                 { icon: TrendingUp, label: 'Hiệu suất Buyer', path: '/dashboard/buyer-manage/buyer-performance' },
@@ -78,6 +84,8 @@ const BuyerManageDashboard = () => {
     const getPageTitle = () => {
         if (location.pathname === '/dashboard/buyer-manage') {
             return 'Bảng điều khiển BGD';
+        } else if (location.pathname.includes('/procurement-monitoring')) {
+            return 'Giám sát mua hàng';
         } else if (location.pathname.includes('/pr-overview')) {
             return 'Tổng quan PR';
         } else if (location.pathname.includes('/supplier-overview')) {
@@ -97,6 +105,8 @@ const BuyerManageDashboard = () => {
     const getPageSubtitle = () => {
         if (location.pathname === '/dashboard/buyer-manage') {
             return 'Tình hình mua hàng & chi phí của công ty đang như thế nào?';
+        } else if (location.pathname.includes('/procurement-monitoring')) {
+            return 'Theo dõi PR/PO toàn công ty — trung tâm vận hành';
         } else if (location.pathname.includes('/pr-overview')) {
             return 'Giám sát toàn bộ PR trong hệ thống';
         } else if (location.pathname.includes('/supplier-overview')) {

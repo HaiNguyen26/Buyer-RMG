@@ -343,7 +343,7 @@ const ComparisonQueue = () => {
                           }}
                           className="inline-flex items-center justify-center gap-1 rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-indigo-700"
                         >
-                          So sánh
+                          So sánh NCC
                           <Scale className="h-3 w-3" strokeWidth={2.5} />
                         </button>
                         <button
@@ -353,7 +353,7 @@ const ComparisonQueue = () => {
                           }}
                           className="inline-flex items-center justify-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-800 shadow-sm ring-1 ring-slate-200/80 transition hover:bg-slate-50"
                         >
-                          Phân bổ
+                          So sánh theo dòng
                           <Layers3 className="h-3 w-3" strokeWidth={2.5} />
                         </button>
                       </div>

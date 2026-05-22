@@ -31,6 +31,28 @@ import {
   mapSupplierTaxForPoView,
   trimSupplierTaxCode,
 } from '../utils/poSupplierTax';
+import {
+  buildPoExcelFlatRows,
+  excelContentDisposition,
+  fetchPosForExcelExport,
+  writePoExcelBuffer,
+} from '../utils/poExcelExport';
+import {
+  executePoPartialLineCancel,
+  formatPoPartialLineCancelMessage,
+  resolveLegacyCancelRequestedPo,
+} from '../utils/executePoPartialLineCancel';
+
+import {
+  buildQuotationDeliveryMaps,
+  resolvePoLineExpectedDeliveryYmd,
+} from '../utils/poLineEta';
+
+function maxQuotationDeliveryDate(items: Array<{ deliveryDate?: Date | null }>): Date | undefined {
+  const dates = items.map((it) => it.deliveryDate).filter((d): d is Date => d != null);
+  if (dates.length === 0) return undefined;
+  return new Date(Math.max(...dates.map((d) => d.getTime())));
+}
 
 /**
  * Keep this list backward-compatible with databases that have not run the
@@ -510,6 +532,9 @@ export const createDraftPOs = async (
           const seq = await allocateNextCounter(tx, seqKey, () => scanMaxPODraftYearSuffix(tx, year));
           const poNumber = `PO-DRAFT-${year}-${String(seq).padStart(3, '0')}`;
           const totalAmount = group.items.reduce((s, it) => s + Number(it.totalPrice || 0), 0);
+          const poDeliveryDate =
+            maxQuotationDeliveryDate(group.items) ??
+            (pr.requiredDate ? new Date(pr.requiredDate) : undefined);
           const po = await tx.purchaseOrder.create({
             data: {
               purchaseRequestId: prId,
@@ -518,7 +543,7 @@ export const createDraftPOs = async (
               status: 'DRAFT',
               totalAmount,
               currency: pr.currency,
-              deliveryDate: pr.requiredDate ? new Date(pr.requiredDate) : undefined,
+              deliveryDate: poDeliveryDate,
               createdById: userId,
               companyId: pr.companyId,
             },
@@ -537,7 +562,16 @@ export const createDraftPOs = async (
                 unit: it.unit,
                 unitPrice: it.unitPrice,
                 amount: it.totalPrice ?? 0,
+                expectedDeliveryDate: it.deliveryDate ?? undefined,
               },
+            });
+            await tx.purchaseRequestItem.updateMany({
+              where: {
+                id: prItemId,
+                deletedAt: null,
+                status: 'FULFILLED' as any,
+              },
+              data: { status: 'SUPPLIER_SELECTED' as any },
             });
           }
           list.push({
@@ -578,6 +612,18 @@ export const getPOList = async (
     const userId = request.user?.userId;
     if (!userId) return reply.code(401).send({ error: 'Unauthorized' });
     const q = request.query as { poCode?: string; prCode?: string; supplier?: string; status?: string; from?: string; to?: string };
+
+    const staleCancel = await prisma.purchaseOrder.findMany({
+      where: { deletedAt: null, createdById: userId, status: 'CANCEL_REQUESTED' as any },
+      select: { id: true },
+    });
+    for (const row of staleCancel) {
+      try {
+        await resolveLegacyCancelRequestedPo(row.id, userId);
+      } catch (err) {
+        console.warn('resolveLegacyCancelRequestedPo list', row.id, err);
+      }
+    }
 
     const pos = await prisma.purchaseOrder.findMany({
       where: {
@@ -640,7 +686,7 @@ export const getPODetail = async (
     if (!userId) return reply.code(401).send({ error: 'Unauthorized' });
     const { poId } = request.params as { poId: string };
 
-    const po = await prisma.purchaseOrder.findFirst({
+    let po = await prisma.purchaseOrder.findFirst({
       where: { id: poId, deletedAt: null },
       include: {
         purchaseRequest: { select: { id: true, prNumber: true, totalAmount: true, currency: true, requiredDate: true } },
@@ -654,17 +700,69 @@ export const getPODetail = async (
     if (!po) return reply.code(404).send({ error: 'PO not found' });
     if (po.createdById !== userId) return reply.code(403).send({ error: 'Bạn không có quyền xem PO này' });
 
+    if (String(po.status) === 'CANCEL_REQUESTED') {
+      await resolveLegacyCancelRequestedPo(po.id, userId);
+      po = await prisma.purchaseOrder.findFirst({
+        where: { id: poId, deletedAt: null },
+        include: {
+          purchaseRequest: { select: { id: true, prNumber: true, totalAmount: true, currency: true, requiredDate: true } },
+          supplier: true,
+          createdBy: { select: { username: true } },
+          items: true,
+          attachments: { where: { deletedAt: null } },
+        },
+      });
+      if (!po) return reply.code(404).send({ error: 'PO not found' });
+    }
+
     const prItemIds = po.items.map((i) => i.purchaseRequestItemId).filter(Boolean);
     const prItems =
       prItemIds.length > 0
         ? await prisma.purchaseRequestItem.findMany({
             where: { id: { in: prItemIds } },
-            select: { id: true, partNo: true, manufacturer: true },
+            select: {
+              id: true,
+              partNo: true,
+              manufacturer: true,
+              desiredDeliveryDate: true,
+            },
           })
         : [];
     const prItemMetaMap = new Map(
-      prItems.map((p) => [p.id, { partNo: p.partNo ?? '', manufacturer: p.manufacturer ?? '' }])
+      prItems.map((p) => [
+        p.id,
+        {
+          partNo: p.partNo ?? '',
+          manufacturer: p.manufacturer ?? '',
+          desiredDeliveryDate: p.desiredDeliveryDate,
+        },
+      ])
     );
+
+    const supplierSelections = await prisma.supplierSelection.findMany({
+      where: { purchaseRequestId: po.purchaseRequestId },
+      select: {
+        purchaseRequestItemId: true,
+        quotation: {
+          select: {
+            supplierId: true,
+            items: {
+              where: { deletedAt: null },
+              select: {
+                id: true,
+                purchaseRequestItemId: true,
+                deliveryDate: true,
+              },
+            },
+          },
+        },
+      },
+    });
+    const selectionForPoSupplier = supplierSelections.filter(
+      (s) => s.quotation.supplierId === po.supplierId
+    );
+    const { byQuotationItemId, byPrItemId } =
+      buildQuotationDeliveryMaps(selectionForPoSupplier);
 
     const rfqNumbers = await resolveRfqNumbersForPo(
       po.purchaseRequestId,
@@ -679,12 +777,16 @@ export const getPODetail = async (
       quotationItemIds.length > 0
         ? await prisma.quotationItem.findMany({
             where: { id: { in: quotationItemIds }, deletedAt: null },
-            select: { id: true, vatPercent: true },
+            select: { id: true, vatPercent: true, deliveryDate: true },
           })
         : [];
     const vatPercentByQuotationItemId = new Map(
       quotationItems.map((qi) => [qi.id, qi.vatPercent != null ? Number(qi.vatPercent) : null])
     );
+    for (const qi of quotationItems) {
+      const ymd = qi.deliveryDate ? qi.deliveryDate.toISOString().slice(0, 10) : null;
+      if (ymd) byQuotationItemId.set(qi.id, ymd);
+    }
 
     let approvedByUsername: string | null = null;
     if (po.approvedById) {
@@ -755,13 +857,27 @@ export const getPODetail = async (
           return inferVatPercentFromLine(Number(i.qty), Number(i.unitPrice), Number(i.amount));
         })(),
         confirmedQty: confirmed,
-        expectedDeliveryDate: i.expectedDeliveryDate
-          ? i.expectedDeliveryDate.toISOString().slice(0, 10)
-          : null,
+        expectedDeliveryDate: resolvePoLineExpectedDeliveryYmd({
+          expectedDeliveryDate: i.expectedDeliveryDate,
+          quotationItemId: i.quotationItemId,
+          purchaseRequestItemId: i.purchaseRequestItemId,
+          quotationDeliveryByQuotationItemId: byQuotationItemId,
+          quotationDeliveryByPrItemId: byPrItemId,
+          desiredDeliveryDate:
+            prItemMetaMap.get(i.purchaseRequestItemId)?.desiredDeliveryDate ?? null,
+        }),
         supplierConfirmedAt: i.supplierConfirmedAt?.toISOString() ?? null,
         qtyReceived: received,
         qtyRemaining: remaining,
         lineStatus: i.lineStatus,
+        lineCancelReason: (i as { lineCancelReason?: string | null }).lineCancelReason ?? null,
+        cancelledRemainingQty:
+          (i as { cancelledRemainingQty?: { toString(): string } | null }).cancelledRemainingQty !=
+          null
+            ? toPoNum(
+                (i as { cancelledRemainingQty: { toString(): string } }).cancelledRemainingQty
+              )
+            : null,
       };
       }),
       attachments: po.attachments.map((a) => ({ id: a.id, fileName: a.fileName, fileUrl: a.fileUrl })),
@@ -774,7 +890,7 @@ export const getPODetail = async (
   }
 };
 
-/** Buyer gửi yêu cầu hủy PO để Buyer Leader duyệt */
+/** Buyer hủy phần còn lại trên dòng PO (áp dụng ngay, không chờ duyệt). */
 export const requestCancelPO = async (
   request: AuthenticatedRequest,
   reply: FastifyReply
@@ -785,15 +901,36 @@ export const requestCancelPO = async (
     const { poId } = request.params as { poId: string };
     const body = request.body as { reason?: string; poItemIds?: string[] };
     const reason = body?.reason?.trim();
-    if (!reason) return reply.code(400).send({ error: 'Lý do hủy PO là bắt buộc' });
+    if (!reason) return reply.code(400).send({ error: 'Lý do hủy dòng PO là bắt buộc' });
 
     const po = await prisma.purchaseOrder.findFirst({
       where: { id: poId, deletedAt: null, createdById: userId },
       include: { items: true },
     });
     if (!po) return reply.code(404).send({ error: 'PO not found' });
+    if ((po.status as string) === 'CANCEL_REQUESTED') {
+      const legacyIds = parsePoItemIdsJson(po.cancelRequestedPoItemIds);
+      const legacyReason = po.rejectReason?.trim();
+      if (legacyIds?.length && legacyReason) {
+        const result = await executePoPartialLineCancel({
+          purchaseOrderId: po.id,
+          cancelPoItemIds: legacyIds,
+          lineCancelReason: legacyReason,
+          actorUserId: userId,
+        });
+        return reply.send({
+          message: formatPoPartialLineCancelMessage(result),
+          status: result.poNextStatus,
+          cancelledLineCount: result.cancelledLineCount,
+          poRemainsActive: result.poRemainsActive,
+        });
+      }
+      return reply.code(400).send({
+        error: 'PO kẹt trạng thái chờ hủy nhưng thiếu lý do hoặc danh sách dòng. Liên hệ IT.',
+      });
+    }
     if (!['CREATED', 'SENT', 'CONFIRMED', 'PARTIAL_RECEIVED'].includes(po.status as string)) {
-      return reply.code(400).send({ error: 'Chỉ yêu cầu hủy được PO đã duyệt và chưa nhận đủ.' });
+      return reply.code(400).send({ error: 'Chỉ hủy dòng được khi PO đã duyệt và còn phần chưa nhận kho.' });
     }
 
     const receivedByItem = await getReceivedByPoItemIds(po.items.map((i) => i.id));
@@ -802,7 +939,7 @@ export const requestCancelPO = async (
       .map((i) => i.id);
     const eligibleSet = new Set(eligibleIds);
 
-    let cancelRequestedJson: string | null = null;
+    let cancelPoItemIds: string[] = [];
     if (Array.isArray(body.poItemIds) && body.poItemIds.length > 0) {
       for (const id of body.poItemIds) {
         if (!eligibleSet.has(id)) {
@@ -811,24 +948,42 @@ export const requestCancelPO = async (
           });
         }
       }
-      cancelRequestedJson = JSON.stringify([...new Set(body.poItemIds)]);
+      cancelPoItemIds = [...new Set(body.poItemIds)];
     } else if (eligibleIds.length > 0) {
-      cancelRequestedJson = JSON.stringify(eligibleIds);
+      cancelPoItemIds = eligibleIds;
     }
 
-    await prisma.purchaseOrder.update({
-      where: { id: po.id },
-      data: {
-        status: 'CANCEL_REQUESTED' as any,
-        rejectReason: reason,
-        cancelRequestedPoItemIds: cancelRequestedJson,
-      },
+    if (cancelPoItemIds.length === 0) {
+      return reply.code(400).send({
+        error: 'Không còn dòng nào có phần chưa nhận kho để hủy.',
+      });
+    }
+
+    const result = await executePoPartialLineCancel({
+      purchaseOrderId: po.id,
+      cancelPoItemIds,
+      lineCancelReason: reason,
+      actorUserId: userId,
     });
 
-    reply.send({ message: 'Đã gửi yêu cầu hủy PO. Buyer Leader sẽ duyệt.', status: 'CANCEL_REQUESTED' });
+    reply.send({
+      message: formatPoPartialLineCancelMessage(result),
+      status: result.poNextStatus,
+      cancelledLineCount: result.cancelledLineCount,
+      poRemainsActive: result.poRemainsActive,
+    });
   } catch (error: any) {
+    const msg = error?.message ?? 'Internal server error';
+    if (
+      msg.includes('not found') ||
+      msg.includes('không hợp lệ') ||
+      msg.includes('Không có dòng') ||
+      msg.includes('bắt buộc')
+    ) {
+      return reply.code(400).send({ error: msg });
+    }
     console.error('requestCancelPO error:', error);
-    reply.code(500).send({ error: 'Internal server error', message: error.message });
+    reply.code(500).send({ error: 'Internal server error', message: msg });
   }
 };
 
@@ -1206,6 +1361,60 @@ export const getPODashboard = async (
     });
   } catch (error: any) {
     console.error('Get PO dashboard error:', error);
+    reply.code(500).send({ error: 'Internal server error', message: error.message });
+  }
+};
+
+/** Xuất Excel PO (mỗi dòng hàng = 1 row) — Buyer, theo bộ lọc danh sách PO */
+export const exportBuyerPOExcel = async (
+  request: AuthenticatedRequest,
+  reply: FastifyReply
+) => {
+  try {
+    const userId = request.user?.userId;
+    if (!userId) return reply.code(401).send({ error: 'Unauthorized' });
+
+    const q = request.query as {
+      poCode?: string;
+      prCode?: string;
+      supplier?: string;
+      status?: string;
+    };
+
+    let pos = await fetchPosForExcelExport({
+      createdById: userId,
+      poNumber: { not: { startsWith: 'MOCK-' } },
+      purchaseRequest: { prNumber: { not: { startsWith: 'MOCK-' } } },
+    });
+
+    if (q.poCode?.trim()) {
+      const needle = q.poCode.trim().toLowerCase();
+      pos = pos.filter((p) => p.poNumber.toLowerCase().includes(needle));
+    }
+    if (q.prCode?.trim()) {
+      const needle = q.prCode.trim().toLowerCase();
+      pos = pos.filter((p) => p.purchaseRequest.prNumber.toLowerCase().includes(needle));
+    }
+    if (q.supplier?.trim()) {
+      const needle = q.supplier.trim().toLowerCase();
+      pos = pos.filter((p) => p.supplier.name.toLowerCase().includes(needle));
+    }
+    if (q.status?.trim()) {
+      pos = pos.filter((p) => p.status === q.status.trim());
+    }
+
+    const flatRows = await buildPoExcelFlatRows(pos, 'buyer');
+    const buf = await writePoExcelBuffer(flatRows, 'Danh sách PO');
+    const stamp = new Date().toISOString().slice(0, 10);
+    reply
+      .header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+      .header(
+        'Content-Disposition',
+        excelContentDisposition(`PO_Buyer_${stamp}.xlsx`)
+      );
+    return reply.send(buf);
+  } catch (error: any) {
+    console.error('exportBuyerPOExcel error:', error);
     reply.code(500).send({ error: 'Internal server error', message: error.message });
   }
 };

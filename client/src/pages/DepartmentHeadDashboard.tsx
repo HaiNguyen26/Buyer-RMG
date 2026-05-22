@@ -12,6 +12,7 @@ import {
   User,
   FilePlus,
   Package,
+  Radar,
 } from 'lucide-react';
 import DashboardHeader from '../components/DashboardHeader';
 import { StandardDashboardSidebar } from '../components/StandardDashboardSidebar';
@@ -21,6 +22,7 @@ import {
   dashboardMainOutletCompactClass,
   dashboardMainOutletFlushClass,
   dashboardMainScrollableOverviewWideXFlushTopClass,
+  dashboardMainScrollChrome,
   dashboardOutletWorkspaceFlexClass,
 } from '../constants/dashboardLayout';
 import { requestorMainShellPaddingClass } from '../constants/requestorLayout';
@@ -71,6 +73,11 @@ const DepartmentHeadDashboard = () => {
       title: 'Trung tâm tổng quan',
       items: [
         { icon: Building2, label: 'Tổng quan PR phòng ban', path: '/dashboard/department-head/department-overview' },
+        {
+          icon: Radar,
+          label: 'Giám sát mua hàng',
+          path: '/dashboard/department-head/procurement-monitoring',
+        },
       ],
     },
     {
@@ -96,6 +103,7 @@ const DepartmentHeadDashboard = () => {
     if (p.includes('/my-prs/create')) return 'Tạo Phiếu yêu cầu (PR)';
     if (p.includes('/my-prs')) return 'PR của tôi';
     if (p.includes('/pr-approval')) return 'Duyệt PR phòng ban';
+    if (p.includes('/procurement-monitoring')) return 'Theo dõi PR/PO đội trực tiếp — SLA, trễ giao, mua lại';
     if (p.includes('/department-overview')) return 'Tổng quan PR phòng ban';
     if (p.includes('/notifications')) return 'Thông báo';
     if (p.includes('/profile')) return 'Hồ sơ cá nhân';
@@ -156,7 +164,8 @@ const DepartmentHeadDashboard = () => {
     : isDeptHeadStockIssues
       ? [
           'flex h-full min-h-0 min-w-0 w-full flex-1 flex-col basis-0',
-          'overflow-y-auto overflow-x-hidden scrollbar-hide touch-pan-y bg-[#f1f5f9]',
+          dashboardMainScrollChrome,
+          'bg-[#f1f5f9]',
         ].join(' ')
     : [
         dashboardMainScrollableOverviewWideXFlushTopClass,
@@ -176,7 +185,7 @@ const DepartmentHeadDashboard = () => {
   ].join(' ');
 
   return (
-    <div className={rootShellClass} style={{ minHeight: '100dvh' }}>
+    <div data-dashboard-shell className={rootShellClass} style={{ minHeight: '100dvh' }}>
       {mobileNavOpen ? (
         <button
           type="button"
@@ -211,7 +220,11 @@ const DepartmentHeadDashboard = () => {
             onMobileNavToggle={toggleMobileNav}
           />
         </div>
-        <div ref={contentScrollRef} className={departmentHeadMainScrollClass}>
+        <div
+          ref={contentScrollRef}
+          className={departmentHeadMainScrollClass}
+          {...(!isDepartmentHeadPRForm ? { 'data-dashboard-main-scroll': true as const } : {})}
+        >
           <div key={location.pathname} className={departmentHeadOutletClass}>
             <Outlet />
           </div>

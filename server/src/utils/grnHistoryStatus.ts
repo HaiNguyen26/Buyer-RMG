@@ -10,16 +10,25 @@ export type GrnTimelineEvent = {
   done: boolean;
 };
 
-type PoItemSnap = {
+export type PoItemSnap = {
   id: string;
   lineNo: number;
   qty: Prisma.Decimal;
   confirmedQty: Prisma.Decimal | null;
+  lineStatus?: string;
   description: string;
   purchaseRequestItem: { partNo: string | null; description: string | null };
 };
 
-export { formatGrnHistoryDateTime, formatTimelineStamp } from './grnReceiveDate';
+/** Kho không còn chờ nhận thêm trên PO (đủ hàng hoặc buyer đã hủy phần còn lại → CLOSED). */
+export function isPoWarehouseReceiptSettled(poHeaderStatus: string): boolean {
+  const s = String(poHeaderStatus ?? '').toUpperCase();
+  return s === 'FULLY_RECEIVED' || s === 'CLOSED';
+}
+
+import { formatGrnHistoryDateTime, formatTimelineStamp } from './grnReceiveDate';
+
+export { formatGrnHistoryDateTime, formatTimelineStamp };
 
 /** Trạng thái hiển thị một phiếu GRN theo dòng nhận lần này vs còn lại trước phiếu. */
 export function computeGrnDisplayStatus(
@@ -51,7 +60,10 @@ export function computeGrnDisplayStatus(
       continue;
     }
     const before = receivedBeforeByItem.get(line.poItemId) ?? 0;
-    const remaining = lineRemainingQty(it.confirmedQty, it.qty, before);
+    const remaining =
+      String(it.lineStatus ?? '') === 'CANCELLED'
+        ? 0
+        : lineRemainingQty(it.confirmedQty, it.qty, before);
     if (qty < remaining - 1e-9) allFull = false;
   }
 
@@ -59,7 +71,7 @@ export function computeGrnDisplayStatus(
   return allFull ? 'FULL' : 'PARTIAL';
 }
 
-/** Badge on history list — reflects current PO completion, not only this receipt snapshot. */
+/** Badge lịch sử GRN — nếu PO đã kết thúc nhận kho (CLOSED / FULLY_RECEIVED) thì phiếu cũ hiển thị FULL. */
 export function resolveGrnListDisplayStatus(
   receiptStatus: GrnHistoryDisplayStatus,
   poHeaderStatus: string
@@ -67,8 +79,19 @@ export function resolveGrnListDisplayStatus(
   if (receiptStatus === 'CANCELLED' || receiptStatus === 'PENDING_QC') {
     return receiptStatus;
   }
-  if (poHeaderStatus === 'FULLY_RECEIVED') return 'FULL';
+  if (isPoWarehouseReceiptSettled(poHeaderStatus)) return 'FULL';
   return receiptStatus;
+}
+
+export function resolveGrnDisplayStatusForPo(
+  note: string | null | undefined,
+  lines: { poItemId: string; qtyReceived: Prisma.Decimal }[],
+  poItems: Map<string, PoItemSnap>,
+  receivedBeforeByItem: Map<string, number>,
+  poHeaderStatus: string
+): GrnHistoryDisplayStatus {
+  const receipt = computeGrnDisplayStatus(note, lines, poItems, receivedBeforeByItem);
+  return resolveGrnListDisplayStatus(receipt, poHeaderStatus);
 }
 
 export function buildGrnTimeline(input: {

@@ -99,8 +99,6 @@ export function computeIncomingLineDisplayStatus(opts: {
 }): IncomingLineDisplayStatus {
   const today = opts.today ?? todayDateOnlyUtc();
   const cap = opts.confirmedQty;
-  const remaining =
-    cap != null ? Math.max(0, cap - opts.receivedQty) : Math.max(0, (cap ?? 0) - opts.receivedQty);
 
   if (
     (opts.poHeaderStatus === 'SENT' || opts.poHeaderStatus === 'ISSUED') &&
@@ -109,6 +107,21 @@ export function computeIncomingLineDisplayStatus(opts: {
     return 'AwaitingConfirm';
   }
 
+  if (
+    opts.poHeaderStatus === 'CLOSED' ||
+    opts.poHeaderStatus === 'FULLY_RECEIVED'
+  ) {
+    return 'Received';
+  }
+
+  /** PO nháp/chờ duyệt chưa có SL xác nhận — không coi remaining=0 là đã nhận đủ. */
+  if (cap == null) {
+    if (opts.receivedQty > 1e-9) return 'Partial';
+    if (opts.expectedDate && opts.expectedDate < today) return 'Delayed';
+    return 'Incoming';
+  }
+
+  const remaining = Math.max(0, cap - opts.receivedQty);
   if (remaining <= 1e-9) return 'Received';
   if (opts.receivedQty > 1e-9) return 'Partial';
   if (opts.expectedDate && opts.expectedDate < today) return 'Delayed';

@@ -20,12 +20,18 @@ import {
 import { syncPurchaseRequestAfterGoodsReceipt } from '../utils/syncPrAfterGrn';
 import {
   buildGrnTimeline,
-  computeGrnDisplayStatus,
+  resolveGrnDisplayStatusForPo,
   formatGrnHistoryDateTime,
   grnItemLabel,
   type GrnHistoryDisplayStatus,
 } from '../utils/grnHistoryStatus';
 import { parseReceiveDateInput } from '../utils/grnReceiveDate';
+import {
+  buildPoExcelFlatRows,
+  excelContentDisposition,
+  fetchPosForExcelExport,
+  writePoExcelBuffer,
+} from '../utils/poExcelExport';
 import { emitWarehouseGrnUpdate } from '../config/socket';
 import { getIO } from '../utils/getIO';
 
@@ -106,13 +112,14 @@ async function buildPoGrnSummariesByPoId(poIds: string[]): Promise<Record<string
       lines: { select: { poItemId: true, qtyReceived: true } },
       purchaseOrder: {
         select: {
+          status: true,
           items: {
-            where: { lineStatus: { not: 'CANCELLED' } },
             select: {
               id: true,
               lineNo: true,
               qty: true,
               confirmedQty: true,
+              lineStatus: true,
               description: true,
               purchaseRequestItem: { select: { partNo: true, description: true } },
             },
@@ -136,7 +143,13 @@ async function buildPoGrnSummariesByPoId(poIds: string[]): Promise<Record<string
     out[poId] = chron.map((grn) => {
       const poItems = new Map(grn.purchaseOrder.items.map((i) => [i.id, i]));
       const before = receivedBeforeForGrn(chron, grn.id);
-      const status = computeGrnDisplayStatus(grn.note, grn.lines, poItems, before);
+      const status = resolveGrnDisplayStatusForPo(
+        grn.note,
+        grn.lines,
+        poItems,
+        before,
+        grn.purchaseOrder.status
+      );
       return {
         id: grn.id,
         grnNumber: grn.grnNumber,
@@ -317,6 +330,81 @@ export async function listIncomingPurchaseOrders(
   const poGrns = await buildPoGrnSummariesByPoId(poIds);
 
   return reply.send({ rows, poGrns, poProgress });
+}
+
+/** Xuất Excel PO incoming — mỗi dòng hàng một row, đủ trường header + line */
+export async function exportWarehouseIncomingPOExcel(
+  request: AuthenticatedRequest,
+  reply: FastifyReply
+) {
+  if (!allow(request.user?.role)) {
+    return reply.code(403).send({ error: 'Forbidden' });
+  }
+
+  const q = (request.query as Record<string, string>) ?? {};
+  const vendor = (q.vendor ?? '').trim();
+  const from = (q.from ?? '').trim();
+  const to = (q.to ?? '').trim();
+  const statusFilter = (q.status ?? 'all').trim().toLowerCase();
+
+  let statuses: Array<'SENT' | 'CONFIRMED' | 'PARTIAL_RECEIVED'> = [
+    'SENT',
+    'CONFIRMED',
+    'PARTIAL_RECEIVED',
+  ];
+  if (statusFilter === 'pending') statuses = ['SENT', 'CONFIRMED'];
+  else if (statusFilter === 'partial') statuses = ['PARTIAL_RECEIVED'];
+
+  const pos = await fetchPosForExcelExport({
+    status: { in: statuses },
+    ...(vendor
+      ? {
+          supplier: {
+            OR: [
+              { name: { contains: vendor, mode: 'insensitive' } },
+              { code: { contains: vendor, mode: 'insensitive' } },
+            ],
+          },
+        }
+      : {}),
+  });
+
+  let flatRows = await buildPoExcelFlatRows(pos, 'warehouse');
+
+  if (from || to) {
+    flatRows = flatRows.filter((row) => {
+      const eta = String(row['ETA dòng'] ?? '');
+      if (!eta) return false;
+      const [d, m, y] = eta.split('/').map(Number);
+      if (!d || !m || !y) return false;
+      const iso = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+      if (from && iso < from) return false;
+      if (to && iso > to) return false;
+      return true;
+    });
+  }
+
+  if (statusFilter === 'delayed') {
+    flatRows = flatRows.filter((row) => row['Trạng thái incoming (dòng)'] === 'Trễ ETA');
+  } else if (statusFilter === 'partial') {
+    flatRows = flatRows.filter((row) => row['Trạng thái incoming (dòng)'] === 'Partial');
+  } else if (statusFilter === 'pending') {
+    flatRows = flatRows.filter(
+      (row) =>
+        row['Trạng thái incoming (dòng)'] === 'Chờ confirm' ||
+        row['Trạng thái incoming (dòng)'] === 'Incoming'
+    );
+  }
+
+  const buf = await writePoExcelBuffer(flatRows, 'PO chờ nhận');
+  const stamp = new Date().toISOString().slice(0, 10);
+  reply
+    .header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    .header(
+      'Content-Disposition',
+      excelContentDisposition(`PO_Warehouse_Incoming_${stamp}.xlsx`)
+    );
+  return reply.send(buf);
 }
 
 export async function getPurchaseOrderForGrn(request: AuthenticatedRequest, reply: FastifyReply) {
@@ -858,8 +946,16 @@ export async function listGrnHistory(request: AuthenticatedRequest, reply: Fasti
           supplierConfirmedAt: true,
           supplier: { select: { name: true, code: true } },
           items: {
-            where: { lineStatus: { not: 'CANCELLED' } },
-            include: { purchaseRequestItem: { select: { partNo: true, description: true } } },
+            select: {
+              id: true,
+              lineNo: true,
+              qty: true,
+              confirmedQty: true,
+              lineStatus: true,
+              unitPrice: true,
+              description: true,
+              purchaseRequestItem: { select: { partNo: true, description: true } },
+            },
           },
         },
       },
@@ -905,7 +1001,13 @@ export async function listGrnHistory(request: AuthenticatedRequest, reply: Fasti
     const unitPriceMap = new Map(po.items.map((i) => [i.id, { unitPrice: i.unitPrice }]));
     const poChron = chron.filter((g) => g.purchaseOrder.id === po.id);
     const before = receivedBeforeForGrn(poChron, grn.id);
-    const status = computeGrnDisplayStatus(grn.note, grn.lines, poItems, before);
+    const status = resolveGrnDisplayStatusForPo(
+      grn.note,
+      grn.lines,
+      poItems,
+      before,
+      po.status
+    );
 
     if (statusFilter !== 'ALL' && status !== statusFilter) continue;
 
@@ -1012,6 +1114,7 @@ export async function getGrnHistoryDetail(request: AuthenticatedRequest, reply: 
   const id = (request.params as { id?: string }).id?.trim();
   if (!id) return reply.code(400).send({ error: 'Thiếu id' });
 
+  try {
   const grn = await prisma.goodsReceipt.findUnique({
     where: { id },
     include: {
@@ -1026,7 +1129,6 @@ export async function getGrnHistoryDetail(request: AuthenticatedRequest, reply: 
           supplierConfirmedAt: true,
           supplier: { select: { name: true, code: true } },
           items: {
-            where: { lineStatus: { not: 'CANCELLED' } },
             orderBy: { lineNo: 'asc' },
             include: { purchaseRequestItem: { select: { partNo: true, description: true } } },
           },
@@ -1051,16 +1153,34 @@ export async function getGrnHistoryDetail(request: AuthenticatedRequest, reply: 
     select: { id: true, receivedAt: true, lines: { select: { poItemId: true, qtyReceived: true } } },
   });
 
-  const poItems = new Map(grn.purchaseOrder.items.map((i) => [i.id, i]));
+  const allPoItems = await prisma.pOItem.findMany({
+    where: { purchaseOrderId: grn.purchaseOrderId },
+    select: {
+      id: true,
+      lineNo: true,
+      qty: true,
+      confirmedQty: true,
+      lineStatus: true,
+      description: true,
+      purchaseRequestItem: { select: { partNo: true, description: true } },
+    },
+  });
+  const poItems = new Map(allPoItems.map((i) => [i.id, i]));
   const before = receivedBeforeForGrn(poGrns, grn.id);
-  const status = computeGrnDisplayStatus(grn.note, grn.lines, poItems, before);
+  const status = resolveGrnDisplayStatusForPo(
+    grn.note,
+    grn.lines,
+    poItems,
+    before,
+    grn.purchaseOrder.status
+  );
   const receiver =
     grn.receivedBy.fullName?.trim() || grn.receivedBy.username?.trim() || '—';
   const { date, time } = formatGrnHistoryDateTime(grn.receivedAt);
 
   const receivedTotalMap = await sumReceivedByPoItemIds(
     prisma,
-    grn.purchaseOrder.items.map((i) => i.id)
+    allPoItems.map((i) => i.id)
   );
 
   const items = grn.lines.map((line) => {
@@ -1122,4 +1242,9 @@ export async function getGrnHistoryDetail(request: AuthenticatedRequest, reply: 
     items,
     timeline,
   });
+  } catch (error: unknown) {
+    console.error('getGrnHistoryDetail error:', error);
+    const message = error instanceof Error ? error.message : 'Internal server error';
+    return reply.code(500).send({ error: 'Internal server error', message });
+  }
 }

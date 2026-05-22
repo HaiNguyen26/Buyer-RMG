@@ -7,6 +7,11 @@ import {
   getBuyerPerformance,
   getNotifications,
 } from '../controllers/managerController';
+import {
+  getProcurementMonitoring,
+  getProcurementMonitoringExport,
+  getProcurementMonitoringPrDetail,
+} from '../controllers/procurementMonitoringController';
 
 export default async function managerRoutes(fastify: FastifyInstance) {
   fastify.addHook('onRequest', authenticate);
@@ -16,4 +21,7 @@ export default async function managerRoutes(fastify: FastifyInstance) {
   fastify.get('/supplier-overview', { compress: false }, getSupplierOverview);
   fastify.get('/buyer-performance', { compress: false }, getBuyerPerformance);
   fastify.get('/notifications', { compress: false }, getNotifications);
+  fastify.get('/procurement-monitor', { compress: false }, getProcurementMonitoring);
+  fastify.get('/procurement-monitor/export', { compress: false }, getProcurementMonitoringExport);
+  fastify.get('/procurement-monitor/:prId', { compress: false }, getProcurementMonitoringPrDetail);
 }

@@ -9,9 +9,13 @@ import {
   buildCurrentStepBadge,
   buildDeliverySummary,
   buildProcurementListSnapshot,
+  buildSelectedQuotationDeliveryByPrItem,
   computeProcurementCostInsight,
   enrichProcurementCostInsight,
+  allPurchaseOrdersSettledForReceipt,
   deriveItemProcurementRow,
+  isReadyForStockIssuePickup,
+  type PoLineInput,
 } from '../utils/requestorProcurementTracking';
 
 function dec(n: number): Prisma.Decimal {
@@ -109,6 +113,41 @@ assert(rows[2]!.qtyReceived === 8 && rows[2]!.qtyCap === 20, 'line3 qty received
 assert(rows[3]!.statusKey === 'REVISION_REQUIRED', `line4 revision got ${rows[3]!.statusKey}`);
 assert(rows[3]!.eta === null, 'revision line has no ETA');
 
+const quoteMap = buildSelectedQuotationDeliveryByPrItem([
+  {
+    purchaseRequestItemId: 'item-quote',
+    quotation: {
+      items: [
+        {
+          purchaseRequestItemId: 'item-quote',
+          deliveryDate: new Date('2026-03-14'),
+          leadTimeDays: 10,
+        },
+      ],
+    },
+  },
+]);
+const quoteRow = deriveItemProcurementRow(
+  {
+    id: 'item-quote',
+    lineNo: 5,
+    description: 'Cable',
+    partNo: 'CBL-1',
+    qty: dec(5),
+    status: 'SUPPLIER_SELECTED',
+    departmentItemOutcome: null,
+    branchItemOutcome: null,
+    desiredDeliveryDate: new Date('2026-03-10'),
+  },
+  [],
+  new Map(),
+  'SUPPLIER_SELECTED',
+  quoteMap
+);
+assert(quoteRow.eta === '2026-03-14', `quotation eta ${quoteRow.eta}`);
+assert(quoteRow.etaOriginal === '2026-03-10', `eta original ${quoteRow.etaOriginal}`);
+assert(quoteRow.etaRevised === '2026-03-14', `eta revised ${quoteRow.etaRevised}`);
+
 const timeline = buildBusinessTimeline(prStatus, rows, poLines);
 assert(timeline.stages.length === 7, '7 business stages');
 assert(timeline.stages.some((s) => s.key === 'VENDOR_CONFIRMED' && s.completed), 'vendor confirmed stage');
@@ -132,7 +171,7 @@ assert(delivery.receivedCount === 0, 'none fully received');
 assert(delivery.partialCount === 1, 'one partial');
 assert(delivery.nextEta === '2026-05-20', `nextEta min ${delivery.nextEta}`);
 
-const badge = buildCurrentStepBadge(prStatus, rows, delivery);
+const badge = buildCurrentStepBadge(prStatus, rows, delivery, poLines);
 assert(
   badge.label === 'Chờ nhận kho' || badge.label === 'Trễ hạn giao',
   `badge incoming/delay ${badge.label}`
@@ -229,6 +268,27 @@ const poWinsOverAward = computeProcurementCostInsight(
 assert(poWinsOverAward.procurementCostAmount === 10_555_545, 'PO overrides award');
 
 const poItemId = 'po-line-1';
+const trackingPoLinesSent: PoLineInput[] = [
+  {
+    id: poItemId,
+    purchaseRequestItemId: 'item-a',
+    qty: 1,
+    confirmedQty: 1,
+    expectedDeliveryDate: null,
+    lineStatus: 'OPEN',
+    purchaseOrder: { poNumber: 'PO-1', status: 'SENT' },
+  },
+  {
+    id: 'po-line-2',
+    purchaseRequestItemId: 'item-b',
+    qty: 1,
+    confirmedQty: 1,
+    expectedDeliveryDate: null,
+    lineStatus: 'OPEN',
+    purchaseOrder: { poNumber: 'PO-1', status: 'SENT' },
+  },
+];
+
 const enrichedCompleted = enrichProcurementCostInsight(
   poConfirmed,
   { receivedCount: 2, totalCount: 2, partialCount: 0 },
@@ -251,7 +311,9 @@ const enrichedCompleted = enrichProcurementCostInsight(
   new Map([
     [poItemId, 1],
     ['po-line-2', 1],
-  ])
+  ]),
+  [{ status: 'SENT', totalAmount: dec(9_900_000), items: [] }],
+  { prStatus: 'CLOSED', trackingPoLines: trackingPoLinesSent }
 );
 assert(enrichedCompleted.purchasePhase === 'completed', 'phase completed when fully received');
 assert(
@@ -270,6 +332,163 @@ const enrichedSourcing = enrichProcurementCostInsight(
   new Map()
 );
 assert(enrichedSourcing.purchasePhase === 'sourcing', 'still sourcing when partial receipt');
+
+const partialPoClosed = enrichProcurementCostInsight(
+  { ...poConfirmed, procurementCostAmount: 11_000_000, buyerTargetAmount: 11_000_000 },
+  {
+    receivedCount: 0,
+    totalCount: 1,
+    partialCount: 0,
+    waitingReorderCount: 1,
+    waitingReorderQty: 1,
+  },
+  [
+    {
+      id: 'po-partial',
+      unitPrice: dec(1_000_000),
+      qty: dec(2),
+      amount: dec(2_200_000),
+      vatPercent: dec(10),
+    },
+  ],
+  new Map([['po-partial', 1]]),
+  [{ status: 'CLOSED', totalAmount: dec(2_200_000), items: [] }]
+);
+assert(
+  allPurchaseOrdersSettledForReceipt([{ status: 'CLOSED', totalAmount: 0, items: [] }]),
+  'CLOSED PO is settled'
+);
+assert(
+  partialPoClosed.procurementCostAmount === 1_000_000,
+  `closed PO cost = GRN qty only, got ${partialPoClosed.procurementCostAmount}`
+);
+assert(
+  partialPoClosed.finalPurchaseAmount === 1_000_000,
+  'final amount matches one received unit'
+);
+assert(partialPoClosed.purchasePhase === 'sourcing', 'PR still awaiting reorder stays sourcing phase');
+
+// PR chờ tạo PO: dòng FULFILLED trong DB không được coi Hoàn tất / 3-3 nhận kho
+const awaitingPoItems = [
+  {
+    id: 'it-1',
+    lineNo: 1,
+    description: 'Laptop',
+    partNo: 'LP-1',
+    qty: dec(1),
+    status: 'FULFILLED',
+    departmentItemOutcome: null,
+    branchItemOutcome: null,
+    desiredDeliveryDate: null,
+  },
+  {
+    id: 'it-2',
+    lineNo: 2,
+    description: 'Mouse',
+    partNo: 'MS-1',
+    qty: dec(1),
+    status: 'FULFILLED',
+    departmentItemOutcome: null,
+    branchItemOutcome: null,
+    desiredDeliveryDate: null,
+  },
+  {
+    id: 'it-3',
+    lineNo: 3,
+    description: 'Bag',
+    partNo: 'BG-1',
+    qty: dec(1),
+    status: 'FULFILLED',
+    departmentItemOutcome: null,
+    branchItemOutcome: null,
+    desiredDeliveryDate: null,
+  },
+];
+const awaitingPoRows = awaitingPoItems.map((item) =>
+  deriveItemProcurementRow(item, [], new Map(), 'PO_PENDING')
+);
+assert(
+  awaitingPoRows.every((r) => r.statusKey === 'SUPPLIER_SELECTED'),
+  'PO_PENDING + FULFILLED DB → still awaiting PO for requestor'
+);
+const awaitingDelivery = buildDeliverySummary(awaitingPoRows);
+assert(awaitingDelivery.receivedCount === 0, 'no false 3/3 received');
+const awaitingTimeline = buildBusinessTimeline('PO_PENDING', awaitingPoRows, []);
+assert(
+  !awaitingTimeline.stages.find((s) => s.key === 'COMPLETED')?.completed,
+  'timeline not completed while PO_PENDING'
+);
+const awaitingBadge = buildCurrentStepBadge('PO_PENDING', awaitingPoRows, awaitingDelivery, []);
+assert(awaitingBadge.label === 'Chờ tạo PO', `badge ${awaitingBadge.label}`);
+assert(
+  !isReadyForStockIssuePickup(awaitingDelivery, 'PO_PENDING', []),
+  'no stock pickup banner before PO phase'
+);
+
+// Buyer vừa tạo PO (PO_IN_PROGRESS + draft): FULFILLED DB không được 3/3 nhận kho
+const draftPoRows = awaitingPoItems.map((item) =>
+  deriveItemProcurementRow(
+    item,
+    [
+      {
+        id: 'po-draft-1',
+        purchaseRequestItemId: item.id,
+        qty: dec(1),
+        confirmedQty: null,
+        expectedDeliveryDate: new Date('2026-06-15'),
+        lineStatus: 'OPEN',
+        purchaseOrder: { poNumber: 'PO-DRAFT-2026-001', status: 'DRAFT' },
+      },
+    ],
+    new Map(),
+    'PO_IN_PROGRESS'
+  )
+);
+assert(
+  draftPoRows.every((r) => r.statusKey !== 'FULFILLED' && r.statusKey !== 'RECEIVED'),
+  `draft PO must not show received, got ${draftPoRows.map((r) => r.statusKey).join(',')}`
+);
+const draftDelivery = buildDeliverySummary(draftPoRows);
+assert(draftDelivery.receivedCount === 0, 'no false 3/3 after create draft PO');
+assert(
+  !isReadyForStockIssuePickup(draftDelivery, 'PO_IN_PROGRESS', [
+    {
+      id: 'po-draft-1',
+      purchaseRequestItemId: 'it-1',
+      qty: dec(1),
+      confirmedQty: null,
+      expectedDeliveryDate: null,
+      lineStatus: 'OPEN',
+      purchaseOrder: { poNumber: 'PO-DRAFT-2026-001', status: 'DRAFT' },
+    },
+  ]),
+  'no pickup banner on draft PO'
+);
+
+// PR cũ: header PO_PENDING nhưng đã GRN trên PO SENT — không được 100% Hoàn tất
+const legacyPoLines = [
+  {
+    id: 'po-legacy',
+    purchaseRequestItemId: 'it-1',
+    qty: dec(1),
+    confirmedQty: dec(1),
+    expectedDeliveryDate: new Date('2026-06-01'),
+    lineStatus: 'CONFIRMED',
+    purchaseOrder: { poNumber: 'PO-DRAFT-2026-001', status: 'SENT' },
+  },
+];
+const legacyRows = awaitingPoItems.slice(0, 1).map((item) =>
+  deriveItemProcurementRow(item, legacyPoLines, new Map([['po-legacy', 1]]), 'PO_PENDING')
+);
+assert(
+  legacyRows[0]!.statusKey === 'PO_SENT',
+  `legacy PO_PENDING+SENT+GRN got ${legacyRows[0]!.statusKey}`
+);
+const legacyTimeline = buildBusinessTimeline('PO_PENDING', legacyRows, legacyPoLines);
+assert(
+  !legacyTimeline.stages.find((s) => s.key === 'COMPLETED')?.completed,
+  'legacy not timeline completed'
+);
 
 console.log('OK requestorProcurementTracking smoke test');
 console.log(

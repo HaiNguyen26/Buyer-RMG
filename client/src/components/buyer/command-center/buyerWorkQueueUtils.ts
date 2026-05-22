@@ -2,7 +2,16 @@ import type { AssignedPRData } from '../../../services/buyerService';
 import type { BuyerWorkQueueTabId, UpcomingDeadlinePR } from './buyerCommandCenterTypes';
 
 export function filterRfqInProgress(prs: AssignedPRData[]): AssignedPRData[] {
-  return prs.filter((pr) => pr.status === 'RFQ_IN_PROGRESS' || pr.status === 'QUOTATION_RECEIVED');
+  return prs.filter(
+    (pr) =>
+      pr.status === 'COLLECTING_QUOTATION' ||
+      pr.status === 'RFQ_IN_PROGRESS' ||
+      pr.status === 'QUOTATION_RECEIVED'
+  );
+}
+
+export function filterAwaitingRepurchase(prs: AssignedPRData[]): AssignedPRData[] {
+  return prs.filter((pr) => pr.status === 'AWAITING_REORDER');
 }
 
 export function filterNeedInfo(prs: AssignedPRData[]): AssignedPRData[] {

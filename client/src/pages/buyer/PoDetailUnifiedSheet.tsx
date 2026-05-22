@@ -506,7 +506,22 @@ export function PoDetailUnifiedSheet({
                   ) : null}
                 </ul>
               ) : (
-                <PlaceholderText>{L.notUpdated}</PlaceholderText>
+                <div className="mt-1 space-y-1">
+                  <PlaceholderText>{L.notUpdated}</PlaceholderText>
+                  {canEdit ? (
+                    <p className="text-[11px] leading-snug text-amber-800">
+                      {lang === 'vi'
+                        ? 'Bấm Sửa PO → nhập ngân hàng NCC (lưu vào master NCC) hoặc cập nhật tại Quản lý NCC.'
+                        : 'Edit PO to enter beneficiary bank (saved to vendor master) or update in Vendor Management.'}
+                    </p>
+                  ) : (
+                    <p className="text-[11px] leading-snug text-slate-500">
+                      {lang === 'vi'
+                        ? 'Cập nhật TK tại Buyer Manager → Quản lý NCC → tab Thương mại.'
+                        : 'Update bank details in Buyer Manager → Vendor Management → Commercial tab.'}
+                    </p>
+                  )}
+                </div>
               )}
             </div>
           </div>
